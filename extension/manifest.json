@@ -2,13 +2,29 @@
   "manifest_version": 3,
   "name": "slicc",
   "version": "0.0.0",
-  "description": "Empty SLICC Chrome MV3 extension scaffold. Lifts CORS for sliccy.ai origins once migrated.",
-  "minimum_chrome_version": "116",
-  "permissions": [],
-  "host_permissions": [],
+  "description": "Lifts CORS for SLICC pages on sliccy.ai, so they reach the whole web.",
+  "minimum_chrome_version": "140",
+  "permissions": ["declarativeNetRequestWithHostAccess"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.sliccy.ai/*"],
+      "js": ["relay.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://*.sliccy.ai/*"],
+      "js": ["page.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [{ "id": "cors", "enabled": true, "path": "rules.json" }]
   },
   "action": {
     "default_title": "slicc"
