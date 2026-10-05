@@ -2,6 +2,10 @@ function serve(page) {
   const open = new Map();
   page.onmessage = ({ data }) => {
     const { id } = data;
+    if (data.read) {
+      open.get(id)?.postMessage({ read: true });
+      return;
+    }
     if (data.abort) {
       open.get(id)?.disconnect();
       open.delete(id);

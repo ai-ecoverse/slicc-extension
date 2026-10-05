@@ -9,6 +9,7 @@
 
   function receive(id, signal, resolve, reject) {
     let controller;
+    let pulled = () => {};
     const stop = () => {
       if (open.delete(id)) port1.postMessage({ id, abort: true });
     };
@@ -16,6 +17,12 @@
       start: (c) => {
         controller = c;
       },
+      pull: () =>
+        new Promise((resolve) => {
+          pulled = resolve;
+          if (open.has(id)) port1.postMessage({ id, read: true });
+          else resolve();
+        }),
       cancel: stop,
     });
     const abort = () => {
@@ -28,18 +35,22 @@
       if (message.status !== undefined) {
         const { status, statusText, headers } = message;
         resolve(new Response(bodiless.has(status) ? null : body, { status, statusText, headers }));
-      } else if (message.chunk) {
-        controller.enqueue(new Uint8Array(message.chunk));
-      } else {
-        open.delete(id);
-        signal?.removeEventListener('abort', abort);
-        if (message.end) controller.close();
-        else {
-          const error = new TypeError(message.error);
-          reject(error);
-          controller.error(error);
-        }
+        return;
       }
+      pulled();
+      if (message.chunk) {
+        controller.enqueue(new Uint8Array(message.chunk));
+        return;
+      }
+      open.delete(id);
+      signal?.removeEventListener('abort', abort);
+      if (message.end) {
+        controller.close();
+        return;
+      }
+      const error = new TypeError(message.error);
+      reject(error);
+      controller.error(error);
     });
   }
 
@@ -47,12 +58,19 @@
     init.signal?.throwIfAborted();
     const url = new URL(input, location.href).href;
     const method = init.method ?? 'GET';
-    const headers = [...new Headers(init.headers)];
-    const body = init.body == null ? undefined : await new Response(init.body).arrayBuffer();
+    const headers = new Headers(init.headers);
+    let body;
+    if (init.body != null) {
+      const serialized = new Response(init.body);
+      const type = serialized.headers.get('content-type');
+      if (type && !headers.has('content-type')) headers.set('content-type', type);
+      body = await serialized.arrayBuffer();
+    }
+    init.signal?.throwIfAborted();
     const id = ++next;
     return new Promise((resolve, reject) => {
       receive(id, init.signal, resolve, reject);
-      port1.postMessage({ id, url, method, headers, body }, body ? [body] : []);
+      port1.postMessage({ id, url, method, headers: [...headers], body }, body ? [body] : []);
     });
   }
 

@@ -62,12 +62,6 @@ export async function launch() {
   ].join(', ');
   const { child, url } = start(profile, rules);
   const cdp = await connect(await url);
-  const worker = await until(async () => {
-    const { targetInfos } = await cdp.send('Target.getTargets');
-    return targetInfos.find(
-      (target) => target.type === 'service_worker' && target.url.endsWith('/background.js')
-    );
-  }, 'the extension service worker');
 
   async function open(href) {
     const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
@@ -84,13 +78,15 @@ export async function launch() {
     }
     await send('Page.enable');
     await send('Page.navigate', { url: href });
-    const loaded = (target) => document.readyState === 'complete' && location.href === target;
+    const loaded = (target) =>
+      document.readyState === 'complete' &&
+      location.href === target &&
+      (!location.hostname.endsWith('.sliccy.ai') || 'sliccExtension' in globalThis);
     await until(() => evaluate(loaded, href).catch(() => false), href);
     return { evaluate, close: () => cdp.send('Target.closeTarget', { targetId }) };
   }
 
   return {
-    worker,
     upstream: remote,
     open,
     async close() {

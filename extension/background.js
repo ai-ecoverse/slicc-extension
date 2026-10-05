@@ -68,10 +68,12 @@ async function relay(port, request, signal) {
     headers.push([name, value]);
   });
   port.postMessage({ status: response.status, statusText: response.statusText, headers });
-  if (response.body) {
-    for await (const chunk of response.body) port.postMessage({ chunk: chunk.toBase64() });
-  }
-  port.postMessage({ end: true });
+  return response.body?.getReader();
+}
+
+async function read(port, reader) {
+  const next = reader ? await reader.read() : { done: true };
+  port.postMessage(next.done ? { end: true } : { chunk: next.value.toBase64() });
 }
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -80,10 +82,19 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
   const abort = new AbortController();
+  let reader;
+  let queue = Promise.resolve();
+  const fail = (error) => {
+    if (!abort.signal.aborted) port.postMessage({ error: String(error?.message ?? error) });
+    abort.abort();
+  };
   port.onDisconnect.addListener(() => abort.abort());
-  port.onMessage.addListener((request) => {
-    relay(port, request, abort.signal).catch((error) => {
-      if (!abort.signal.aborted) port.postMessage({ error: String(error?.message ?? error) });
-    });
+  port.onMessage.addListener((message) => {
+    const step = message.read
+      ? () => read(port, reader)
+      : async () => {
+          reader = await relay(port, message, abort.signal);
+        };
+    queue = queue.then(() => (abort.signal.aborted ? undefined : step())).catch(fail);
   });
 });

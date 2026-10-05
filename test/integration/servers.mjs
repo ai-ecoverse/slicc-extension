@@ -57,8 +57,26 @@ function collect(request) {
   });
 }
 
+async function stream(response, progress) {
+  const chunk = Buffer.alloc(64 * 1024, 7);
+  response.writeHead(200, { 'content-type': 'application/octet-stream' });
+  progress.sent = 0;
+  progress.done = false;
+  progress.closed = false;
+  response.on('close', () => {
+    progress.closed = true;
+  });
+  for (let i = 0; i < 8192 && !response.destroyed; i++) {
+    progress.sent += chunk.length;
+    if (!response.write(chunk)) await new Promise((resolve) => response.once('drain', resolve));
+  }
+  progress.done = !response.destroyed;
+  response.end();
+}
+
 export async function upstream(tls) {
   const seen = [];
+  const progress = {};
   const routes = {
     '/hello': (response) =>
       response
@@ -77,6 +95,7 @@ export async function upstream(tls) {
       response.writeHead(200, { 'content-type': 'application/octet-stream' }).end(bytes);
     },
     '/empty': (response) => response.writeHead(204).end(),
+    '/stream': (response) => stream(response, progress),
   };
   const server = await listen(tls, async (request, response) => {
     const { pathname } = new URL(request.url, 'https://upstream.test');
@@ -96,5 +115,5 @@ export async function upstream(tls) {
       })
     );
   });
-  return { ...server, seen };
+  return { ...server, seen, progress };
 }

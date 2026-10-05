@@ -189,3 +189,66 @@ test('the relay honours abort signals', async (t) => {
   }, `${remote}/bytes`);
   assert.deepEqual(result, { early: 'AbortError', late: 'AbortError' });
 });
+
+test('the relay reads the upstream only as fast as the page consumes it', async (t) => {
+  const page = await visit(t, slicc);
+  await page.evaluate(async (url) => {
+    const response = await globalThis.sliccExtension.fetch(url);
+    globalThis.slow = response.body.getReader();
+    await globalThis.slow.read();
+  }, `${remote}/stream`);
+  const { progress } = chrome.upstream;
+  let last = -1;
+  for (let i = 0; i < 40 && progress.sent !== last; i++) {
+    last = progress.sent;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.equal(progress.done, false);
+  assert.ok(progress.sent < 256 * 1024 * 1024, `upstream sent ${progress.sent} bytes`);
+  await page.evaluate(() => globalThis.slow.cancel());
+  for (let i = 0; i < 40 && !progress.closed; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(progress.closed, true);
+  assert.equal(progress.done, false);
+});
+
+test('the relay keeps the content type a body brings', async (t) => {
+  const page = await visit(t, slicc);
+  const echo = await page.evaluate(async (url) => {
+    const form = new FormData();
+    form.append('field', 'value');
+    const response = await globalThis.sliccExtension.fetch(url, { method: 'POST', body: form });
+    const params = await globalThis.sliccExtension.fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'text/x-mine' },
+      body: new URLSearchParams({ a: '1' }),
+    });
+    return { form: await response.json(), params: await params.json() };
+  }, `${remote}/form`);
+  assert.match(echo.form.headers['content-type'], /^multipart\/form-data; boundary=/);
+  assert.match(atob(echo.form.body), /name="field"\r\n\r\nvalue/);
+  assert.equal(echo.params.headers['content-type'], 'text/x-mine');
+  assert.equal(atob(echo.params.body), 'a=1');
+});
+
+test('the relay rejects a request aborted while its body is read', async (t) => {
+  const page = await visit(t, slicc);
+  const before = requests('POST', '/raced').length;
+  const result = await page.evaluate(async (url) => {
+    const controller = new AbortController();
+    const pending = globalThis.sliccExtension.fetch(url, {
+      method: 'POST',
+      body: new Blob(['x'.repeat(1024 * 1024)]),
+      signal: controller.signal,
+    });
+    controller.abort();
+    return pending.then(
+      () => 'resolved',
+      (error) => error.name
+    );
+  }, `${remote}/raced`);
+  assert.equal(result, 'AbortError');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(requests('POST', '/raced').length, before);
+});

@@ -27,7 +27,7 @@ const transport = globalThis.sliccExtension
 
 `sliccExtension.fetch(input, init)` takes a URL and the `method`, `headers`, `body` and `signal` of `init`, and answers a streaming `Response`. It rejects with a `TypeError` when the upstream is unreachable and with the signal's reason when aborted. When `sliccExtension` is there, the rules above are active too.
 
-The relay runs page → content script (a `MessagePort`) → service worker (a `chrome.runtime` port per request) → upstream. The service worker only accepts ports from content scripts in `https://` frames on `sliccy.ai`.
+The relay runs page → content script (a `MessagePort`) → service worker (a `chrome.runtime` port per request) → upstream. The body is pulled, one chunk per read, so a slow reader slows the download instead of filling memory. A body such as `FormData` keeps the `Content-Type` it brings unless the caller sets one. The service worker only accepts ports from content scripts in `https://` frames on `sliccy.ai`.
 
 ## Development
 
