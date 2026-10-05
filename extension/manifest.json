@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "slicc",
+  "version": "0.0.0",
+  "description": "Empty SLICC Chrome MV3 extension scaffold. Lifts CORS for sliccy.ai origins once migrated.",
+  "minimum_chrome_version": "116",
+  "permissions": [],
+  "host_permissions": [],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "slicc"
+  }
+}
