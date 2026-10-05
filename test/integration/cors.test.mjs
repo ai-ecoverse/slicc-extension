@@ -12,10 +12,8 @@ before(async () => {
 });
 after(() => chrome?.close());
 
-async function visit(t, href) {
-  const page = await chrome.open(href);
-  t.after(() => page.close());
-  return page;
+function visit(t, href) {
+  return chrome.visit(t, href);
 }
 
 function requests(method, path) {
