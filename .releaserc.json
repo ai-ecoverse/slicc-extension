@@ -4,6 +4,12 @@
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
     [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "node scripts/pack.mjs ${nextRelease.version}"
+      }
+    ],
+    [
       "@semantic-release/github",
       {
         "assets": [
