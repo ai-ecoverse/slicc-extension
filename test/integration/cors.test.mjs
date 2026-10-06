@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
 import { launch } from './chrome.mjs';
 
@@ -249,4 +251,15 @@ test('the relay rejects a request aborted while its body is read', async (t) => 
   assert.equal(result, 'AbortError');
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(requests('POST', '/raced').length, before);
+});
+
+test('the manifest key gives the Chrome Web Store ID', async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL('../../extension/manifest.json', import.meta.url))
+  );
+  const hash = createHash('sha256').update(Buffer.from(manifest.key, 'base64')).digest('hex');
+  const id = [...hash.slice(0, 32)].map((digit) =>
+    String.fromCharCode(97 + Number.parseInt(digit, 16))
+  );
+  assert.equal(id.join(''), 'akjjllgokmbgpbdbmafpiefnhidlmbgf');
 });

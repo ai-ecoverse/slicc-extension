@@ -24,6 +24,7 @@
   "devDependencies": {
     "@ai-ecoverse/slicc-shared-web": "1.4.0",
     "@biomejs/biome": "2.5.15",
+    "@semantic-release/exec": "7.1.0",
     "lefthook": "2.1.16",
     "playwright-core": "1.63.0",
     "semantic-release": "25.0.9"
