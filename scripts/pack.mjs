@@ -9,7 +9,12 @@ const outDir = join(root, 'artifacts');
 const zipPath = join(outDir, 'slicc-extension.zip');
 const stage = mkdtempSync(join(tmpdir(), 'slicc-extension-pack-'));
 const version = argv[2];
-if (version !== undefined && !/^\d+(\.\d+){0,3}$/.test(version)) {
+const parts = version?.split('.') ?? [];
+const valid =
+  parts.length <= 4 &&
+  parts.every((part) => /^(0|[1-9]\d{0,4})$/.test(part) && Number(part) <= 65535) &&
+  parts.some((part) => part !== '0');
+if (version !== undefined && !valid) {
   throw new Error(`not a Chrome extension version: ${version}`);
 }
 cpSync(join(root, 'extension'), stage, {
