@@ -2,6 +2,13 @@ function serve(page) {
   const open = new Map();
   page.onmessage = ({ data }) => {
     const { id } = data;
+    if (data.signIn) {
+      chrome.runtime.sendMessage({ type: 'slicc-sign-in', options: data.signIn }).then(
+        (answer) => page.postMessage({ id, ...answer }),
+        (error) => page.postMessage({ id, error: String(error?.message ?? error) })
+      );
+      return;
+    }
     if (data.read) {
       open.get(id)?.postMessage({ read: true });
       return;

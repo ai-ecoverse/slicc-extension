@@ -2,17 +2,19 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch as start } from '@ai-ecoverse/slicc-shared-web/harness';
-import { certificate, pages, upstream } from './servers.mjs';
+import { certificate, ims, pages, upstream } from './servers.mjs';
 
 export async function launch() {
   const dir = await mkdtemp(join(tmpdir(), 'slicc-extension-'));
   const tls = await certificate(dir);
   const site = await pages(tls);
   const remote = await upstream(tls);
+  const adobe = await ims(tls);
   const rules = [
     `MAP seven.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP other.test 127.0.0.1:${site.port}`,
     `MAP upstream.test 127.0.0.1:${remote.port}`,
+    `MAP ims-na1.adobelogin.com 127.0.0.1:${adobe.port}`,
   ].join(', ');
   const chrome = await start({
     roots: [['/', 'test/integration/page/']],
@@ -38,10 +40,11 @@ export async function launch() {
 
   return {
     upstream: remote,
+    ims: adobe,
     visit,
     async close() {
       await chrome.close();
-      await Promise.all([site.close(), remote.close()]);
+      await Promise.all([site.close(), remote.close(), adobe.close()]);
       await rm(dir, { recursive: true, force: true });
     },
   };

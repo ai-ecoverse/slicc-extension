@@ -74,7 +74,19 @@
     });
   }
 
+  function signIn({ clientId, scopes, imsEnvironment } = {}) {
+    const id = ++next;
+    return new Promise((resolve, reject) => {
+      open.set(id, ({ token, error }) => {
+        open.delete(id);
+        if (token) resolve(token);
+        else reject(new Error(error ?? 'slicc-extension: the sign-in failed'));
+      });
+      port1.postMessage({ id, signIn: { clientId, scopes, imsEnvironment } });
+    });
+  }
+
   Object.defineProperty(globalThis, 'sliccExtension', {
-    value: Object.freeze({ fetch: relayFetch }),
+    value: Object.freeze({ fetch: relayFetch, signIn }),
   });
 })();
