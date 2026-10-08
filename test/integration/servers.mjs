@@ -117,3 +117,21 @@ export async function upstream(tls) {
   });
   return { ...server, seen, progress };
 }
+
+export async function ims(tls) {
+  const authorized = [];
+  const server = await listen(tls, (request, response) => {
+    const url = new URL(request.url, 'https://ims-na1.adobelogin.com');
+    const query = Object.fromEntries(url.searchParams);
+    authorized.push(query);
+    const answer = {
+      good: { access_token: 'dummy-ims-token', state: query.state },
+      stranger: { access_token: 'dummy-ims-token', state: 'another-request' },
+      denied: { error: 'access_denied', state: query.state },
+      sibling: { access_token: 'dummy-ims-token', state: query.state },
+    }[query.client_id];
+    const to = query.client_id === 'sibling' ? `${query.redirect_uri}evil` : query.redirect_uri;
+    response.writeHead(302, { location: `${to}#${new URLSearchParams(answer)}` }).end();
+  });
+  return { ...server, authorized };
+}

@@ -4,6 +4,10 @@ const ready = dnr
   .getSessionRules()
   .then((rules) => dnr.updateSessionRules({ removeRuleIds: rules.map(({ id }) => id) }));
 let nextRule = 1;
+const ims = {
+  prod: 'https://ims-na1.adobelogin.com',
+  stg1: 'https://ims-na1-stg1.adobelogin.com',
+};
 
 function trusted(sender) {
   if (sender.id !== chrome.runtime.id || !URL.canParse(sender.url)) return false;
@@ -97,4 +101,43 @@ chrome.runtime.onConnect.addListener((port) => {
         };
     queue = queue.then(() => (abort.signal.aborted ? undefined : step())).catch(fail);
   });
+});
+
+async function signIn({ clientId, scopes, imsEnvironment } = {}) {
+  if (typeof clientId !== 'string' || typeof scopes !== 'string') {
+    throw new TypeError('slicc-extension: a sign-in needs a client id and scopes');
+  }
+  const state = crypto.randomUUID();
+  const redirect = chrome.identity.getRedirectURL('adobe');
+  const url = new URL('/ims/authorize/v2', ims[imsEnvironment] ?? ims.prod);
+  url.search = new URLSearchParams({
+    client_id: clientId,
+    scope: scopes,
+    response_type: 'token',
+    redirect_uri: redirect,
+    state,
+  }).toString();
+  const answer = await chrome.identity.launchWebAuthFlow({ url: url.href, interactive: true });
+  const back = URL.canParse(answer) ? new URL(answer) : null;
+  if (!back || back.origin + back.pathname !== redirect) {
+    throw new Error('slicc-extension: the sign-in came back elsewhere');
+  }
+  const fragment = new URLSearchParams(back.hash.slice(1));
+  if (fragment.get('state') !== state) {
+    throw new Error('slicc-extension: the sign-in answered another request');
+  }
+  const error = fragment.get('error');
+  if (error) throw new Error(fragment.get('error_description') ?? error);
+  const token = fragment.get('access_token');
+  if (!token) throw new Error('slicc-extension: the sign-in returned no token');
+  return token;
+}
+
+chrome.runtime.onMessage.addListener((message, sender, reply) => {
+  if (message?.type !== 'slicc-sign-in' || !trusted(sender)) return false;
+  signIn(message.options).then(
+    (token) => reply({ token }),
+    (error) => reply({ error: String(error?.message ?? error) })
+  );
+  return true;
 });

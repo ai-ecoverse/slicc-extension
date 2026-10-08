@@ -29,6 +29,10 @@ const transport = globalThis.sliccExtension
 
 The relay runs page → content script (a `MessagePort`) → service worker (a `chrome.runtime` port per request) → upstream. The body is pulled, one chunk per read, so a slow reader slows the download instead of filling memory. A body such as `FormData` keeps the `Content-Type` it brings unless the caller sets one. The service worker only accepts ports from content scripts in `https://` frames on `sliccy.ai`.
 
+## Adobe sign-in
+
+`sliccExtension.signIn({ clientId, scopes, imsEnvironment })` signs in to Adobe IMS with `chrome.identity.launchWebAuthFlow` and answers the access token. The service worker builds the authorize URL itself, for `ims-na1.adobelogin.com` (or `ims-na1-stg1` when `imsEnvironment` is `stg1`), with the extension's redirect `https://akjjllgokmbgpbdbmafpiefnhidlmbgf.chromiumapp.org/adobe` and a fresh `state`, and rejects any answer that comes back elsewhere or carries another `state`. It takes requests only from content scripts in `https://` frames on `sliccy.ai`, the same as the relay, so the token never goes to another origin. It rejects with IMS's `error_description` (or `error`) when the user refuses.
+
 ## Development
 
 ```bash
