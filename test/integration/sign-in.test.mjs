@@ -36,7 +36,7 @@ test('signs in to Adobe IMS through the extension redirect', async (t) => {
   );
 });
 
-test('rejects answers for another request, refusals and bad options', async (t) => {
+test('rejects answers for another request or redirect, refusals and bad options', async (t) => {
   const page = await chrome.visit(t, 'https://seven.sliccy.ai/');
   assert.match(
     (await signIn(page, { clientId: 'stranger', scopes: 'openid' })).error,
@@ -46,6 +46,10 @@ test('rejects answers for another request, refusals and bad options', async (t) 
     (await signIn(page, { clientId: 'denied', scopes: 'openid' })).error,
     'access_denied'
   );
+  assert.match(
+    (await signIn(page, { clientId: 'sibling', scopes: 'openid' })).error,
+    /came back elsewhere/
+  );
   assert.match((await signIn(page, { scopes: 'openid' })).error, /needs a client id/);
-  assert.equal(chrome.ims.authorized.splice(0).length, 2);
+  assert.equal(chrome.ims.authorized.splice(0).length, 3);
 });

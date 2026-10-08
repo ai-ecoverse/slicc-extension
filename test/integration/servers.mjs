@@ -128,10 +128,10 @@ export async function ims(tls) {
       good: { access_token: 'dummy-ims-token', state: query.state },
       stranger: { access_token: 'dummy-ims-token', state: 'another-request' },
       denied: { error: 'access_denied', state: query.state },
+      sibling: { access_token: 'dummy-ims-token', state: query.state },
     }[query.client_id];
-    response
-      .writeHead(302, { location: `${query.redirect_uri}#${new URLSearchParams(answer)}` })
-      .end();
+    const to = query.client_id === 'sibling' ? `${query.redirect_uri}evil` : query.redirect_uri;
+    response.writeHead(302, { location: `${to}#${new URLSearchParams(answer)}` }).end();
   });
   return { ...server, authorized };
 }

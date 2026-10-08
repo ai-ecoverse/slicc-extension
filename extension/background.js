@@ -118,9 +118,11 @@ async function signIn({ clientId, scopes, imsEnvironment } = {}) {
     state,
   }).toString();
   const answer = await chrome.identity.launchWebAuthFlow({ url: url.href, interactive: true });
-  if (!answer?.startsWith(redirect))
+  const back = URL.canParse(answer) ? new URL(answer) : null;
+  if (!back || back.origin + back.pathname !== redirect) {
     throw new Error('slicc-extension: the sign-in came back elsewhere');
-  const fragment = new URLSearchParams(new URL(answer).hash.slice(1));
+  }
+  const fragment = new URLSearchParams(back.hash.slice(1));
   if (fragment.get('state') !== state) {
     throw new Error('slicc-extension: the sign-in answered another request');
   }
