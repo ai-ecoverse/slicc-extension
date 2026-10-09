@@ -1,10 +1,34 @@
 (() => {
   const { port1, port2 } = new MessageChannel();
   const open = new Map();
+  const pending = new Map();
+  const listeners = new Set();
   const bodiless = new Set([101, 103, 204, 205, 304]);
   let next = 0;
 
-  port1.onmessage = ({ data }) => open.get(data.id)?.(data);
+  function deliver(message) {
+    if (typeof message.id === 'number' && pending.has(message.id)) {
+      const { resolve, reject } = pending.get(message.id);
+      pending.delete(message.id);
+      if (message.error) reject(new Error(message.error));
+      else resolve(message.result ?? {});
+      return;
+    }
+    if (typeof message.id !== 'number' && message.error) {
+      for (const { reject } of pending.values()) reject(new Error(message.error));
+      pending.clear();
+      return;
+    }
+    for (const listener of listeners) listener(message);
+  }
+
+  port1.onmessage = ({ data }) => {
+    if (data.cdp) {
+      deliver(data.cdp);
+      return;
+    }
+    open.get(data.id)?.(data);
+  };
   postMessage({ type: 'slicc-extension:port' }, location.origin, [port2]);
 
   function receive(id, signal, resolve, reject) {
@@ -74,6 +98,17 @@
     });
   }
 
+  function send(method, params, sessionId) {
+    const id = ++next;
+    const command = { id, method };
+    if (params !== undefined) command.params = params;
+    if (sessionId !== undefined) command.sessionId = sessionId;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      port1.postMessage({ cdp: command });
+    });
+  }
+
   function signIn({ clientId, scopes, imsEnvironment } = {}) {
     const id = ++next;
     return new Promise((resolve, reject) => {
@@ -87,6 +122,16 @@
   }
 
   Object.defineProperty(globalThis, 'sliccExtension', {
-    value: Object.freeze({ fetch: relayFetch, signIn }),
+    value: Object.freeze({
+      fetch: relayFetch,
+      signIn,
+      cdp: Object.freeze({
+        send,
+        on(listener) {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      }),
+    }),
   });
 })();

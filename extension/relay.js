@@ -1,7 +1,28 @@
 function serve(page) {
   const open = new Map();
+  let cdpPort;
+  function cdpWorker() {
+    if (cdpPort) return cdpPort;
+    const worker = chrome.runtime.connect({ name: 'slicc-fetch' });
+    cdpPort = worker;
+    worker.onMessage.addListener((message) => page.postMessage({ cdp: message }));
+    worker.onDisconnect.addListener(() => {
+      if (cdpPort !== worker) return;
+      cdpPort = undefined;
+      page.postMessage({ cdp: { error: 'slicc-extension: relay disconnected' } });
+    });
+    return worker;
+  }
   page.onmessage = ({ data }) => {
     const { id } = data;
+    if (data.cdp) {
+      try {
+        cdpWorker().postMessage(data.cdp);
+      } catch (error) {
+        page.postMessage({ cdp: { id: data.cdp.id, error: String(error?.message ?? error) } });
+      }
+      return;
+    }
     if (data.signIn) {
       chrome.runtime.sendMessage({ type: 'slicc-sign-in', options: data.signIn }).then(
         (answer) => page.postMessage({ id, ...answer }),

@@ -33,6 +33,12 @@ The relay runs page → content script (a `MessagePort`) → service worker (a `
 
 `sliccExtension.signIn({ clientId, scopes, imsEnvironment })` signs in to Adobe IMS with `chrome.identity.launchWebAuthFlow` and answers the access token. The service worker builds the authorize URL itself, for `ims-na1.adobelogin.com` (or `ims-na1-stg1` when `imsEnvironment` is `stg1`), with the extension's redirect `https://akjjllgokmbgpbdbmafpiefnhidlmbgf.chromiumapp.org/adobe` and a fresh `state`, and rejects any answer that comes back elsewhere or carries another `state`. It takes requests only from content scripts in `https://` frames on `sliccy.ai`, the same as the relay, so the token never goes to another origin. It rejects with IMS's `error_description` (or `error`) when the user refuses.
 
+## Chrome debugger
+
+`sliccExtension.cdp` is a CDP command surface on that same port. `cdp.send(method, params, sessionId)` answers the command result, and `cdp.on(listener)` receives events as `{ method, params, sessionId }`. The service worker accepts the port only when `trusted()` passes: the sender is this extension, and the frame is `https://sliccy.ai` or `https://*.sliccy.ai`. There is no other gate.
+
+`Target.getTargets` lists tabs. `targetId` is the tab id. `Target.createTarget` opens a background tab, or a new window when `newWindow` is true. `Target.closeTarget` closes that tab. `Target.activateTarget` selects it and focuses its window. `Target.attachToTarget` must be `{ targetId, flatten: true }`. Any other `flatten` value returns `only flatten: true is supported` and does not attach. The returned `sessionId` is that `targetId`. Later commands pass it as a top-level `sessionId`, and only the port that attached it may use it. `chrome.debugger` events for the tab are posted back on that port with the same `sessionId`. `Page.bringToFront` also selects the tab, because `chrome.debugger` alone does not. `Target.detachFromTarget`, `Target.closeTarget`, and a port disconnect release the debugger when this port's last attach to that tab is gone.
+
 ## Development
 
 ```bash

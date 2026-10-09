@@ -1,3 +1,5 @@
+import { listen, trusted } from './cdp.js';
+
 const dnr = chrome.declarativeNetRequest;
 const restored = new Set(['cookie', 'origin', 'referer', 'user-agent']);
 const ready = dnr
@@ -8,12 +10,6 @@ const ims = {
   prod: 'https://ims-na1.adobelogin.com',
   stg1: 'https://ims-na1-stg1.adobelogin.com',
 };
-
-function trusted(sender) {
-  if (sender.id !== chrome.runtime.id || !URL.canParse(sender.url)) return false;
-  const { protocol, hostname } = new URL(sender.url);
-  return protocol === 'https:' && (hostname === 'sliccy.ai' || hostname.endsWith('.sliccy.ai'));
-}
 
 function forbidden(headers) {
   const requestHeaders = headers
@@ -81,10 +77,8 @@ async function read(port, reader) {
 }
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'slicc-fetch' || !trusted(port.sender)) {
-    port.disconnect();
-    return;
-  }
+  const cdp = listen(port, chrome.runtime.id, chrome);
+  if (!cdp) return;
   const abort = new AbortController();
   let reader;
   let queue = Promise.resolve();
@@ -94,6 +88,7 @@ chrome.runtime.onConnect.addListener((port) => {
   };
   port.onDisconnect.addListener(() => abort.abort());
   port.onMessage.addListener((message) => {
+    if (cdp.handle(message)) return;
     const step = message.read
       ? () => read(port, reader)
       : async () => {
@@ -134,7 +129,7 @@ async function signIn({ clientId, scopes, imsEnvironment } = {}) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
-  if (message?.type !== 'slicc-sign-in' || !trusted(sender)) return false;
+  if (message?.type !== 'slicc-sign-in' || !trusted(sender, chrome.runtime.id)) return false;
   signIn(message.options).then(
     (token) => reply({ token }),
     (error) => reply({ error: String(error?.message ?? error) })
