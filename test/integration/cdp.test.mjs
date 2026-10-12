@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
 import { listen } from '../../extension/cdp.js';
+import { protectedOrigins } from '../../extension/protected.mjs';
+import { protectedRules } from '../../extension/protected-rules.js';
 import { launch } from './chrome.mjs';
+
+const refused = "slicc: refused: target is on seven's origin";
 
 const extensionId = 'ext';
 const slicc = 'https://seven.sliccy.ai/';
@@ -60,6 +65,17 @@ function fakeChrome() {
       remove(tabId) {
         api.removed.push(tabId);
         return Promise.resolve();
+      },
+      get(tabId) {
+        const known = new Map([
+          [7, 'https://seven.sliccy.ai/'],
+          [8, 'https://other.test/'],
+          [11, api.created.at(-1)?.url ?? 'https://example.test/'],
+          [12, api.opened.at(-1)?.url ?? ''],
+        ]);
+        if (api.locations?.has(tabId))
+          return Promise.resolve({ id: tabId, url: api.locations.get(tabId) });
+        return Promise.resolve({ id: tabId, url: known.get(tabId) ?? '' });
       },
     },
     windows: {
@@ -125,6 +141,28 @@ async function command(cdp, connection, message) {
   await cdp.settled();
   return connection.posted.at(-1);
 }
+
+test('protected origins follow the slicc-browsers corpus, including the vault', async () => {
+  const root = new URL('../../node_modules/@ai-ecoverse/slicc-browsers/', import.meta.url);
+  const catalog = JSON.parse(await readFile(new URL('catalog.json', root)));
+  assert.deepEqual(protectedRules, catalog.protectedOrigins);
+  const shipped = await readFile(new URL('../../extension/protected.mjs', import.meta.url), 'utf8');
+  const source = await readFile(new URL('protected.mjs', root), 'utf8');
+  assert.equal(shipped, source);
+  const data = JSON.parse(await readFile(new URL('protected.json', root)));
+  const match = protectedOrigins(protectedRules, data.origins);
+  for (const item of data.urls) assert.equal(match.url(item.url), item.protected, item.url);
+  for (const item of data.targets) assert.equal(match.target(item), item.protected, item.url);
+  for (const item of data.cookieDomains) {
+    assert.equal(match.cookieDomain(item.domain), item.protected, item.domain);
+  }
+  for (const item of data.storageKeys) {
+    assert.equal(match.storageKey(item.key), item.protected, item.key);
+  }
+  assert.equal(match.url('https://vault.sliccy.ai/'), true);
+  assert.equal(match.url('https://vault.sliccy.ai/oauth/callback'), true);
+  assert.equal(protectedRules.refusal, refused);
+});
 
 test('an untrusted sender is disconnected before a CDP command can run', () => {
   const rejected = [
@@ -304,6 +342,70 @@ test('target commands list, open, activate, and close tabs', async () => {
   cdp.close();
 });
 
+test('open, attach and navigate refuse seven and the vault', async () => {
+  const { connection, api, cdp } = open();
+  const blocked = [
+    'https://seven.sliccy.ai/',
+    'https://vault.sliccy.ai/oauth/callback',
+    'http://a.b.sliccy.ai:8443/x',
+    'devtools://devtools/bundled/inspector.html',
+  ];
+  for (const [index, url] of blocked.entries()) {
+    const opened = await command(cdp, connection, {
+      id: index + 1,
+      method: 'Target.createTarget',
+      params: { url },
+    });
+    assert.equal(opened.error, refused);
+    const windowed = await command(cdp, connection, {
+      id: index + 20,
+      method: 'Target.createTarget',
+      params: { url, newWindow: true },
+    });
+    assert.equal(windowed.error, refused);
+  }
+  assert.equal(api.created.length, 0);
+  assert.equal(api.opened.length, 0);
+  const attached = await command(cdp, connection, {
+    id: 40,
+    method: 'Target.attachToTarget',
+    params: { targetId: '7', flatten: true },
+  });
+  assert.equal(attached.error, refused);
+  assert.equal(api.attached.length, 0);
+  const allowed = await command(cdp, connection, {
+    id: 41,
+    method: 'Target.createTarget',
+    params: { url: 'https://example.test/' },
+  });
+  assert.deepEqual(allowed.result, { targetId: '11' });
+  const session = await command(cdp, connection, {
+    id: 42,
+    method: 'Target.attachToTarget',
+    params: { targetId: '11', flatten: true },
+  });
+  assert.deepEqual(session.result, { sessionId: '11' });
+  api.locations = new Map([[11, 'https://vault.sliccy.ai/']]);
+  const later = await command(cdp, connection, {
+    id: 43,
+    method: 'Runtime.evaluate',
+    params: { expression: '1' },
+    sessionId: '11',
+  });
+  assert.equal(later.error, refused);
+  assert.equal(api.sent.length, 0);
+  api.locations = new Map([[11, 'https://example.test/']]);
+  const navigated = await command(cdp, connection, {
+    id: 44,
+    method: 'Page.navigate',
+    params: { url: 'https://seven.sliccy.ai/' },
+    sessionId: '11',
+  });
+  assert.equal(navigated.error, refused);
+  assert.equal(api.sent.length, 0);
+  cdp.close();
+});
+
 let chrome;
 before(async () => {
   chrome = await launch();
@@ -383,4 +485,43 @@ test('flatten true attaches, evaluates, and returns events on that session', asy
     answer.events.every((event) => event.sessionId === answer.attached.sessionId),
     true
   );
+});
+
+test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const answer = await page.evaluate(async (refused) => {
+    const fail = async (method, params, sessionId) => {
+      try {
+        await globalThis.sliccExtension.cdp.send(method, params, sessionId);
+        return 'ran';
+      } catch (error) {
+        return error.message;
+      }
+    };
+    const { targetInfos } = await globalThis.sliccExtension.cdp.send('Target.getTargets');
+    const targetId = targetInfos.find((target) =>
+      target.url.startsWith('https://seven.sliccy.ai/')
+    ).targetId;
+    const attached = await fail('Target.attachToTarget', { targetId, flatten: true });
+    const vault = await fail('Target.createTarget', { url: 'https://vault.sliccy.ai/' });
+    const created = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
+      url: 'about:blank',
+    });
+    const session = await globalThis.sliccExtension.cdp.send('Target.attachToTarget', {
+      targetId: created.targetId,
+      flatten: true,
+    });
+    const navigated = await fail(
+      'Page.navigate',
+      { url: 'https://vault.sliccy.ai/secret' },
+      session.sessionId
+    );
+    await globalThis.sliccExtension.cdp
+      .send('Target.closeTarget', { targetId: created.targetId })
+      .catch(() => undefined);
+    return { attached, vault, navigated };
+  }, refused);
+  assert.equal(answer.attached, refused);
+  assert.equal(answer.vault, refused);
+  assert.equal(answer.navigated, refused);
 });
