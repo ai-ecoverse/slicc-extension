@@ -12,6 +12,7 @@ export async function launch() {
   const adobe = await ims(tls);
   const rules = [
     `MAP seven.sliccy.ai 127.0.0.1:${site.port}`,
+    `MAP vault.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP other.test 127.0.0.1:${site.port}`,
     `MAP upstream.test 127.0.0.1:${remote.port}`,
     `MAP ims-na1.adobelogin.com 127.0.0.1:${adobe.port}`,
