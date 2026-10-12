@@ -1,3 +1,62 @@
+import { protectedOrigins } from './protected.mjs';
+import { protectedRules } from './protected-rules.js';
+
+const guard = protectedOrigins(protectedRules);
+
+function textOf(value) {
+  return typeof value === 'string' ? value : '';
+}
+
+function refusal() {
+  throw new Error(protectedRules.refusal);
+}
+
+function blocked(url, opener, previous = false) {
+  return guard.target({ url: textOf(url), opener, previous });
+}
+
+function demand(url, source = {}) {
+  if (blocked(url, source.opener, source.previous === true)) refusal();
+}
+
+async function readTab(api, tabId) {
+  try {
+    const tab = await api.tabs.get(tabId);
+    if (tab && typeof tab === 'object') return tab;
+  } catch {
+    refusal();
+  }
+  refusal();
+}
+
+async function openerOf(api, tab) {
+  if (typeof tab?.openerTabId !== 'number') return 'unprotected';
+  let opener;
+  try {
+    opener = await api.tabs.get(tab.openerTabId);
+  } catch {
+    return 'unknown';
+  }
+  const url = textOf(opener?.url);
+  const pending = textOf(opener?.pendingUrl);
+  if (blocked(url, 'unprotected')) return 'protected';
+  if (pending && pending !== url && blocked(pending, 'unprotected', guard.url(url))) {
+    return 'protected';
+  }
+  if (blocked(url, 'unknown')) return 'unknown';
+  if (pending && pending !== url && blocked(pending, 'unknown', guard.url(url))) return 'unknown';
+  return 'unprotected';
+}
+
+async function demandTab(api, tab) {
+  const opener = await openerOf(api, tab);
+  const url = textOf(tab?.url);
+  const pending = textOf(tab?.pendingUrl);
+  if (blocked(url, opener)) refusal();
+  if (pending && pending !== url && blocked(pending, opener, guard.url(url))) refusal();
+  return { opener, url };
+}
+
 export function trusted(sender, extensionId) {
   if (!sender || sender.id !== extensionId || !URL.canParse(sender.url)) return false;
   const { protocol, hostname } = new URL(sender.url);
@@ -41,6 +100,7 @@ function sessionFor(state, tabId) {
 function forget(state, tabId) {
   state.ownedTabs.delete(tabId);
   state.attachRefCounts.delete(tabId);
+  state.pageUrl.delete(tabId);
   for (const [sessionId, attached] of state.sessionToTab) {
     if (attached === tabId) state.sessionToTab.delete(sessionId);
   }
@@ -79,7 +139,8 @@ async function targets(api) {
 }
 
 async function create(params, api) {
-  const url = typeof params.url === 'string' ? params.url : 'about:blank';
+  const url = typeof params.url === 'string' ? params.url : '';
+  demand(url, { opener: 'protected' });
   if (params.newWindow === true) {
     const created = await api.windows.create({
       url,
@@ -108,6 +169,9 @@ async function attach(params, state, api) {
   if (params.flatten !== true) throw new Error('only flatten: true is supported');
   const targetId = readTargetId(params);
   const tabId = tabFrom(targetId);
+  const tab = await readTab(api, tabId);
+  const seen = await demandTab(api, tab);
+  state.pageUrl.set(tabId, seen.url);
   if (!state.ownedTabs.has(tabId)) {
     await api.debugger.attach({ tabId }, '1.3');
     state.ownedTabs.add(tabId);
@@ -141,6 +205,11 @@ async function pass(message, state, api) {
       `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
     );
   }
+  const seen = await demandTab(api, await readTab(api, tabId));
+  state.pageUrl.set(tabId, seen.url);
+  if (method === 'Page.navigate') {
+    demand(params?.url, { opener: 'unprotected', previous: guard.url(seen.url) });
+  }
   if (method === 'Page.bringToFront') await activate(api, tabId);
   const result = await api.debugger.sendCommand({ tabId }, method, params);
   return result ?? {};
@@ -172,6 +241,7 @@ function openCdp(port, api) {
     sessionToTab: new Map(),
     attachRefCounts: new Map(),
     ownedTabs: new Set(),
+    pageUrl: new Map(),
   };
   let closed = false;
   let chain = Promise.resolve();
@@ -185,10 +255,71 @@ function openCdp(port, api) {
     }
   }
 
+  function destination(method, params) {
+    if (params === null || typeof params !== 'object') return '';
+    if (method === 'Page.frameNavigated') return textOf(params.frame?.url);
+    if (method === 'Page.navigatedWithinDocument' || method === 'Page.frameRequestedNavigation') {
+      return textOf(params.url);
+    }
+    if (method === 'Network.requestWillBeSent' && params.type === 'Document') {
+      return textOf(params.request?.url);
+    }
+    if (method === 'Target.targetInfoChanged') return textOf(params.targetInfo?.url);
+    return '';
+  }
+
+  function release(tabId) {
+    const sessionId = sessionFor(state, tabId);
+    const owned = state.ownedTabs.has(tabId);
+    if (sessionId === undefined && !owned) return;
+    if (sessionId !== undefined) {
+      post({
+        method: 'Target.detachedFromTarget',
+        params: { sessionId, targetId: String(tabId) },
+        sessionId,
+      });
+    }
+    forget(state, tabId);
+    if (owned) void api.debugger.detach({ tabId }).catch(() => undefined);
+  }
+
+  function leaves(tabId, next) {
+    if (!next) return false;
+    return blocked(next, 'unprotected', guard.url(state.pageUrl.get(tabId) ?? ''));
+  }
+
   function onEvent(source, method, params) {
-    const sessionId = sessionFor(state, source?.tabId);
+    const tabId = source?.tabId;
+    const sessionId = sessionFor(state, tabId);
     if (sessionId === undefined) return;
+    const next = destination(method, params);
+    if (leaves(tabId, next)) {
+      release(tabId);
+      return;
+    }
+    if (next && !blocked(next, 'unknown')) state.pageUrl.set(tabId, next);
     post({ method, params: params ?? {}, sessionId });
+  }
+
+  function onUpdated(tabId, changeInfo, tab) {
+    if (sessionFor(state, tabId) === undefined && !state.ownedTabs.has(tabId)) return;
+    const pending = textOf(changeInfo?.pendingUrl) || textOf(tab?.pendingUrl);
+    if (leaves(tabId, textOf(changeInfo?.url)) || leaves(tabId, pending)) {
+      release(tabId);
+      return;
+    }
+    void recheck(tabId);
+  }
+
+  async function recheck(tabId) {
+    if (sessionFor(state, tabId) === undefined && !state.ownedTabs.has(tabId)) return;
+    try {
+      const seen = await demandTab(api, await readTab(api, tabId));
+      if (sessionFor(state, tabId) === undefined && !state.ownedTabs.has(tabId)) return;
+      state.pageUrl.set(tabId, seen.url);
+    } catch {
+      release(tabId);
+    }
   }
 
   function onDetach(source) {
@@ -216,6 +347,7 @@ function openCdp(port, api) {
     closed = true;
     api.debugger.onEvent.removeListener(onEvent);
     api.debugger.onDetach.removeListener(onDetach);
+    api.tabs.onUpdated?.removeListener(onUpdated);
     const owned = [...state.ownedTabs];
     state.ownedTabs.clear();
     state.sessionToTab.clear();
@@ -225,6 +357,7 @@ function openCdp(port, api) {
 
   api.debugger.onEvent.addListener(onEvent);
   api.debugger.onDetach.addListener(onDetach);
+  api.tabs.onUpdated?.addListener(onUpdated);
   port.onDisconnect.addListener(close);
 
   return {
