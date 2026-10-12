@@ -1,5 +1,6 @@
 export const protectedRules = {
   domains: ['sliccy.ai'],
+  hosts: ['vault.sliccy.ai'],
   schemes: ['https', 'http'],
   innerSchemes: ['blob', 'filesystem', 'view-source'],
   anySchemes: ['devtools'],

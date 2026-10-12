@@ -349,6 +349,9 @@ test('open, attach and navigate refuse seven and the vault', async () => {
     'https://vault.sliccy.ai/oauth/callback',
     'http://a.b.sliccy.ai:8443/x',
     'devtools://devtools/bundled/inspector.html',
+    'about:blank',
+    'about:srcdoc',
+    '',
   ];
   for (const [index, url] of blocked.entries()) {
     const opened = await command(cdp, connection, {
@@ -403,6 +406,14 @@ test('open, attach and navigate refuse seven and the vault', async () => {
   });
   assert.equal(navigated.error, refused);
   assert.equal(api.sent.length, 0);
+  const blank = await command(cdp, connection, {
+    id: 45,
+    method: 'Page.navigate',
+    params: { url: 'about:blank' },
+    sessionId: '11',
+  });
+  assert.deepEqual(blank.result, { value: 2 });
+  assert.equal(api.sent.at(-1).method, 'Page.navigate');
   cdp.close();
 });
 
@@ -457,18 +468,30 @@ test('flatten true attaches, evaluates, and returns events on that session', asy
     const events = [];
     globalThis.sliccExtension.cdp.on((event) => events.push(event));
     const created = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
-      url: 'about:blank',
+      url: 'https://other.test/',
     });
     try {
       const attached = await globalThis.sliccExtension.cdp.send('Target.attachToTarget', {
         targetId: created.targetId,
         flatten: true,
       });
-      const evaluated = await globalThis.sliccExtension.cdp.send(
-        'Runtime.evaluate',
-        { expression: '1+1', returnByValue: true },
-        attached.sessionId
-      );
+      let evaluated;
+      let missed;
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        try {
+          evaluated = await globalThis.sliccExtension.cdp.send(
+            'Runtime.evaluate',
+            { expression: '1+1', returnByValue: true },
+            attached.sessionId
+          );
+          break;
+        } catch (error) {
+          missed = error;
+          if (!String(error.message).includes('execution context')) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      if (!evaluated) throw missed;
       await globalThis.sliccExtension.cdp.send('Runtime.enable', {}, attached.sessionId);
       await new Promise((resolve) => setTimeout(resolve, 300));
       return { attached, evaluated, events };
@@ -504,8 +527,9 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
     ).targetId;
     const attached = await fail('Target.attachToTarget', { targetId, flatten: true });
     const vault = await fail('Target.createTarget', { url: 'https://vault.sliccy.ai/' });
+    const blank = await fail('Target.createTarget', { url: 'about:blank' });
     const created = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
-      url: 'about:blank',
+      url: 'https://example.test/',
     });
     const session = await globalThis.sliccExtension.cdp.send('Target.attachToTarget', {
       targetId: created.targetId,
@@ -519,9 +543,10 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
     await globalThis.sliccExtension.cdp
       .send('Target.closeTarget', { targetId: created.targetId })
       .catch(() => undefined);
-    return { attached, vault, navigated };
+    return { attached, vault, blank, navigated };
   }, refused);
   assert.equal(answer.attached, refused);
   assert.equal(answer.vault, refused);
+  assert.equal(answer.blank, refused);
   assert.equal(answer.navigated, refused);
 });

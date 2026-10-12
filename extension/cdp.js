@@ -3,8 +3,9 @@ import { protectedRules } from './protected-rules.js';
 
 const guard = protectedOrigins(protectedRules);
 
-function demand(url) {
-  if (typeof url === 'string' && guard.url(url)) throw new Error(protectedRules.refusal);
+function demand(url, source = {}) {
+  const text = typeof url === 'string' ? url : '';
+  if (guard.target({ url: text, ...source })) throw new Error(protectedRules.refusal);
 }
 
 async function tabUrl(api, tabId) {
@@ -98,8 +99,8 @@ async function targets(api) {
 }
 
 async function create(params, api) {
-  const url = typeof params.url === 'string' ? params.url : 'about:blank';
-  demand(url);
+  const url = typeof params.url === 'string' ? params.url : '';
+  demand(url, { opener: 'protected' });
   if (params.newWindow === true) {
     const created = await api.windows.create({
       url,
@@ -128,7 +129,7 @@ async function attach(params, state, api) {
   if (params.flatten !== true) throw new Error('only flatten: true is supported');
   const targetId = readTargetId(params);
   const tabId = tabFrom(targetId);
-  demand(await tabUrl(api, tabId));
+  demand(await tabUrl(api, tabId), { opener: 'unknown' });
   if (!state.ownedTabs.has(tabId)) {
     await api.debugger.attach({ tabId }, '1.3');
     state.ownedTabs.add(tabId);
@@ -162,8 +163,9 @@ async function pass(message, state, api) {
       `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
     );
   }
-  demand(await tabUrl(api, tabId));
-  if (method === 'Page.navigate') demand(params?.url);
+  const current = await tabUrl(api, tabId);
+  demand(current, { opener: 'unknown' });
+  if (method === 'Page.navigate') demand(params?.url, { previous: guard.url(current) });
   if (method === 'Page.bringToFront') await activate(api, tabId);
   const result = await api.debugger.sendCommand({ tabId }, method, params);
   return result ?? {};
