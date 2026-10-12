@@ -44,8 +44,11 @@ function listen(tls, handler) {
 
 export async function pages(tls) {
   const html = await readFile(new URL('page/index.html', import.meta.url));
+  const probe = await readFile(new URL('page/probe.html', import.meta.url));
   return listen(tls, (request, response) => {
-    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(html);
+    const { pathname } = new URL(request.url, 'https://vault.sliccy.ai');
+    const body = pathname === '/probe' ? probe : html;
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
   });
 }
 
@@ -79,6 +82,14 @@ export async function upstream(tls) {
   const progress = {};
   const routes = {
     '/hello': (response) =>
+      response
+        .writeHead(200, { 'content-type': 'text/plain', 'x-upstream': 'exposed' })
+        .end('hello from upstream'),
+    '/vault-popup': (response) =>
+      response
+        .writeHead(200, { 'content-type': 'text/plain', 'x-upstream': 'exposed' })
+        .end('hello from upstream'),
+    '/vault-frame': (response) =>
       response
         .writeHead(200, { 'content-type': 'text/plain', 'x-upstream': 'exposed' })
         .end('hello from upstream'),

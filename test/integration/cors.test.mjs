@@ -5,6 +5,7 @@ import { after, before, test } from 'node:test';
 import { launch } from './chrome.mjs';
 
 const slicc = 'https://seven.sliccy.ai/';
+const vault = 'https://vault.sliccy.ai/';
 const other = 'https://other.test/';
 const remote = 'https://upstream.test';
 
@@ -251,6 +252,93 @@ test('the relay rejects a request aborted while its body is read', async (t) => 
   assert.equal(result, 'AbortError');
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(requests('POST', '/raced').length, before);
+});
+
+test('a vault popup fetch reads a CORS-less upstream, preflight included', async (t) => {
+  const page = await visit(t, vault);
+  const plain = await page.evaluate(async (url) => {
+    const response = await fetch(url);
+    return {
+      status: response.status,
+      text: await response.text(),
+      header: response.headers.get('x-upstream'),
+    };
+  }, `${remote}/vault-popup`);
+  assert.deepEqual(plain, { status: 200, text: 'hello from upstream', header: 'exposed' });
+  assert.equal(requests('GET', '/vault-popup')[0]?.headers.origin, vault.slice(0, -1));
+
+  const echoed = await page.evaluate(async (url) => {
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-custom': 'yes', authorization: 'Bearer t' },
+      body: '{"a":1}',
+      credentials: 'omit',
+      mode: 'cors',
+    });
+    return response.json();
+  }, `${remote}/vault-popup-preflight`);
+  assert.equal(echoed.method, 'PUT');
+  assert.equal(echoed.headers['x-custom'], 'yes');
+  assert.equal(echoed.headers.authorization, 'Bearer t');
+  assert.equal(atob(echoed.body), '{"a":1}');
+  const preflight = requests('OPTIONS', '/vault-popup-preflight');
+  assert.equal(preflight.length, 1);
+  assert.equal(preflight[0].headers.origin, vault.slice(0, -1));
+});
+
+test('a vault iframe inside seven fetches through the DNR rule, preflight included', async (t) => {
+  const page = await visit(t, slicc);
+  const result = await page.evaluate(async (remote) => {
+    function once(path) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`no message for ${path}`)), 10000);
+        const onMessage = (event) => {
+          if (event.origin !== 'https://vault.sliccy.ai' || event.data?.path !== path) return;
+          clearTimeout(timer);
+          removeEventListener('message', onMessage);
+          resolve(event.data);
+        };
+        addEventListener('message', onMessage);
+      });
+    }
+    const frame = document.createElement('iframe');
+    const plain = once('/vault-frame');
+    frame.src = `https://vault.sliccy.ai/probe?${new URLSearchParams({ url: `${remote}/vault-frame` })}`;
+    document.body.appendChild(frame);
+    const first = await plain;
+    const init = {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-custom': 'yes', authorization: 'Bearer t' },
+      body: '{"a":1}',
+      credentials: 'omit',
+      mode: 'cors',
+    };
+    const preflight = once('/vault-frame-preflight');
+    frame.src = `https://vault.sliccy.ai/probe?${new URLSearchParams({
+      url: `${remote}/vault-frame-preflight`,
+      init: JSON.stringify(init),
+    })}`;
+    return { first, second: await preflight };
+  }, remote);
+
+  assert.equal(result.first.ok, true);
+  assert.equal(result.first.origin, vault.slice(0, -1));
+  assert.deepEqual(
+    { status: result.first.status, text: result.first.text, header: result.first.header },
+    { status: 200, text: 'hello from upstream', header: 'exposed' }
+  );
+  assert.equal(requests('GET', '/vault-frame')[0]?.headers.origin, vault.slice(0, -1));
+
+  assert.equal(result.second.ok, true);
+  assert.equal(result.second.origin, vault.slice(0, -1));
+  const echoed = JSON.parse(result.second.text);
+  assert.equal(echoed.method, 'PUT');
+  assert.equal(echoed.headers['x-custom'], 'yes');
+  assert.equal(echoed.headers.authorization, 'Bearer t');
+  assert.equal(atob(echoed.body), '{"a":1}');
+  const preflight = requests('OPTIONS', '/vault-frame-preflight');
+  assert.equal(preflight.length, 1);
+  assert.equal(preflight[0].headers.origin, vault.slice(0, -1));
 });
 
 test('the manifest key gives the Chrome Web Store ID', async () => {
