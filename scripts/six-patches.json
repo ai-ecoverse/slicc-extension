@@ -56,6 +56,13 @@
     "match": 1
   },
   {
+    "id": "B24-1-tabs-onupdated",
+    "pr": 3977,
+    "sentinel": "isProtectedUrl",
+    "label": "chrome.tabs.onUpdated bridge+legacy navigation detach",
+    "match": 1
+  },
+  {
     "id": "B24-3-offscreen-relay",
     "pr": 3978,
     "sentinel": "handleRelayMessage_patched",
@@ -91,17 +98,31 @@
     "match": 1
   },
   {
-    "id": "B-SEC2-encrypted-storage-stub",
+    "id": "B-SEC2-encrypted-storage",
     "pr": 3980,
     "sentinel": "encryptedStorage",
-    "label": "encrypted storage migration stub",
+    "label": "AES-GCM encrypted storage with IndexedDB key, migration",
+    "match": 1
+  },
+  {
+    "id": "B-SEC2-pipeline-migration",
+    "pr": 3980,
+    "sentinel": "encryptedStorage",
+    "label": "buildSecretsPipeline awaits migration",
     "match": 1
   },
   {
     "id": "B-SEC2-mount-backends",
     "pr": 3980,
     "sentinel": "encryptedStorage",
-    "label": "mount-backends uses storageLocal",
+    "label": "mount-backends uses encrypted storage",
+    "match": 1
+  },
+  {
+    "id": "B-SEC2-oauth-storage",
+    "pr": 3980,
+    "sentinel": "encryptedStorage",
+    "label": "OAuth token stored via encrypted storage",
     "match": 1
   }
 ]

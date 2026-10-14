@@ -137,6 +137,31 @@ if (pr3977needed) {
     1
   );
   applied.push('B24-1-navigate-legacy');
+
+  content = assertPatch(
+    content,
+    'tabs.onUpdated navigation detach',
+    /(installCdpProxyListeners\(\);)/,
+    `$1
+chrome.tabs.onUpdated.addListener(function _b24TabProtect(tabId, changeInfo, tab) {
+  var _url = changeInfo.url || (tab && tab.pendingUrl);
+  if (!_url || !_isProtectedUrl(_url)) return;
+  var _bridgeDetached = new Set();
+  for (var [_port, _state] of liveBridgePortStates) {
+    var _sessions = [..._state.sessionToTab].filter(function(e) { return e[1] === tabId; }).map(function(e) { return e[0]; });
+    if (!_sessions.length) continue;
+    invalidatePortDebuggerAttachment(_state, tabId);
+    _bridgeDetached.add(tabId);
+    if (_state.channelId === null) continue;
+    for (var _sid of _sessions) { try { _port.postMessage({ bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId: _state.channelId, kind: "cdp.event", method: "Target.detachedFromTarget", params: { sessionId: _sid, targetId: String(tabId) } }); } catch {} }
+  }
+  var _legSid; for (var [_ls, _lt] of sessionToTab) { if (_lt === tabId) { _legSid = _ls; break; } }
+  if (_legSid !== void 0) { sessionToTab.delete(_legSid); forceReleaseDebuggerAttachment(tabId).catch(function() {}); notifyBridgeDebuggerDetached(tabId); }
+  for (var _dt of _bridgeDetached) releaseDebuggerAttachment(_dt, "bridge").catch(function() {});
+});`,
+    1
+  );
+  applied.push('B24-1-tabs-onupdated');
 } else {
   for (const p of patches.filter((p) => p.pr === 3977)) skipped.push(p.id);
 }
@@ -177,7 +202,7 @@ if (pr3979needed) {
     content,
     'sender gating in routeSwMessage',
     /(function routeSwMessage\(handlers, message, sender, sendResponse\) \{)/,
-    '$1\n  if (!sender || typeof sender.id !== "string" || sender.id !== chrome.runtime.id || sender.tab != null) return false;',
+    '$1\n  if (!sender || typeof sender.id !== "string" || sender.id !== chrome.runtime.id || (typeof sender.url === "string" && !sender.url.startsWith("chrome-extension://" + chrome.runtime.id))) return false;',
     1
   );
   applied.push('B-SEC1-message-router');
@@ -195,23 +220,62 @@ if (pr3979needed) {
 }
 
 if (pr3980needed) {
+  const encryptedStorageFn = [
+    'var _secDbName = "slicc-secrets";',
+    'var _secStoreName = "keys";',
+    'var _secKeyId = "aes-gcm-secrets";',
+    'var _secKeyPromise = null;',
+    'function _secOpenDb() { return new Promise(function(resolve, reject) { if (typeof indexedDB === "undefined") { reject(new Error("IndexedDB not available")); return; } var req = indexedDB.open(_secDbName, 1); req.onupgradeneeded = function() { var db = req.result; if (!db.objectStoreNames.contains(_secStoreName)) db.createObjectStore(_secStoreName); }; req.onsuccess = function() { resolve(req.result); }; req.onerror = function() { reject(req.error); }; }); }',
+    'function _secIdbGet(db, key) { return new Promise(function(resolve, reject) { var tx = db.transaction(_secStoreName, "readonly"); var req2 = tx.objectStore(_secStoreName).get(key); req2.onsuccess = function() { resolve(req2.result); }; req2.onerror = function() { reject(req2.error); }; }); }',
+    'function _secIdbPut(db, key, value) { return new Promise(function(resolve, reject) { var tx = db.transaction(_secStoreName, "readwrite"); tx.objectStore(_secStoreName).put(value, key); tx.oncomplete = function() { resolve(); }; tx.onerror = function() { reject(tx.error); }; }); }',
+    'async function _secGetOrCreateKey() { var db = await _secOpenDb(); try { var existing = await _secIdbGet(db, _secKeyId); if (existing) return existing; var key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]); await _secIdbPut(db, _secKeyId, key); return key; } finally { db.close(); } }',
+    'function _secCachedKey() { if (!_secKeyPromise) _secKeyPromise = _secGetOrCreateKey(); return _secKeyPromise; }',
+    'function _secToBase64(buf) { return btoa(String.fromCharCode.apply(null, new Uint8Array(buf))); }',
+    'function _secFromBase64(b64) { var bin = atob(b64); var arr = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i); return arr.buffer; }',
+    'function _secIsEncrypted(v) { return typeof v === "object" && v !== null && typeof v.ct === "string" && typeof v.iv === "string"; }',
+    'async function _secEncrypt(plaintext) { var key = await _secCachedKey(); var iv = crypto.getRandomValues(new Uint8Array(12)); var ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, key, new TextEncoder().encode(plaintext)); return { ct: _secToBase64(ct), iv: _secToBase64(iv.buffer) }; }',
+    'async function _secDecrypt(encrypted) { try { var key = await _secCachedKey(); var plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv: _secFromBase64(encrypted.iv) }, key, _secFromBase64(encrypted.ct)); return new TextDecoder().decode(plainBuf); } catch { return void 0; } }',
+    'async function _secMigrate() { var all = await chrome.storage.local.get(null); for (var [k, v] of Object.entries(all)) { if (typeof v !== "string" || k.endsWith(DOMAINS_SUFFIX) || !(k + DOMAINS_SUFFIX in all)) continue; var enc = await _secEncrypt(v); await chrome.storage.local.set({ [k]: enc }); } }',
+    'var _secMigrationDone = null;',
+    'function _secEnsureMigrated() { if (!_secMigrationDone) _secMigrationDone = _secMigrate().catch(function(e) { console.error("[sw] secrets migration failed", e); }); return _secMigrationDone; }',
+    'var _encryptedStorage = { async get(keys) { await _secEnsureMigrated(); var raw = await chrome.storage.local.get(keys); var result = {}; for (var [k, v] of Object.entries(raw)) { if (_secIsEncrypted(v)) { var dec = await _secDecrypt(v); if (dec !== void 0) result[k] = dec; } else { result[k] = v; } } return result; }, async set(items) { await _secEnsureMigrated(); var enc = {}; for (var [k, v] of Object.entries(items)) { if (typeof v === "string" && !k.endsWith(DOMAINS_SUFFIX)) { enc[k] = await _secEncrypt(v); } else { enc[k] = v; } } await chrome.storage.local.set(enc); }, async remove(keys) { await chrome.storage.local.remove(keys); } };',
+  ].join('\n');
+
   content = assertPatch(
     content,
-    'encrypted storage for secrets',
+    'encrypted storage implementation',
     /var storageLocal = chrome\.storage\.local;/,
-    'var storageLocal = chrome.storage.local;\nvar _encryptedStorageReady = false;\nvar _encryptedStoragePromise = null;\nfunction _ensureEncryptedMigration() { if (!_encryptedStoragePromise) { _encryptedStoragePromise = (async () => { _encryptedStorageReady = true; })(); } return _encryptedStoragePromise; }',
+    `${encryptedStorageFn}\nvar storageLocal = _encryptedStorage;`,
     1
   );
-  applied.push('B-SEC2-encrypted-storage-stub');
+  applied.push('B-SEC2-encrypted-storage');
+
+  content = assertPatch(
+    content,
+    'buildSecretsPipeline uses encrypted storage',
+    /(async function buildSecretsPipeline\(\) \{)/,
+    '$1\n  await _secEnsureMigrated();',
+    1
+  );
+  applied.push('B-SEC2-pipeline-migration');
 
   content = assertPatch(
     content,
     'mount-backends encrypted getter',
     /var chromeStorageSecretGetter = \{ async get\(key\) \{\s*const result = await chrome\.storage\.local\.get\(key\);/,
-    'var chromeStorageSecretGetter = { async get(key) {\n  const result = await storageLocal.get(key);',
+    'var chromeStorageSecretGetter = { async get(key) {\n  const result = await _encryptedStorage.get(key);',
     1
   );
   applied.push('B-SEC2-mount-backends');
+
+  content = assertPatch(
+    content,
+    'oauth token uses encrypted storage',
+    /await chrome\.storage\.local\.set\(\{ \[`oauth\.\$\{providerId\}\.token`\]/,
+    'await _encryptedStorage.set({ [`oauth.${providerId}.token`]',
+    1
+  );
+  applied.push('B-SEC2-oauth-storage');
 } else {
   for (const p of patches.filter((p) => p.pr === 3980)) skipped.push(p.id);
 }
