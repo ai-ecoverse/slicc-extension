@@ -59,10 +59,10 @@ const aliasPlugin = {
       path: sharedTsIndex,
     }));
     build.onResolve({ filter: /^@ai-ecoverse\/cherry(\/embed-ui)?$/ }, () => ({
-      path: resolve(root, 'scripts/cherry-stub.ts'),
+      path: resolve(sixDir, 'packages/cherry/src/embed-ui.ts'),
     }));
     build.onResolve({ filter: /^@earendil-works\// }, () => ({
-      path: resolve(root, 'scripts/cherry-stub.ts'),
+      path: resolve(sixDir, 'packages/cherry/src/embed-ui.ts'),
       sideEffects: false,
     }));
     build.onResolve({ filter: /\.\.\/\.\.\/webapp\/src\// }, (args) => {

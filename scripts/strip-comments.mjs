@@ -25,26 +25,71 @@ const guardFn = [
   '}',
 ].join('\n');
 
+function patchAndCount(source, pattern, replacement) {
+  let count = 0;
+  const result = source.replace(pattern, (...args) => {
+    count++;
+    return typeof replacement === 'function'
+      ? replacement(...args)
+      : args[0].replace(
+          args[0],
+          replacement.replace(/\$(\d+)/g, (_, n) => args[Number(n)])
+        );
+  });
+  return { result, count };
+}
+
+function assertPatch(source, label, pattern, replacement, expected) {
+  const { result, count } = patchAndCount(source, pattern, replacement);
+  if (count !== expected) {
+    throw new Error(`strip-comments: "${label}" matched ${count} times, expected ${expected}`);
+  }
+  return result;
+}
+
 const sixSwPath = join(ext, 'six-sw.js');
 let content = readFileSync(sixSwPath, 'utf8');
-content = `${guardFn}\n${content}`;
-content = content.replace(
-  /(chrome\.webRequest\.onHeadersReceived\.addListener\(\s*\(details\) => \{)/g,
-  '$1\n    if (_isProtectedUrl(details.url)) return;'
-);
-content = content.replace(
-  /(chrome\.webRequest\.onHeadersReceived\.addListener\()(onHandoffHeaders)/g,
-  '$1(details) => { if (_isProtectedUrl(details.url)) return; return $2(details); }'
-);
-content = content.replace(
-  /(async function cdpAttachToTarget\(params, state2, deps\) \{)/,
-  '$1\n  { const _tab = await deps.getTab?.(parseInt(params["targetId"], 10)); if (_tab?.url && _isProtectedUrl(_tab.url)) throw new Error("slicc: refused: target is on a protected origin"); if (_tab?.pendingUrl && _isProtectedUrl(_tab.pendingUrl)) throw new Error("slicc: refused: target is on a protected origin"); }'
-);
-content = content.replace(
-  /(async function cdpCreateTarget\(params, deps\) \{)/,
-  '$1\n  { const _u = params["url"]; if (_u && _isProtectedUrl(_u)) throw new Error("slicc: refused: target is on a protected origin"); }'
-);
-writeFileSync(sixSwPath, content);
+
+if (content.includes('_isProtectedUrl')) {
+  process.stdout.write('six-sw.js already patched, skipping\n');
+} else {
+  content = `${guardFn}\n${content}`;
+
+  content = assertPatch(
+    content,
+    'discovery onHeadersReceived',
+    /(chrome\.webRequest\.onHeadersReceived\.addListener\(\s*\(details\) => \{)/g,
+    '$1\n    if (_isProtectedUrl(details.url)) return;',
+    1
+  );
+
+  content = assertPatch(
+    content,
+    'handoff onHeadersReceived',
+    /(chrome\.webRequest\.onHeadersReceived\.addListener\()(onHandoffHeaders)/g,
+    '$1(details) => { if (_isProtectedUrl(details.url)) return; return $2(details); }',
+    1
+  );
+
+  content = assertPatch(
+    content,
+    'cdpAttachToTarget',
+    /(async function cdpAttachToTarget\(params, state2, deps\) \{)/,
+    '$1\n  { const _tab = await deps.getTab?.(parseInt(params["targetId"], 10)); if (_tab?.url && _isProtectedUrl(_tab.url)) throw new Error("slicc: refused: target is on a protected origin"); if (_tab?.pendingUrl && _isProtectedUrl(_tab.pendingUrl)) throw new Error("slicc: refused: target is on a protected origin"); }',
+    1
+  );
+
+  content = assertPatch(
+    content,
+    'cdpCreateTarget',
+    /(async function cdpCreateTarget\(params, deps\) \{)/,
+    '$1\n  { const _u = params["url"]; if (_u && _isProtectedUrl(_u)) throw new Error("slicc: refused: target is on a protected origin"); }',
+    1
+  );
+
+  writeFileSync(sixSwPath, content);
+  process.stdout.write('Patched six-sw.js with 4 PRE-1 guards\n');
+}
 
 const htmlFiles = ['sidepanel.html', 'secrets.html', 'capture-popup.html', 'picker-popup.html'];
 for (const file of htmlFiles) {

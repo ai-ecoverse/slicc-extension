@@ -170,10 +170,9 @@ export async function publishRelease(opts = {}) {
 
   if (preflight.submittedItemRevisionStatus?.state === 'PENDING_REVIEW') {
     if (!config.forceCancelPending) {
-      log.warn(
-        `Skipping publish for item ${config.itemId} because a revision is already pending review. Set CHROME_WEB_STORE_FORCE_CANCEL_PENDING=true to cancel and resubmit.`
+      throw new Error(
+        `A revision for item ${config.itemId} is already pending review. Set CHROME_WEB_STORE_FORCE_CANCEL_PENDING=true to cancel and resubmit.`
       );
-      return null;
     }
     log.warn(
       `Cancelling the pending Chrome Web Store review for item ${config.itemId} before uploading.`
