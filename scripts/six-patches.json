@@ -87,7 +87,7 @@
     "id": "B-SEC1-message-router",
     "pr": 3979,
     "sentinel": "isTrustedInternalSender",
-    "label": "sender gating in routeSwMessage",
+    "label": "sender gating in routeSwMessage (URL-based)",
     "match": 1
   },
   {
@@ -123,6 +123,13 @@
     "pr": 3980,
     "sentinel": "encryptedStorage",
     "label": "OAuth token stored via encrypted storage",
+    "match": 1
+  },
+  {
+    "id": "B-SEC2-list-unreadable",
+    "pr": 3980,
+    "sentinel": "encryptedStorage",
+    "label": "listSecretsIncludingUnreadable for unreadable entries",
     "match": 1
   }
 ]

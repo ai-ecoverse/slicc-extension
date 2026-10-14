@@ -276,6 +276,37 @@ if (pr3980needed) {
     1
   );
   applied.push('B-SEC2-oauth-storage');
+
+  content = assertPatch(
+    content,
+    'listSecretsIncludingUnreadable for secrets page',
+    /(async function listSecrets\(storage\) \{)/,
+    `async function _listSecretsIncludingUnreadable() {
+  await _secEnsureMigrated();
+  var raw = await chrome.storage.local.get(null);
+  var readable = [];
+  var unreadableNames = new Set();
+  for (var [k, v] of Object.entries(raw)) {
+    if (k.endsWith(DOMAINS_SUFFIX)) { if (typeof v === "string") readable.push({ key: k, value: v }); continue; }
+    if (_secIsEncrypted(v)) {
+      var dec = await _secDecrypt(v);
+      if (dec === void 0) { unreadableNames.add(k); } else { readable.push({ key: k, value: dec }); }
+    } else if (typeof v === "string") { readable.push({ key: k, value: v }); }
+  }
+  var paired = pairEnvEntriesToSecrets(readable);
+  var result = paired.map(function(e) { return { name: e.name, domains: e.domains, unreadable: false }; });
+  for (var name of unreadableNames) {
+    var dk = name + DOMAINS_SUFFIX;
+    var dr = typeof raw[dk] === "string" ? raw[dk].split(",").filter(Boolean) : [];
+    result.push({ name: name, domains: dr, unreadable: true });
+  }
+  result.sort(function(a, b) { return a.name.localeCompare(b.name); });
+  return result;
+}
+$1`,
+    1
+  );
+  applied.push('B-SEC2-list-unreadable');
 } else {
   for (const p of patches.filter((p) => p.pr === 3980)) skipped.push(p.id);
 }
