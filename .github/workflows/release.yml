@@ -49,6 +49,22 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Verify environment has required reviewers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          ENV_NAME="chrome-web-store"
+          RULES=$(gh api "repos/${REPO}/environments/${ENV_NAME}" \
+            --jq '.protection_rules // [] | map(select(.type == "required_reviewers")) | length' \
+            2>/dev/null || echo "0")
+          if [ "$RULES" = "0" ]; then
+            echo "::error::The ${ENV_NAME} environment has no required reviewers. Refusing to publish."
+            exit 1
+          fi
+          echo "Environment ${ENV_NAME} has required reviewers — proceeding."
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0

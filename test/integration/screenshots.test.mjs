@@ -11,8 +11,7 @@ import { certificate } from './servers.mjs';
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const outDir = join(root, 'screenshots');
 const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
-const sixExtDir = '/Users/trieloff/Developer/ai-ecoverse/slicc/dist/extension';
-
+const sixExtDir = process.env.SIX_IMPORT_DIR;
 const extPages = ['sidepanel.html', 'secrets.html', 'capture-popup.html', 'picker-popup.html'];
 
 const viewports = [
@@ -21,27 +20,13 @@ const viewports = [
   { label: 'light-420', width: 420, height: 900, dark: false },
 ];
 
-async function shootAll(extensionDir, prefix) {
+async function launchWithExtension(extensionDir) {
   const dir = await mkdir(join(tmpdir(), `slicc-shot-${Date.now()}`), {
     recursive: true,
   });
   const tls = await certificate(dir);
-
-  const execPath = chromium.executablePath();
-  const args = [
-    `--load-extension=${extensionDir}`,
-    '--disable-extensions-except=' + extensionDir,
-    `--user-data-dir=${dir}/profile`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--ignore-certificate-errors',
-    '--disable-background-timer-throttling',
-    '--disable-backgrounding-occluded-windows',
-    '--disable-renderer-backgrounding',
-  ];
-
   const browser = await chromium.launchPersistentContext(join(dir, 'profile'), {
-    executablePath: execPath,
+    executablePath: chromium.executablePath(),
     headless: false,
     args: [
       `--load-extension=${extensionDir}`,
@@ -52,7 +37,11 @@ async function shootAll(extensionDir, prefix) {
     ],
     ignoreDefaultArgs: ['--disable-extensions'],
   });
+  return { browser, dir };
+}
 
+async function shootAll(extensionDir, prefix) {
+  const { browser, dir } = await launchWithExtension(extensionDir);
   const shots = [];
   for (const pageName of extPages) {
     const name = pageName.replace('.html', '');
@@ -69,19 +58,40 @@ async function shootAll(extensionDir, prefix) {
       });
       await page.waitForTimeout(800);
       const buf = await page.screenshot({ type: 'png' });
-      const path = join(outDir, `${label}.png`);
-      await writeFile(path, buf);
-      shots.push({ label, path, buf: Buffer.from(buf) });
+      await writeFile(join(outDir, `${label}.png`), buf);
+      shots.push({ label, buf: Buffer.from(buf) });
       await page.close();
     }
   }
-
   await browser.close();
   await rm(dir, { recursive: true, force: true });
   return shots;
 }
 
-describe('extension page screenshots and pixel diff', () => {
+test('extension pages load without console errors', async () => {
+  const { browser, dir } = await launchWithExtension(join(root, 'extension'));
+  try {
+    for (const pageName of extPages) {
+      const errors = [];
+      const page = await browser.newPage();
+      page.on('pageerror', (err) => errors.push(err.message));
+      await page.goto(`chrome-extension://${extId}/${pageName}`, {
+        waitUntil: 'load',
+        timeout: 10000,
+      });
+      await page.waitForTimeout(500);
+      assert.deepEqual(errors, [], `${pageName} had console errors: ${errors.join('; ')}`);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+describe('pixel diff against six (skipped unless SIX_IMPORT_DIR is set)', {
+  skip: !sixExtDir,
+}, () => {
   let mergedShots;
   let sixShots;
 
@@ -94,7 +104,7 @@ describe('extension page screenshots and pixel diff', () => {
     assert.ok(mergedShots.length > 0);
   });
 
-  test('capture six current extension screenshots', async () => {
+  test('capture six screenshots from SIX_IMPORT_DIR', async () => {
     sixShots = await shootAll(sixExtDir, 'six');
     assert.ok(sixShots.length > 0);
   });
@@ -109,10 +119,8 @@ describe('extension page screenshots and pixel diff', () => {
       assert.ok(six, `no six shot for ${suffix}`);
       const mHash = createHash('sha256').update(merged.buf).digest('hex');
       const sHash = createHash('sha256').update(six.buf).digest('hex');
-      const identical = mHash === sHash;
-      diffs.push({ page: suffix, identical, mHash, sHash });
+      diffs.push({ page: suffix, identical: mHash === sHash, mHash, sHash });
     }
-    const allIdentical = diffs.every((d) => d.identical);
     const report = diffs
       .map(
         (d) =>
@@ -121,10 +129,7 @@ describe('extension page screenshots and pixel diff', () => {
       .join('\n');
     await writeFile(join(outDir, 'diff-report.txt'), report);
     process.stdout.write(`\n${report}\n`);
-    process.stdout.write(
-      allIdentical
-        ? '\nAll pairs identical — no visual change.\n'
-        : '\nSome pairs differ — visual review needed.\n'
-    );
+    const allIdentical = diffs.every((d) => d.identical);
+    process.stdout.write(allIdentical ? '\nAll pairs identical.\n' : '\nSome pairs differ.\n');
   });
 });
