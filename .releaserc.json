@@ -6,8 +6,8 @@
     [
       "@semantic-release/exec",
       {
-        "verifyReleaseCmd": "node scripts/check-six-version.mjs",
-        "prepareCmd": "node scripts/pack.mjs ${nextRelease.version}"
+        "prepareCmd": "node scripts/check-six-version.mjs && node scripts/pack.mjs ${nextRelease.version}",
+        "generateNotesCmd": "node scripts/six-release-notes.mjs"
       }
     ],
     [

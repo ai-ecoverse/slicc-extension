@@ -26,8 +26,10 @@ if (version !== undefined && !valid) {
   throw new Error(`not a Chrome extension version: ${version}`);
 }
 
-const sixTagPath = join(root, '.six-tag');
-const sixTag = existsSync(sixTagPath) ? readFileSync(sixTagPath, 'utf8').trim() : null;
+const sixRefPath = join(root, '.six-ref');
+const sixTag = existsSync(sixRefPath)
+  ? readFileSync(sixRefPath, 'utf8').trim().split(' ')[0]
+  : null;
 
 cpSync(join(root, 'extension'), stage, {
   recursive: true,

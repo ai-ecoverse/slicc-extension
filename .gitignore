@@ -4,6 +4,9 @@ coverage/
 artifacts/
 test/unit/
 extension/_metadata/
+extension/six-sw.js
+extension/sidepanel.js
+extension/secrets.js
 six-import/
 screenshots/
-.six-sha
+.six-ref

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,12 +7,33 @@ import esbuild from 'esbuild';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const sixRef = process.env.SIX_REF || readFileSync(resolve(root, '.six-tag'), 'utf8').trim();
-
-if (!sixRef) {
-  process.stderr.write('No six ref: set SIX_REF or create .six-tag\n');
-  process.exit(1);
+function resolveLatestV6Tag() {
+  const raw = execFileSync(
+    'git',
+    ['ls-remote', '--tags', 'https://github.com/ai-ecoverse/slicc.git', 'refs/tags/v6.*'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  const tags = raw
+    .split('\n')
+    .map((line) => line.replace(/.*refs\/tags\//, '').replace(/\^{}$/, ''))
+    .filter((t) => /^v6\.\d+/.test(t));
+  const unique = [...new Set(tags)];
+  unique.sort((a, b) => {
+    const pa = a.replace(/^v/, '').split('.').map(Number);
+    const pb = b.replace(/^v/, '').split('.').map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  });
+  const latest = unique.at(-1);
+  if (!latest) throw new Error('No v6.* tags found in ai-ecoverse/slicc');
+  return latest;
 }
+
+const sixRef = process.env.SIX_REF || resolveLatestV6Tag();
+process.stdout.write(`Resolved six ref: ${sixRef}\n`);
 
 const sixDir = mkdtempSync(resolve(tmpdir(), 'slicc-six-'));
 
@@ -125,7 +146,6 @@ await bundleAndStrip(
   { format: 'iife' }
 );
 
-const sixTagFile = resolve(root, '.six-sha');
-writeFileSync(sixTagFile, `${sixRef} ${sha}\n`);
+writeFileSync(resolve(root, '.six-ref'), `${sixRef} ${sha}\n`);
 
 process.stdout.write(`Built six-sw.js, sidepanel.js, secrets.js from ${sixRef}\n`);
