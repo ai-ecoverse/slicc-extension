@@ -116,7 +116,11 @@ export function compareVersions(a, b) {
 }
 
 export function liveVersions(status) {
-  const versions = [status.publishedItemRevisionStatus, status.submittedItemRevisionStatus]
+  const submitted =
+    status.submittedItemRevisionStatus?.state === 'PENDING_REVIEW'
+      ? undefined
+      : status.submittedItemRevisionStatus;
+  const versions = [status.publishedItemRevisionStatus, submitted]
     .flatMap((revision) => revision?.distributionChannels ?? [])
     .map((channel) => channel?.crxVersion)
     .filter((version) => typeof version === 'string' && version.length > 0);
@@ -161,19 +165,6 @@ export async function publishRelease(opts = {}) {
   }
 
   const preflight = await status();
-  const live = liveVersions(preflight);
-  if (live === null) {
-    throw new Error(
-      `Chrome Web Store status for ${config.itemId} has no crxVersion, so the live version is unknown. Refusing to publish. Status keys: ${Object.keys(preflight).join(', ')}`
-    );
-  }
-  const highest = live.reduce((a, b) => (compareVersions(a, b) >= 0 ? a : b), '0');
-  if (compareVersions(config.version, highest) <= 0) {
-    throw new Error(
-      `Version ${config.version} is not greater than the live Chrome Web Store version ${highest}. Refusing to publish.`
-    );
-  }
-  log.log(`Live version ${highest}, publishing ${config.version}`);
   if (preflight.warned) log.warn(`Item ${config.itemId} is currently warned.`);
   if (preflight.takenDown) log.warn(`Item ${config.itemId} is currently taken down.`);
 
@@ -204,6 +195,19 @@ export async function publishRelease(opts = {}) {
     }
   }
 
+  const live = liveVersions(preflight);
+  if (live === null) {
+    throw new Error(
+      `Chrome Web Store status for ${config.itemId} has no crxVersion, so the live version is unknown. Refusing to publish. Status keys: ${Object.keys(preflight).join(', ')}`
+    );
+  }
+  const highest = live.reduce((a, b) => (compareVersions(a, b) >= 0 ? a : b), '0');
+  if (compareVersions(config.version, highest) <= 0) {
+    throw new Error(
+      `Version ${config.version} is not greater than the live Chrome Web Store version ${highest}. Refusing to publish.`
+    );
+  }
+  log.log(`Live version ${highest}, publishing ${config.version}`);
   const zipBytes = readZip();
   log.log(`Uploading ${zipBytes.length} bytes to ${name}`);
   const uploadRes = await expectJson(
