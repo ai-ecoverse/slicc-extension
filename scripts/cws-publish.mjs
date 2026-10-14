@@ -42,40 +42,35 @@ const token = tokenData.access_token;
 const zip = readFileSync('artifacts/slicc-extension.zip');
 process.stdout.write(`Uploading ${zip.length} bytes to item ${itemId}\n`);
 
-const uploadRes = await fetch(
-  `https://www.googleapis.com/upload/chromewebstore/v1.1/items/${itemId}`,
-  {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'x-goog-api-version': '2',
-    },
-    body: zip,
-  }
-);
+const uploadRes = await fetch(`https://chromewebstore.googleapis.com/v2/items/${itemId}`, {
+  method: 'PUT',
+  headers: {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/zip',
+  },
+  body: zip,
+});
 const uploadData = await uploadRes.json();
 process.stdout.write(`Upload: ${JSON.stringify(uploadData)}\n`);
 if (uploadData.uploadState === 'FAILURE') {
   process.exit(1);
 }
 
-const publishBody = deployPercentage ? { deployPercentage: Number(deployPercentage) } : {};
-const publishRes = await fetch(
-  `https://www.googleapis.com/chromewebstore/v1.1/items/${itemId}/publish`,
-  {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'x-goog-api-version': '2',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(publishBody),
-  }
-);
+let publishUrl = `https://chromewebstore.googleapis.com/v2/items/${itemId}:publish`;
+if (deployPercentage) {
+  publishUrl += `?deployPercentage=${encodeURIComponent(deployPercentage)}`;
+}
+const publishRes = await fetch(publishUrl, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${token}`,
+  },
+});
 const publishData = await publishRes.json();
 process.stdout.write(`Publish: ${JSON.stringify(publishData)}\n`);
-if (publishData.status?.includes('OK')) {
+if (publishData.status?.includes('OK') || publishData.status?.includes('ITEM_PENDING_REVIEW')) {
   process.stdout.write('Published successfully\n');
 } else {
-  process.stdout.write('Publish response — review may be needed\n');
+  process.stderr.write('Publish failed or needs review\n');
+  process.exit(1);
 }
