@@ -248,9 +248,16 @@ function rejectExport(map, env) {
   const CODES = /* @__PURE__ */ new Set(["permission-denied", "redaction-unavailable", "session-not-found", "transfer-aborted", "transfer-corrupt", "schema-invalid", "attachment-unreadable"]);
   entry.reject(new Error(CODES.has(env.code) ? env.code : "transfer-corrupt"));
 }
+function nextBackoffDelayMs({ attempt, baseMs, capMs, jitter = 0, maxShift, random = Math.random }) {
+  let shift = Math.max(0, attempt);
+  if (maxShift !== void 0) shift = Math.min(shift, maxShift);
+  const exp = baseMs * 2 ** shift;
+  const capped = capMs === void 0 ? exp : Math.min(capMs, exp);
+  if (jitter <= 0) return capped;
+  const withJitter = capped + Math.round(capped * jitter * random());
+  return capMs === void 0 ? withJitter : Math.min(capMs, withJitter);
+}
 var SLICC_HOSTED_ORIGIN = "https://www.sliccy.ai";
-var KNOWN_PREFIXES = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "pk-", "xoxb-", "xoxp-", "xoxa-", "xoxs-", "AKIA", "ABIA", "ACCA", "ASIA", "sk-ant-", "Bearer "];
-var SORTED_PREFIXES = [...KNOWN_PREFIXES].sort((a, b) => b.length - a.length);
 var nudgeInFlight = /* @__PURE__ */ new WeakSet();
 function nudgeIframeRepaint(iframe, onDone) {
   if (nudgeInFlight.has(iframe)) {
@@ -284,44 +291,57 @@ function performNudge(iframe, onDone, onRafRestore) {
     if (viaRaf) onRafRestore?.();
     onDone?.();
   };
-  if (typeof requestAnimationFrame === "function") {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => restore(true));
+  const raf = globalThis.requestAnimationFrame;
+  if (typeof raf === "function") {
+    raf(() => {
+      raf(() => restore(true));
     });
   }
   setTimeout(() => restore(false), 100);
 }
 var CHERRY_PANEL_PORT_NAME = "cherry-panel";
-var SIDE_PANEL_FEATURES = { terminal: false, files: false, memory: false, browser: false, newSprinkle: false, monitor: false, modelPicker: false, history: true, nav: true };
+var SIDE_PANEL_FEATURES = { terminal: false, files: false, memory: false, browser: false, monitor: false, modelPicker: false, history: true, nav: true };
 var sliccOriginDefault = false ? "http://localhost:8787" : SLICC_HOSTED_ORIGIN;
 var BOOT_TIMEOUT_MS = 2e4;
 var IFRAME_LOAD_TIMEOUT_MS = 15e3;
+var PANEL_STATUS_TEXT = { starting: "Starting SLICC\u2026", slow: "SLICC is still starting in its tab. Chrome slows down background tabs, so bringing it to the front usually lets it finish.", live: "", disconnected: "Disconnected from SLICC." };
+var PANEL_ACTION_LABEL = { slow: "Show SLICC tab", disconnected: "Retry" };
+function oneShotTimer() {
+  let id = null;
+  const clear = () => {
+    if (id) clearTimeout(id);
+    id = null;
+  };
+  return { clear, start(ms, fn) {
+    clear();
+    id = setTimeout(() => {
+      id = null;
+      fn();
+    }, ms);
+  } };
+}
+function disconnectQuietly(port) {
+  try {
+    port?.disconnect();
+  } catch {
+  }
+}
 function createSidePanelController(deps) {
   let handle = null;
   let currentJoinUrl = null;
   let disposed = false;
   let port = null;
-  let reconnectDelay = 250;
-  let bootTimer = null;
-  let iframeLoadTimer = null;
-  const clearBootTimer = () => {
-    if (bootTimer) {
-      clearTimeout(bootTimer);
-      bootTimer = null;
-    }
-  };
-  const clearIframeLoadTimer = () => {
-    if (iframeLoadTimer) {
-      clearTimeout(iframeLoadTimer);
-      iframeLoadTimer = null;
-    }
-  };
+  let reconnectAttempt = 0;
+  const bootTimer = oneShotTimer();
+  const iframeLoadTimer = oneShotTimer();
+  let bootSlow = false;
   const blankIframe = () => {
     deps.iframe.setAttribute("src", "about:blank");
   };
   const teardown = () => {
-    clearBootTimer();
-    clearIframeLoadTimer();
+    bootTimer.clear();
+    bootSlow = false;
+    iframeLoadTimer.clear();
     handle?.destroy();
     handle = null;
     currentJoinUrl = null;
@@ -333,7 +353,7 @@ function createSidePanelController(deps) {
   };
   const onIframeLoad = () => {
     if (deps.iframe.getAttribute("src") === "about:blank") return;
-    clearIframeLoadTimer();
+    iframeLoadTimer.clear();
     nudgeIframeRepaint(deps.iframe);
   };
   deps.iframe.addEventListener("load", onIframeLoad);
@@ -354,20 +374,25 @@ function createSidePanelController(deps) {
         deps.setStatus("live");
         return;
       }
+      if (bootSlow) {
+        deps.setStatus("slow");
+        return;
+      }
       deps.setStatus("starting");
-      clearBootTimer();
-      bootTimer = setTimeout(() => {
-        bootTimer = null;
-        if (!disposed) goDisconnected();
-      }, BOOT_TIMEOUT_MS);
+      bootTimer.start(BOOT_TIMEOUT_MS, () => {
+        if (disposed) return;
+        bootSlow = true;
+        deps.setStatus("slow");
+      });
       return;
     }
     if (msg.state === "disconnected") {
       goDisconnected();
       return;
     }
-    reconnectDelay = 250;
-    clearBootTimer();
+    reconnectAttempt = 0;
+    bootTimer.clear();
+    bootSlow = false;
     if (msg.joinUrl === currentJoinUrl && handle) {
       deps.setStatus("live");
       return;
@@ -376,11 +401,9 @@ function createSidePanelController(deps) {
     handle = null;
     blankIframe();
     currentJoinUrl = msg.joinUrl;
-    clearIframeLoadTimer();
-    iframeLoadTimer = setTimeout(() => {
-      iframeLoadTimer = null;
+    iframeLoadTimer.start(IFRAME_LOAD_TIMEOUT_MS, () => {
       if (!disposed && handle) goDisconnected();
-    }, IFRAME_LOAD_TIMEOUT_MS);
+    });
     handle = deps.mountSlicc({ iframe: deps.iframe, joinToken: msg.joinUrl, uiOnly: true, sliccOrigin: deps.sliccOrigin, capabilities: { navigate: false, screenshot: "none", openUrl: false }, features: SIDE_PANEL_FEATURES, hooks: { onSliccEvent: (name) => {
       if (name === "slicc.open-leader-tab") requestLeaderFocus(true);
       if (name === "slicc.focus-leader-tab") requestLeaderFocus(false);
@@ -400,8 +423,8 @@ function createSidePanelController(deps) {
       if (disposed) return;
       setTimeout(() => {
         if (!disposed) wire();
-      }, reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 2, 5e3);
+      }, nextBackoffDelayMs({ attempt: reconnectAttempt, baseMs: 250, capMs: 5e3 }));
+      reconnectAttempt += 1;
     });
     try {
       port.postMessage({ kind: "hello" });
@@ -409,24 +432,40 @@ function createSidePanelController(deps) {
     }
   };
   wire();
-  return { dispose() {
+  return { focusLeader: () => requestLeaderFocus(false), retry() {
+    if (disposed) return;
+    disconnectQuietly(port);
+    port = null;
+    reconnectAttempt = 0;
+    wire();
+  }, dispose() {
     disposed = true;
     teardown();
     deps.iframe.removeEventListener("load", onIframeLoad);
-    try {
-      port?.disconnect();
-    } catch {
-    }
+    disconnectQuietly(port);
   } };
 }
 if (typeof chrome !== "undefined" && chrome?.runtime?.id) {
   const iframe = document.getElementById("cherry-follower");
   const statusEl = document.getElementById("cherry-status");
+  const statusText = document.getElementById("cherry-status-text");
+  const actionButton = document.getElementById("cherry-status-action");
+  let current = "starting";
   const setStatus = (s) => {
+    current = s;
     if (!statusEl) return;
-    statusEl.textContent = s === "live" ? "" : s === "starting" ? "Starting SLICC\u2026" : "Disconnected \u2014 reopen to retry";
+    if (statusText) statusText.textContent = PANEL_STATUS_TEXT[s];
+    if (actionButton) {
+      const label = PANEL_ACTION_LABEL[s];
+      actionButton.hidden = !label;
+      actionButton.textContent = label ?? "";
+    }
     statusEl.dataset.state = s;
   };
-  createSidePanelController({ connect: () => chrome.runtime.connect({ name: CHERRY_PANEL_PORT_NAME }), mountSlicc, iframe, setStatus, sliccOrigin: sliccOriginDefault });
+  const controller = createSidePanelController({ connect: () => chrome.runtime.connect({ name: CHERRY_PANEL_PORT_NAME }), mountSlicc, iframe, setStatus, sliccOrigin: sliccOriginDefault });
+  actionButton?.addEventListener("click", () => {
+    if (current === "disconnected") controller.retry();
+    else controller.focusLeader();
+  });
 }
 export { createSidePanelController };

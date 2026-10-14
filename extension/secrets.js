@@ -1,6 +1,5 @@
+"use strict";
 (() => {
-  var KNOWN_PREFIXES = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "pk-", "xoxb-", "xoxp-", "xoxa-", "xoxs-", "AKIA", "ABIA", "ACCA", "ASIA", "sk-ant-", "Bearer "];
-  var SORTED_PREFIXES = [...KNOWN_PREFIXES].sort((a, b) => b.length - a.length);
   var OAUTH_EXTRA_DOMAINS_KEY = "slicc_oauth_extra_domains";
   function readOAuthExtras(storage2) {
     try {
@@ -147,24 +146,25 @@
     return pairEnvEntriesToSecrets(Object.entries(all).flatMap(([key, value]) => typeof value === "string" ? [{ key, value }] : []));
   }
   var $ = (id) => document.getElementById(id);
-  function el(tag, props, ...children) {
-    const node = document.createElement(tag);
-    if (props) {
-      for (const [k, v] of Object.entries(props)) {
-        if (k === "class") node.className = v;
-        else if (k === "dataset") Object.assign(node.dataset, v);
-        else if (k === "text") node.textContent = v;
-        else if (k === "on") {
-          for (const [evt, fn] of Object.entries(v)) {
-            node.addEventListener(evt, fn);
-          }
-        } else if (k.startsWith("style:")) {
-          node.style.setProperty(k.slice(6), v);
-        } else {
-          node.setAttribute(k, v);
+  function applyElProps(node, props) {
+    for (const [k, v] of Object.entries(props)) {
+      if (k === "class") node.className = v;
+      else if (k === "dataset") Object.assign(node.dataset, v);
+      else if (k === "text") node.textContent = v;
+      else if (k === "on") {
+        for (const [evt, fn] of Object.entries(v)) {
+          node.addEventListener(evt, fn);
         }
+      } else if (k.startsWith("style:")) {
+        node.style.setProperty(k.slice(6), v);
+      } else {
+        node.setAttribute(k, v);
       }
     }
+  }
+  function el(tag, props, ...children) {
+    const node = document.createElement(tag);
+    if (props) applyElProps(node, props);
     for (const child of children) {
       if (child == null) continue;
       node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
@@ -178,7 +178,38 @@
     t.classList.add("show");
     setTimeout(() => t.classList.remove("show"), 2200);
   }
+  function reportAsyncError(err) {
+    showToast(`Failed: ${err}`, true);
+  }
+  function refreshList() {
+    renderList().catch(reportAsyncError);
+  }
   var storage = chrome.storage.local;
+  function createCopyNameButton(entry) {
+    return el("button", { class: "btn-secondary btn", text: "Copy name", "style:font-size": "11px", "style:padding": "4px 8px", on: { click: async () => {
+      try {
+        await navigator.clipboard.writeText(entry.name);
+        showToast(`Copied "${entry.name}"`);
+      } catch {
+        showToast("Clipboard failed", true);
+      }
+    } } });
+  }
+  function createDeleteSecretButton(entry) {
+    return el("button", { class: "btn-danger", text: "Delete", on: { click: async () => {
+      if (!confirm(`Delete secret "${entry.name}"?`)) return;
+      try {
+        await deleteSecret(storage, entry.name);
+        showToast(`Deleted ${entry.name}`);
+        refreshList();
+      } catch (err) {
+        showToast(`Failed: ${err}`, true);
+      }
+    } } });
+  }
+  function createSecretRow(entry) {
+    return el("div", { class: "secret-row", dataset: { name: entry.name } }, el("div", { class: "secret-meta" }, el("div", { class: "secret-name", text: entry.name }), el("div", { class: "secret-domains", text: entry.domains.join(", ") })), createCopyNameButton(entry), createDeleteSecretButton(entry));
+  }
   async function renderList() {
     const container = $("list");
     container.replaceChildren();
@@ -194,24 +225,7 @@
       return;
     }
     for (const entry of entries) {
-      const row = el("div", { class: "secret-row", dataset: { name: entry.name } }, el("div", { class: "secret-meta" }, el("div", { class: "secret-name", text: entry.name }), el("div", { class: "secret-domains", text: entry.domains.join(", ") })), el("button", { class: "btn-secondary btn", text: "Copy name", "style:font-size": "11px", "style:padding": "4px 8px", on: { click: async () => {
-        try {
-          await navigator.clipboard.writeText(entry.name);
-          showToast(`Copied "${entry.name}"`);
-        } catch {
-          showToast("Clipboard failed", true);
-        }
-      } } }), el("button", { class: "btn-danger", text: "Delete", on: { click: async () => {
-        if (!confirm(`Delete secret "${entry.name}"?`)) return;
-        try {
-          await deleteSecret(storage, entry.name);
-          showToast(`Deleted ${entry.name}`);
-          renderList();
-        } catch (err) {
-          showToast(`Failed: ${err}`, true);
-        }
-      } } }));
-      container.appendChild(row);
+      container.appendChild(createSecretRow(entry));
     }
   }
   function setupTabs() {
@@ -227,8 +241,12 @@
       });
     });
   }
+  function parseCommaDomains(raw) {
+    const domains = raw.trim().split(",").map((d) => d.trim()).filter(Boolean);
+    return domains.length > 0 ? domains : void 0;
+  }
   async function onSaveS3() {
-    const result = await saveS3Profile(storage, { profile: $("s3-profile").value.trim(), accessKey: $("s3-key").value.trim(), secretKey: $("s3-secret").value, region: $("s3-region").value.trim() || void 0, endpoint: $("s3-endpoint").value.trim() || void 0, pathStyle: $("s3-pathstyle").value === "true", domains: $("s3-domains").value.trim().split(",").map((d) => d.trim()).filter(Boolean) || void 0 });
+    const result = await saveS3Profile(storage, { profile: $("s3-profile").value.trim(), accessKey: $("s3-key").value.trim(), secretKey: $("s3-secret").value, region: $("s3-region").value.trim() || void 0, endpoint: $("s3-endpoint").value.trim() || void 0, pathStyle: $("s3-pathstyle").value === "true", domains: parseCommaDomains($("s3-domains").value) });
     if (!result.ok) {
       showToast(result.error ?? "Failed", true);
       return;
@@ -236,7 +254,7 @@
     const profileName = $("s3-profile").value.trim();
     showToast(`Saved profile "${profileName}"`);
     clearS3Form();
-    renderList();
+    refreshList();
   }
   function clearS3Form() {
     ["s3-profile", "s3-key", "s3-secret", "s3-region", "s3-endpoint", "s3-domains"].forEach((id) => {
@@ -245,7 +263,7 @@
     $("s3-pathstyle").value = "";
   }
   async function onSaveCustom() {
-    const result = await saveCustomSecret(storage, { name: $("c-name").value.trim(), value: $("c-value").value, domains: $("c-domains").value.trim().split(",").map((d) => d.trim()).filter(Boolean) });
+    const result = await saveCustomSecret(storage, { name: $("c-name").value.trim(), value: $("c-value").value, domains: parseCommaDomains($("c-domains").value) ?? [] });
     if (!result.ok) {
       showToast(result.error ?? "Failed", true);
       return;
@@ -253,12 +271,33 @@
     const name = $("c-name").value.trim();
     showToast(`Saved "${name}"`);
     clearCustomForm();
-    renderList();
+    refreshList();
   }
   function clearCustomForm() {
     ["c-name", "c-value", "c-domains"].forEach((id) => {
       $(id).value = "";
     });
+  }
+  function createOAuthClearButton(providerId) {
+    return el("button", { class: "btn-danger", text: "Clear", on: { click: () => {
+      if (!confirm(`Clear all extras for "${providerId}"?`)) return;
+      clearOAuthExtras(localStorage, providerId);
+      showToast(`Cleared extras for ${providerId}`);
+      renderOAuthExtras();
+    } } });
+  }
+  function createOAuthDomainRemoveButton(providerId, domain) {
+    return el("button", { class: "btn-secondary btn", text: "Remove", "style:font-size": "11px", "style:padding": "4px 8px", on: { click: () => {
+      const r = removeOAuthExtraDomain(localStorage, providerId, domain);
+      if (r.removed) showToast(`Removed ${domain} from ${providerId}`);
+      renderOAuthExtras();
+    } } });
+  }
+  function appendOAuthProviderSection(container, providerId, domains) {
+    container.appendChild(el("div", { class: "secret-row", dataset: { provider: providerId } }, el("div", { class: "secret-meta" }, el("div", { class: "secret-name", text: providerId }), el("div", { class: "secret-domains", text: domains.join(", ") })), createOAuthClearButton(providerId)));
+    for (const domain of domains) {
+      container.appendChild(el("div", { class: "secret-row", "style:padding-left": "24px" }, el("div", { class: "secret-meta" }, el("div", { class: "secret-domains", text: domain })), createOAuthDomainRemoveButton(providerId, domain)));
+    }
   }
   function renderOAuthExtras() {
     const container = $("od-list");
@@ -272,21 +311,7 @@
     for (const providerId of providers) {
       const domains = store[providerId] ?? [];
       if (domains.length === 0) continue;
-      const row = el("div", { class: "secret-row", dataset: { provider: providerId } }, el("div", { class: "secret-meta" }, el("div", { class: "secret-name", text: providerId }), el("div", { class: "secret-domains", text: domains.join(", ") })), el("button", { class: "btn-danger", text: "Clear", on: { click: () => {
-        if (!confirm(`Clear all extras for "${providerId}"?`)) return;
-        clearOAuthExtras(localStorage, providerId);
-        showToast(`Cleared extras for ${providerId}`);
-        renderOAuthExtras();
-      } } }));
-      container.appendChild(row);
-      for (const d of domains) {
-        const domainRow = el("div", { class: "secret-row", "style:padding-left": "24px" }, el("div", { class: "secret-meta" }, el("div", { class: "secret-domains", text: d })), el("button", { class: "btn-secondary btn", text: "Remove", "style:font-size": "11px", "style:padding": "4px 8px", on: { click: () => {
-          const r = removeOAuthExtraDomain(localStorage, providerId, d);
-          if (r.removed) showToast(`Removed ${d} from ${providerId}`);
-          renderOAuthExtras();
-        } } }));
-        container.appendChild(domainRow);
-      }
+      appendOAuthProviderSection(container, providerId, domains);
     }
   }
   function onAddOAuthExtra() {
@@ -311,15 +336,19 @@
   }
   document.addEventListener("DOMContentLoaded", () => {
     setupTabs();
-    renderList();
+    refreshList();
     renderOAuthExtras();
     $("refreshBtn").addEventListener("click", () => {
-      renderList();
+      refreshList();
       renderOAuthExtras();
     });
-    $("s3-save").addEventListener("click", onSaveS3);
+    $("s3-save").addEventListener("click", () => {
+      onSaveS3().catch(reportAsyncError);
+    });
     $("s3-clear").addEventListener("click", clearS3Form);
-    $("c-save").addEventListener("click", onSaveCustom);
+    $("c-save").addEventListener("click", () => {
+      onSaveCustom().catch(reportAsyncError);
+    });
     $("c-clear").addEventListener("click", clearCustomForm);
     $("od-add").addEventListener("click", onAddOAuthExtra);
   });

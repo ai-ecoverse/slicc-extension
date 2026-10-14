@@ -10,6 +10,47 @@ function _isProtectedUrl(url) {
     return _protDomains.some(function(d) { return h === d || h.endsWith("." + d); });
   } catch { return false; }
 }
+var CHUNK_SIZE = 32768;
+function nodeBuffer() {
+  return globalThis.Buffer;
+}
+var ATOB_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+var BASE64_WHITESPACE_RE = /[\t\n\f\r ]/g;
+function normalizeBase64(b64) {
+  const compact = b64.replace(BASE64_WHITESPACE_RE, "");
+  return ATOB_BASE64_RE.test(compact) ? compact : null;
+}
+function padded(b64) {
+  const remainder = b64.length % 4;
+  return remainder === 0 ? b64 : b64 + "=".repeat(4 - remainder);
+}
+function base64ToUint8(b64) {
+  const B = nodeBuffer();
+  if (B) {
+    const normalized = normalizeBase64(b64);
+    if (normalized === null) throw new Error("Invalid base64 string");
+    return new Uint8Array(B.from(padded(normalized), "base64"));
+  }
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+function uint8ToBase64(bytes) {
+  const compact = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+  const B = nodeBuffer();
+  if (B) {
+    return B.from(compact).toString("base64");
+  }
+  let binary = "";
+  for (let i = 0; i < compact.byteLength; i += CHUNK_SIZE) {
+    const slice = compact.subarray(i, Math.min(i + CHUNK_SIZE, compact.byteLength));
+    binary += String.fromCharCode.apply(null, slice);
+  }
+  return btoa(binary);
+}
 var SLICC_HOSTED_ORIGIN = "https://www.sliccy.ai";
 function unmaskString(pipeline, hostname, value) {
   const { text } = pipeline.unmaskBody(value, hostname);
@@ -53,6 +94,415 @@ function unmaskCdpFrame(frame, hostname, pipeline) {
   }
   return { frame, changed: false };
 }
+function isTextContentType(contentType) {
+  if (!contentType) return false;
+  const normalized = contentType.toLowerCase();
+  return normalized.startsWith("text/") || normalized.includes("json") || normalized.includes("xml") || normalized.includes("javascript") || normalized.includes("ecmascript") || normalized.includes("html") || normalized.includes("css") || normalized.includes("svg");
+}
+function isFormContentType(contentType) {
+  if (!contentType) return false;
+  return contentType.toLowerCase().includes("urlencoded");
+}
+function isTextRequestContentType(contentType) {
+  if (!contentType) return false;
+  return isTextContentType(contentType) || isFormContentType(contentType);
+}
+function normalizeLinkHeaderInput(input) {
+  if (input == null) return null;
+  if (Array.isArray(input)) {
+    const headerString = input.join(", ").replace(/\n/g, ", ");
+    return headerString.length === 0 ? null : headerString;
+  }
+  if (typeof input === "string") {
+    const headerString = input.replace(/\n/g, ", ");
+    return headerString.length === 0 ? null : headerString;
+  }
+  return null;
+}
+function readUnquotedParamValue(headerString, i) {
+  const len = headerString.length;
+  const start = i;
+  while (i < len && headerString[i] !== ";" && headerString[i] !== "," && !isOWSChar(headerString[i])) i++;
+  return { value: headerString.slice(start, i), end: i };
+}
+function readParamValue(headerString, i) {
+  const len = headerString.length;
+  i = skipOWS(headerString, i);
+  if (i >= len || headerString[i] !== "=") return { value: "", end: i };
+  i++;
+  i = skipOWS(headerString, i);
+  if (i < len && headerString[i] === '"') return readQuotedString(headerString, i);
+  return readUnquotedParamValue(headerString, i);
+}
+function readParamName(headerString, i) {
+  const len = headerString.length;
+  const nameStart = i;
+  while (i < len && isTokenChar(headerString.charCodeAt(i))) i++;
+  if (i < len && headerString[i] === "*") i++;
+  if (nameStart === i) return null;
+  return { name: headerString.slice(nameStart, i).toLowerCase(), end: i };
+}
+function parseLinkParameters(headerString, startIndex) {
+  const rawParams = [];
+  const len = headerString.length;
+  let i = startIndex;
+  while (i < len) {
+    i = skipOWS(headerString, i);
+    if (i >= len) break;
+    if (headerString[i] === ",") return { params: rawParams, endIndex: i + 1 };
+    if (headerString[i] !== ";") {
+      return { params: rawParams, endIndex: skipToNextValue(headerString, i) };
+    }
+    i++;
+    i = skipOWS(headerString, i);
+    const parsedName = readParamName(headerString, i);
+    if (!parsedName) {
+      return { params: rawParams, endIndex: skipToNextValue(headerString, i) };
+    }
+    const { value, end } = readParamValue(headerString, parsedName.end);
+    rawParams.push([parsedName.name, value]);
+    i = end;
+  }
+  return { params: rawParams, endIndex: i };
+}
+function parseLinkHeader(input, baseUrl) {
+  const headerString = normalizeLinkHeaderInput(input);
+  if (headerString == null) return [];
+  const out = [];
+  const len = headerString.length;
+  let i = 0;
+  while (i < len) {
+    i = skipOWS(headerString, i);
+    if (i >= len) break;
+    if (headerString[i] !== "<") {
+      i = skipToNextValue(headerString, i);
+      continue;
+    }
+    const uriEnd = headerString.indexOf(">", i + 1);
+    if (uriEnd === -1) break;
+    const rawUri = headerString.slice(i + 1, uriEnd);
+    const { params: rawParams, endIndex } = parseLinkParameters(headerString, uriEnd + 1);
+    i = endIndex;
+    const link = buildLink(rawUri, rawParams, baseUrl);
+    if (link) out.push(link);
+  }
+  return out;
+}
+function skipOWS(s, i) {
+  while (i < s.length && (s[i] === " " || s[i] === "	")) i++;
+  return i;
+}
+function isOWSChar(c) {
+  return c === " " || c === "	";
+}
+function skipToNextValue(s, i) {
+  let inQuote = false;
+  while (i < s.length) {
+    const c = s[i];
+    if (inQuote) {
+      if (c === "\\" && i + 1 < s.length) {
+        i += 2;
+        continue;
+      }
+      if (c === '"') inQuote = false;
+    } else {
+      if (c === '"') inQuote = true;
+      else if (c === ",") return i + 1;
+    }
+    i++;
+  }
+  return i;
+}
+function readQuotedString(s, i) {
+  i++;
+  let result = "";
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "\\") {
+      i++;
+      if (i < s.length) {
+        result += s[i];
+        i++;
+      }
+    } else if (c === '"') {
+      return { value: result, end: i + 1 };
+    } else {
+      result += c;
+      i++;
+    }
+  }
+  return { value: result, end: i };
+}
+function isTokenChar(code) {
+  if (code >= 48 && code <= 57) return true;
+  if (code >= 65 && code <= 90) return true;
+  if (code >= 97 && code <= 122) return true;
+  switch (code) {
+    case 33:
+    case 35:
+    case 36:
+    case 37:
+    case 38:
+    case 39:
+    case 42:
+    case 43:
+    case 45:
+    case 46:
+    case 94:
+    case 95:
+    case 96:
+    case 124:
+    case 126:
+      return true;
+  }
+  return false;
+}
+function buildLink(rawUri, rawParams, baseUrl) {
+  const params = {};
+  const extOverrides = {};
+  for (const [name, value] of rawParams) {
+    if (name.endsWith("*")) {
+      const decoded = decodeExtValue(value);
+      if (decoded != null) extOverrides[name.slice(0, -1)] = decoded;
+      continue;
+    }
+    if (name === "rel" && "rel" in params) continue;
+    params[name] = value;
+  }
+  for (const [name, value] of Object.entries(extOverrides)) {
+    params[name] = value;
+  }
+  const href = resolveURI(rawUri, baseUrl);
+  const anchor = params.anchor != null ? resolveURI(params.anchor, baseUrl) : void 0;
+  const relRaw = params.rel ?? "";
+  const rel = relRaw.split(/[ \t]+/).filter((s) => s.length > 0);
+  const link = { href, rel, params };
+  if (anchor != null) link.anchor = anchor;
+  if (params.type != null) link.type = params.type;
+  if (params.title != null) link.title = params.title;
+  if (params.hreflang != null) link.hreflang = params.hreflang;
+  return link;
+}
+function resolveURI(ref, baseUrl) {
+  if (!baseUrl) return ref;
+  try {
+    return new URL(ref, baseUrl).toString();
+  } catch {
+    return ref;
+  }
+}
+function decodeExtValue(value) {
+  const firstQuote = value.indexOf("'");
+  if (firstQuote === -1) return null;
+  const secondQuote = value.indexOf("'", firstQuote + 1);
+  if (secondQuote === -1) return null;
+  const charset = value.slice(0, firstQuote).toLowerCase();
+  if (charset !== "utf-8") return null;
+  try {
+    return decodeURIComponent(value.slice(secondQuote + 1));
+  } catch {
+    return null;
+  }
+}
+function getLinkHeaderValuesFromWebRequest(headers) {
+  if (!headers) return [];
+  const out = [];
+  for (const h of headers) {
+    if (h.name.toLowerCase() !== "link") continue;
+    if (typeof h.value === "string" && h.value.length > 0) out.push(h.value);
+  }
+  return out;
+}
+var AI_CATALOG_REL = "ai-catalog";
+function extractCatalog(links) {
+  for (const link of links) {
+    if (link.rel.includes(AI_CATALOG_REL)) {
+      return { kind: "ai-catalog", url: link.href };
+    }
+  }
+  return null;
+}
+function discoveryFingerprint(input) {
+  return [input.origin ?? "", input.kind ?? "", input.url ?? ""].join("\0");
+}
+function extractCatalogFromWebRequest(headers, baseUrl) {
+  const values = getLinkHeaderValuesFromWebRequest(headers);
+  if (values.length === 0) return { match: null, links: [] };
+  const links = parseLinkHeader(values, baseUrl);
+  return { match: extractCatalog(links), links };
+}
+var EXTENSION_BRIDGE_PROTOCOL_VERSION = 1;
+var EXTENSION_BRIDGE_PORT_NAME = "slicc.cdp-bridge";
+var KINDS = /* @__PURE__ */ new Set(["handshake.hello", "handshake.welcome", "handshake.rejected", "cdp.request", "cdp.response", "cdp.event", "extension.lick", "extension.discovery", "leader.join-url", "extension.open-settings"]);
+function isExtensionBridgeEnvelope(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value;
+  return v.bridge === EXTENSION_BRIDGE_PROTOCOL_VERSION && typeof v.channelId === "string" && typeof v.kind === "string" && KINDS.has(v.kind);
+}
+function isBridgeVersionMismatch(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value;
+  return typeof v.bridge === "number" && v.bridge !== EXTENSION_BRIDGE_PROTOCOL_VERSION && typeof v.channelId === "string" && typeof v.kind === "string";
+}
+var HANDOFF_REL = `${SLICC_HOSTED_ORIGIN}/rel/handoff`;
+var UPSKILL_REL = `${SLICC_HOSTED_ORIGIN}/rel/upskill`;
+function canonicaliseUpskillPath(raw) {
+  const trimmed = raw.replace(/\/+$/, "");
+  const lower = trimmed.toLowerCase();
+  if (lower.endsWith("/skill.md")) return trimmed.slice(0, -"/skill.md".length);
+  if (lower === "skill.md") return "";
+  return trimmed;
+}
+var SAFE_BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
+var SAFE_PATH_RE = /^[A-Za-z0-9._/-]+$/;
+var MAX_BRANCH_LEN = 250;
+var MAX_PATH_LEN = 1024;
+function isSafeUpskillBranch(value) {
+  if (value.length === 0 || value.length > MAX_BRANCH_LEN) return false;
+  if (!SAFE_BRANCH_RE.test(value)) return false;
+  if (value.startsWith("-") || value.startsWith("/") || value.endsWith("/")) return false;
+  if (value.includes("..")) return false;
+  if (value.endsWith(".lock")) return false;
+  return true;
+}
+function isSafeUpskillPath(value) {
+  if (value.length === 0 || value.length > MAX_PATH_LEN) return false;
+  if (!SAFE_PATH_RE.test(value)) return false;
+  if (value.startsWith("-") || value.startsWith("/")) return false;
+  if (value.includes("..")) return false;
+  return true;
+}
+function applyUpskillParams(result, params) {
+  const branch = params.branch;
+  if (typeof branch === "string" && isSafeUpskillBranch(branch)) result.branch = branch;
+  const pathParam = params.path;
+  if (typeof pathParam === "string" && pathParam.length > 0) {
+    const canon = canonicaliseUpskillPath(pathParam);
+    if (canon.length > 0 && isSafeUpskillPath(canon)) result.path = canon;
+  }
+}
+function extractHandoff(links) {
+  for (const link of links) {
+    if (link.rel.includes(HANDOFF_REL)) {
+      const result = { verb: "handoff", target: link.href };
+      if (link.title != null && link.title.length > 0) result.instruction = link.title;
+      return result;
+    }
+    if (link.rel.includes(UPSKILL_REL)) {
+      const result = { verb: "upskill", target: link.href };
+      if (link.title != null && link.title.length > 0) result.instruction = link.title;
+      applyUpskillParams(result, link.params);
+      return result;
+    }
+  }
+  return null;
+}
+function handoffFingerprint(input) {
+  return [input.verb, input.target, input.branch ?? "", input.path ?? "", input.instruction ?? ""].join("\0");
+}
+function extractHandoffFromWebRequest(headers, baseUrl) {
+  const values = getLinkHeaderValuesFromWebRequest(headers);
+  if (values.length === 0) return { match: null, links: [] };
+  const links = parseLinkHeader(values, baseUrl);
+  return { match: extractHandoff(links), links };
+}
+var LEADER_EXT_ID_QUERY_NAME = "ext";
+function decodeForbiddenRequestHeaders(headers) {
+  const result = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    if (lower === "x-proxy-cookie") {
+      result["cookie"] = value;
+    } else if (lower === "x-proxy-origin") {
+      result["origin"] = value;
+    } else if (lower === "x-proxy-referer") {
+      result["referer"] = value;
+    } else if (lower.startsWith("x-proxy-proxy-")) {
+      result[lower.replace(/^x-proxy-/, "")] = value;
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+var PROXY_WWW_AUTHENTICATE_HEADER = "X-Proxy-Www-Authenticate";
+var RAW_FETCH_PROTOCOL_VERSION = 1;
+var RAW_FETCH_BRIDGE_REQUEST_BODY_CAP = 256 * 1024 * 1024;
+var RAW_FETCH_MAX_HEAD_BYTES = 1024 * 1024;
+var RAW_REQUEST_SKIP_HEADERS = /* @__PURE__ */ new Set(["connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length", "accept-encoding", "expect"]);
+var RAW_RESPONSE_SKIP_HEADERS = /* @__PURE__ */ new Set(["connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"]);
+var NODE_DECODED_CODINGS = /* @__PURE__ */ new Set(["gzip", "x-gzip", "deflate", "br"]);
+var BROWSER_DECODED_CODINGS = /* @__PURE__ */ new Set([...NODE_DECODED_CODINGS, "zstd"]);
+function isDecodedPartialResponse(input) {
+  if (input.status !== 206) return false;
+  const encoding = input.headers.filter(([name]) => name.toLowerCase() === "content-encoding").map(([, value]) => value).join(",");
+  return codingsWereDecoded(encoding, input.decodedCodings ?? NODE_DECODED_CODINGS);
+}
+var NULL_BODY_STATUSES = /* @__PURE__ */ new Set([101, 103, 204, 205, 304]);
+function connectionTokens(headers) {
+  const tokens = /* @__PURE__ */ new Set();
+  for (const [name, value] of headers) {
+    if (name.toLowerCase() !== "connection") continue;
+    for (const token of value.split(",")) {
+      const trimmed = token.trim().toLowerCase();
+      if (trimmed) tokens.add(trimmed);
+    }
+  }
+  return tokens;
+}
+function stripRawRequestHeaders(headers) {
+  const named = connectionTokens(headers);
+  return headers.filter(([name]) => {
+    const lower = name.toLowerCase();
+    return !RAW_REQUEST_SKIP_HEADERS.has(lower) && !named.has(lower);
+  });
+}
+function foldRawRequestHeaders(headers) {
+  const out = {};
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
+    const prior = out[lower];
+    if (prior === void 0) out[lower] = value;
+    else out[lower] = `${prior}${lower === "cookie" ? "; " : ", "}${value}`;
+  }
+  return out;
+}
+function codingsWereDecoded(contentEncoding, decodedCodings) {
+  const codings = contentEncoding.split(",").map((c) => c.trim().toLowerCase()).filter((c) => c !== "" && c !== "identity");
+  return codings.length > 0 && codings.every((c) => decodedCodings.has(c));
+}
+function rawResponseHasBody(method, status) {
+  return method.toUpperCase() !== "HEAD" && !NULL_BODY_STATUSES.has(status);
+}
+function rawResponseHeaders(input) {
+  const named = connectionTokens(input.headers);
+  const withoutHop = input.headers.filter(([name]) => {
+    const lower = name.toLowerCase();
+    return !RAW_RESPONSE_SKIP_HEADERS.has(lower) && !named.has(lower);
+  });
+  if (!rawResponseHasBody(input.method, input.status)) return withoutHop;
+  const encoding = withoutHop.filter(([name]) => name.toLowerCase() === "content-encoding").map(([, value]) => value).join(",");
+  const decoded = codingsWereDecoded(encoding, input.decodedCodings ?? NODE_DECODED_CODINGS);
+  const dropLength = decoded || input.bodyRewritten;
+  return withoutHop.filter(([name]) => {
+    const lower = name.toLowerCase();
+    if (lower === "content-length") return !dropLength;
+    if (lower === "content-encoding") return !decoded && encoding.trim().toLowerCase() !== "identity";
+    return true;
+  });
+}
+var RAW_FETCH_TAG_PREFIX = "slicc-raw-";
+var RAW_FETCH_PORT_CHUNK_BYTES = 256 * 1024;
+var RAW_FETCH_PORT_WINDOW = 4;
+var RAW_FETCH_BUFFERED_REQUEST_BODY_CAP = 256 * 1024 * 1024;
+var RAW_FETCH_STREAM_THRESHOLD_BYTES = 8 * 1024 * 1024;
+function reasonFromStatusLine(statusLine) {
+  const match = /^HTTP\/\S+\s+\d{3}\s*(.*)$/.exec(statusLine ?? "");
+  return match?.[1]?.trim() ?? "";
+}
+function bytesToHex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
 var KNOWN_PREFIXES = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "pk-", "xoxb-", "xoxp-", "xoxa-", "xoxs-", "AKIA", "ABIA", "ACCA", "ASIA", "sk-ant-", "Bearer "];
 var SORTED_PREFIXES = [...KNOWN_PREFIXES].sort((a, b) => b.length - a.length);
 function detectPrefix(value) {
@@ -67,19 +517,16 @@ async function hmacSha256(key, message) {
   const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
   return new Uint8Array(sig);
 }
-function toHex(bytes) {
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 async function hmacSha256Hex(key, message) {
   const cryptoKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sig = await crypto.subtle.sign("HMAC", cryptoKey, message);
-  return toHex(new Uint8Array(sig));
+  return bytesToHex(new Uint8Array(sig));
 }
 async function mask(sessionId, secretName, realValue) {
   const prefix = detectPrefix(realValue);
   const remainder = realValue.slice(prefix.length);
   const hmac = await hmacSha256(sessionId + secretName, realValue);
-  let hex2 = toHex(hmac);
+  let hex2 = bytesToHex(hmac);
   while (hex2.length < remainder.length) hex2 += hex2;
   const maskedRemainder = hex2.slice(0, remainder.length);
   return prefix + maskedRemainder;
@@ -108,6 +555,13 @@ function domainMatches(pattern, hostname) {
   }
   const suffix = p.slice(1);
   return h.length > suffix.length && h.endsWith(suffix);
+}
+function secretScopeHostname(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
 }
 function isAllowedDomain(patterns, hostname) {
   return patterns.some((p) => domainMatches(p, hostname));
@@ -262,7 +716,7 @@ var SecretsPipeline = class {
     if (!parsed.username && !parsed.password) return { url: rawUrl };
     let user = decodeURIComponent(parsed.username);
     let pass = decodeURIComponent(parsed.password);
-    const host = parsed.host;
+    const host = parsed.hostname;
     let touched = false;
     for (const [maskedValue, ms] of this.maskedToSecret) {
       if (user.includes(maskedValue) || pass.includes(maskedValue)) {
@@ -292,8 +746,8 @@ var SecretsPipeline = class {
         headers[key] = basic.value;
         continue;
       }
-      const { text, forbidden } = this.unmask(val, hostname);
-      if (forbidden) return { forbidden };
+      const { text, forbidden: forbidden2 } = this.unmask(val, hostname);
+      if (forbidden2) return { forbidden: forbidden2 };
       headers[key] = text;
     }
     return {};
@@ -377,6 +831,90 @@ var SecretsPipeline = class {
     }), redactionCount };
   }
 };
+function createRetryableUpload(source) {
+  const ready = [];
+  let inflight = null;
+  let delivered = 0;
+  let generation = 0;
+  const fill = () => {
+    inflight ??= source().then((chunk) => {
+      ready.push(chunk);
+    }).finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  };
+  const stream = () => {
+    const own = ++generation;
+    return new ReadableStream({ async pull(controller) {
+      while (ready.length === 0) await fill();
+      if (own !== generation) return;
+      const chunk = ready[0];
+      if (chunk === null || chunk === void 0) {
+        controller.close();
+        return;
+      }
+      ready.shift();
+      delivered += chunk.byteLength;
+      controller.enqueue(chunk);
+    } }, { highWaterMark: 0 });
+  };
+  return { stream, untouched: () => delivered === 0 };
+}
+function rawUploadStreams(input) {
+  if (!input.canStream) return false;
+  const headers = foldRawRequestHeaders(input.headers);
+  if (headers[HMAC_SIGN_HEADER] !== void 0) return false;
+  if (isTextRequestContentType(headers["content-type"] ?? "")) return false;
+  return input.bodyLength === void 0 || input.bodyLength >= RAW_FETCH_STREAM_THRESHOLD_BYTES;
+}
+function supportsRequestStreams() {
+  let duplexAccessed = false;
+  try {
+    const hasContentType = new Request("https://example.invalid/", { body: new ReadableStream(), method: "POST", get duplex() {
+      duplexAccessed = true;
+      return "half";
+    } }).headers.has("Content-Type");
+    return duplexAccessed && !hasContentType;
+  } catch {
+    return false;
+  }
+}
+function isUnsentRefusal(err, upload, signal) {
+  return err instanceof TypeError && upload.untouched() && !signal?.aborted;
+}
+async function withUnsentUploadRetry(source, attempt, signal) {
+  const upload = createRetryableUpload(source);
+  try {
+    return await attempt(upload.stream());
+  } catch (err) {
+    if (!isUnsentRefusal(err, upload, signal)) throw err;
+    return await attempt(upload.stream());
+  }
+}
+var DOMAINS_SUFFIX = "_DOMAINS";
+function parseDomainsCsv(raw) {
+  return raw.split(",").map((domain) => domain.trim()).filter((domain) => domain.length > 0);
+}
+function pairEnvEntriesToSecrets(entries) {
+  const values = /* @__PURE__ */ new Map();
+  const domains = /* @__PURE__ */ new Map();
+  const order = [];
+  for (const entry of entries) {
+    if (entry.key.endsWith(DOMAINS_SUFFIX)) {
+      const name = entry.key.slice(0, -DOMAINS_SUFFIX.length);
+      if (name) domains.set(name, parseDomainsCsv(entry.value));
+    } else {
+      if (!values.has(entry.key)) order.push(entry.key);
+      values.set(entry.key, entry.value);
+    }
+  }
+  return order.flatMap((name) => {
+    const value = values.get(name);
+    const allowedDomains = domains.get(name);
+    return value !== void 0 && allowedDomains?.length ? [{ name, value, domains: allowedDomains }] : [];
+  });
+}
 var SessionSecretStore = class {
   entries = /* @__PURE__ */ new Map();
   set(name, value, domains = []) {
@@ -417,38 +955,6 @@ function previewSecret(value, edge = 4) {
   if (len <= 2) return "\u2026";
   const e = Math.min(Math.max(1, edge), Math.floor((len - 1) / 2));
   return `${value.slice(0, e)}\u2026${value.slice(len - e)}`;
-}
-var CHUNK_SIZE = 32768;
-function nodeBuffer() {
-  return globalThis.Buffer;
-}
-var STRICT_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})?$/;
-function base64ToUint8(b64) {
-  const B = nodeBuffer();
-  if (B) {
-    if (!STRICT_BASE64_RE.test(b64)) {
-      throw new Error("Invalid base64 string");
-    }
-    return new Uint8Array(B.from(b64, "base64"));
-  }
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-function uint8ToBase64(bytes) {
-  const B = nodeBuffer();
-  if (B) {
-    return B.from(bytes).toString("base64");
-  }
-  let binary = "";
-  for (let i = 0; i < bytes.byteLength; i += CHUNK_SIZE) {
-    const slice = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.byteLength));
-    binary += String.fromCharCode.apply(null, slice);
-  }
-  return btoa(binary);
 }
 var SIGNED_ALGORITHM = "AWS4-HMAC-SHA256";
 var EMPTY_BODY_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -654,298 +1160,54 @@ async function executeDaSignAndForward(env, fetchImpl = fetch) {
   const upstreamBody = new Uint8Array(await upstream.arrayBuffer());
   return { ok: true, status: upstream.status, headers: passthroughHeaders(upstream), bodyBase64: uint8ToBase64(upstreamBody) };
 }
-var DOMAINS_SUFFIX = "_DOMAINS";
-function parseDomainsCsv(raw) {
-  return raw.split(",").map((domain) => domain.trim()).filter((domain) => domain.length > 0);
-}
-function pairEnvEntriesToSecrets(entries) {
-  const values = /* @__PURE__ */ new Map();
-  const domains = /* @__PURE__ */ new Map();
-  const order = [];
-  for (const entry of entries) {
-    if (entry.key.endsWith(DOMAINS_SUFFIX)) {
-      const name = entry.key.slice(0, -DOMAINS_SUFFIX.length);
-      if (name) domains.set(name, parseDomainsCsv(entry.value));
-    } else {
-      if (!values.has(entry.key)) order.push(entry.key);
-      values.set(entry.key, entry.value);
-    }
-  }
-  return order.flatMap((name) => {
-    const value = values.get(name);
-    const allowedDomains = domains.get(name);
-    return value !== void 0 && allowedDomains?.length ? [{ name, value, domains: allowedDomains }] : [];
-  });
-}
-var LEADER_EXT_ID_QUERY_NAME = "ext";
-function parseLinkHeader(input, baseUrl) {
-  if (input == null) return [];
-  let headerString;
-  if (Array.isArray(input)) {
-    headerString = input.join(", ").replace(/\n/g, ", ");
-  } else if (typeof input === "string") {
-    headerString = input.replace(/\n/g, ", ");
-  } else {
+var TARGETS = [{ kind: "ai-catalog", path: "/.well-known/ai-catalog.json" }, { kind: "llms-txt", path: "/llms.txt" }];
+var DEFAULT_TIMEOUT_MS = 3e3;
+async function probeWellKnown(origin, fetchImpl, options = {}) {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let base;
+  try {
+    base = new URL(origin).origin;
+  } catch {
     return [];
   }
-  if (headerString.length === 0) return [];
-  const out = [];
-  const len = headerString.length;
-  let i = 0;
-  while (i < len) {
-    i = skipOWS(headerString, i);
-    if (i >= len) break;
-    if (headerString[i] !== "<") {
-      i = skipToNextValue(headerString, i);
-      continue;
-    }
-    const uriEnd = headerString.indexOf(">", i + 1);
-    if (uriEnd === -1) break;
-    const rawUri = headerString.slice(i + 1, uriEnd);
-    i = uriEnd + 1;
-    const rawParams = [];
-    while (i < len) {
-      i = skipOWS(headerString, i);
-      if (i >= len) break;
-      if (headerString[i] === ",") {
-        i++;
-        break;
-      }
-      if (headerString[i] !== ";") {
-        i = skipToNextValue(headerString, i);
-        break;
-      }
-      i++;
-      i = skipOWS(headerString, i);
-      const nameStart = i;
-      while (i < len && isTokenChar(headerString.charCodeAt(i))) i++;
-      if (i < len && headerString[i] === "*") i++;
-      if (nameStart === i) {
-        i = skipToNextValue(headerString, i);
-        break;
-      }
-      const name = headerString.slice(nameStart, i).toLowerCase();
-      i = skipOWS(headerString, i);
-      let value = "";
-      if (i < len && headerString[i] === "=") {
-        i++;
-        i = skipOWS(headerString, i);
-        if (i < len && headerString[i] === '"') {
-          const r = readQuotedString(headerString, i);
-          value = r.value;
-          i = r.end;
-        } else {
-          const start = i;
-          while (i < len && headerString[i] !== ";" && headerString[i] !== "," && !isOWSChar(headerString[i])) i++;
-          value = headerString.slice(start, i);
-        }
-      }
-      rawParams.push([name, value]);
-    }
-    const link = buildLink(rawUri, rawParams, baseUrl);
-    if (link) out.push(link);
-  }
-  return out;
+  const settled = await Promise.all(TARGETS.map((target) => probeOne(base, target, fetchImpl, timeoutMs)));
+  return settled.filter((m) => m !== null);
 }
-function skipOWS(s, i) {
-  while (i < s.length && (s[i] === " " || s[i] === "	")) i++;
-  return i;
-}
-function isOWSChar(c) {
-  return c === " " || c === "	";
-}
-function skipToNextValue(s, i) {
-  let inQuote = false;
-  while (i < s.length) {
-    const c = s[i];
-    if (inQuote) {
-      if (c === "\\" && i + 1 < s.length) {
-        i += 2;
-        continue;
-      }
-      if (c === '"') inQuote = false;
-    } else {
-      if (c === '"') inQuote = true;
-      else if (c === ",") return i + 1;
-    }
-    i++;
-  }
-  return i;
-}
-function readQuotedString(s, i) {
-  i++;
-  let result = "";
-  while (i < s.length) {
-    const c = s[i];
-    if (c === "\\") {
-      i++;
-      if (i < s.length) {
-        result += s[i];
-        i++;
-      }
-    } else if (c === '"') {
-      return { value: result, end: i + 1 };
-    } else {
-      result += c;
-      i++;
-    }
-  }
-  return { value: result, end: i };
-}
-function isTokenChar(code) {
-  if (code >= 48 && code <= 57) return true;
-  if (code >= 65 && code <= 90) return true;
-  if (code >= 97 && code <= 122) return true;
-  switch (code) {
-    case 33:
-    case 35:
-    case 36:
-    case 37:
-    case 38:
-    case 39:
-    case 42:
-    case 43:
-    case 45:
-    case 46:
-    case 94:
-    case 95:
-    case 96:
-    case 124:
-    case 126:
-      return true;
-  }
-  return false;
-}
-function buildLink(rawUri, rawParams, baseUrl) {
-  const params = {};
-  const extOverrides = {};
-  for (const [name, value] of rawParams) {
-    if (name.endsWith("*")) {
-      const decoded = decodeExtValue(value);
-      if (decoded != null) extOverrides[name.slice(0, -1)] = decoded;
-      continue;
-    }
-    if (name === "rel" && "rel" in params) continue;
-    params[name] = value;
-  }
-  for (const [name, value] of Object.entries(extOverrides)) {
-    params[name] = value;
-  }
-  const href = resolveURI(rawUri, baseUrl);
-  const anchor = params.anchor != null ? resolveURI(params.anchor, baseUrl) : void 0;
-  const relRaw = params.rel ?? "";
-  const rel = relRaw.split(/[ \t]+/).filter((s) => s.length > 0);
-  const link = { href, rel, params };
-  if (anchor != null) link.anchor = anchor;
-  if (params.type != null) link.type = params.type;
-  if (params.title != null) link.title = params.title;
-  if (params.hreflang != null) link.hreflang = params.hreflang;
-  return link;
-}
-function resolveURI(ref, baseUrl) {
-  if (!baseUrl) return ref;
+async function probeOne(base, target, fetchImpl, timeoutMs) {
+  const url = base + target.path;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error("timeout")), timeoutMs);
   try {
-    return new URL(ref, baseUrl).toString();
-  } catch {
-    return ref;
-  }
-}
-function decodeExtValue(value) {
-  const firstQuote = value.indexOf("'");
-  if (firstQuote === -1) return null;
-  const secondQuote = value.indexOf("'", firstQuote + 1);
-  if (secondQuote === -1) return null;
-  const charset = value.slice(0, firstQuote).toLowerCase();
-  if (charset !== "utf-8") return null;
-  try {
-    return decodeURIComponent(value.slice(secondQuote + 1));
+    const res = await fetchImpl(url, { method: "GET", signal: ctrl.signal, redirect: "manual", credentials: "omit" });
+    if (res.status !== 200) return null;
+    if (!contentTypeOk(res.headers.get("content-type"), target.kind)) return null;
+    return { kind: target.kind, url };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
-function getLinkHeaderValuesFromWebRequest(headers) {
-  if (!headers) return [];
-  const out = [];
-  for (const h of headers) {
-    if (h.name.toLowerCase() !== "link") continue;
-    if (typeof h.value === "string" && h.value.length > 0) out.push(h.value);
+function contentTypeOk(raw, kind) {
+  if (raw == null) return true;
+  const ct = raw.toLowerCase();
+  if (ct.length === 0) return true;
+  if (ct.includes("text/html") || ct.includes("application/xhtml")) return false;
+  if (kind === "ai-catalog") {
+    return ct.includes("json") || ct.includes("text/plain") || ct.includes("octet-stream");
   }
-  return out;
+  return ct.includes("text/plain") || ct.includes("markdown") || ct.includes("octet-stream");
 }
-var HANDOFF_REL = `${SLICC_HOSTED_ORIGIN}/rel/handoff`;
-var UPSKILL_REL = `${SLICC_HOSTED_ORIGIN}/rel/upskill`;
-function canonicaliseUpskillPath(raw) {
-  const trimmed = raw.replace(/\/+$/, "");
-  const lower = trimmed.toLowerCase();
-  if (lower.endsWith("/skill.md")) return trimmed.slice(0, -"/skill.md".length);
-  if (lower === "skill.md") return "";
-  return trimmed;
-}
-var SAFE_BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
-var SAFE_PATH_RE = /^[A-Za-z0-9._/-]+$/;
-var MAX_BRANCH_LEN = 250;
-var MAX_PATH_LEN = 1024;
-function isSafeUpskillBranch(value) {
-  if (value.length === 0 || value.length > MAX_BRANCH_LEN) return false;
-  if (!SAFE_BRANCH_RE.test(value)) return false;
-  if (value.startsWith("-") || value.startsWith("/") || value.endsWith("/")) return false;
-  if (value.includes("..")) return false;
-  if (value.endsWith(".lock")) return false;
-  return true;
-}
-function isSafeUpskillPath(value) {
-  if (value.length === 0 || value.length > MAX_PATH_LEN) return false;
-  if (!SAFE_PATH_RE.test(value)) return false;
-  if (value.startsWith("-") || value.startsWith("/")) return false;
-  if (value.includes("..")) return false;
-  return true;
-}
-function applyUpskillParams(result, params) {
-  const branch = params.branch;
-  if (typeof branch === "string" && isSafeUpskillBranch(branch)) result.branch = branch;
-  const pathParam = params.path;
-  if (typeof pathParam === "string" && pathParam.length > 0) {
-    const canon = canonicaliseUpskillPath(pathParam);
-    if (canon.length > 0 && isSafeUpskillPath(canon)) result.path = canon;
+function readTargetIdParam(params, label = "targetId") {
+  const targetId = params[label];
+  if (typeof targetId !== "string") {
+    throw new Error(`Invalid targetId: ${String(targetId)}`);
   }
+  return targetId;
 }
-function extractHandoff(links) {
-  for (const link of links) {
-    if (link.rel.includes(HANDOFF_REL)) {
-      const result = { verb: "handoff", target: link.href };
-      if (link.title != null && link.title.length > 0) result.instruction = link.title;
-      return result;
-    }
-    if (link.rel.includes(UPSKILL_REL)) {
-      const result = { verb: "upskill", target: link.href };
-      if (link.title != null && link.title.length > 0) result.instruction = link.title;
-      applyUpskillParams(result, link.params);
-      return result;
-    }
-  }
-  return null;
-}
-function handoffFingerprint(input) {
-  return [input.verb, input.target, input.branch ?? "", input.path ?? "", input.instruction ?? ""].join("\0");
-}
-function extractHandoffFromWebRequest(headers, baseUrl) {
-  const values = getLinkHeaderValuesFromWebRequest(headers);
-  if (values.length === 0) return { match: null, links: [] };
-  const links = parseLinkHeader(values, baseUrl);
-  return { match: extractHandoff(links), links };
-}
-var EXTENSION_BRIDGE_PROTOCOL_VERSION = 1;
-var EXTENSION_BRIDGE_PORT_NAME = "slicc.cdp-bridge";
-var KINDS = /* @__PURE__ */ new Set(["handshake.hello", "handshake.welcome", "handshake.rejected", "cdp.request", "cdp.response", "cdp.event", "extension.lick", "extension.discovery", "leader.join-url", "extension.open-settings"]);
-function isExtensionBridgeEnvelope(value) {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value;
-  return v.bridge === EXTENSION_BRIDGE_PROTOCOL_VERSION && typeof v.channelId === "string" && typeof v.kind === "string" && KINDS.has(v.kind);
-}
-function isBridgeVersionMismatch(value) {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value;
-  return typeof v.bridge === "number" && v.bridge !== EXTENSION_BRIDGE_PROTOCOL_VERSION && typeof v.channelId === "string" && typeof v.kind === "string";
+function readCreateTargetUrl(params) {
+  const url = params["url"];
+  return typeof url === "string" ? url : "about:blank";
 }
 var LEADER_TAB_ID_KEY = "slicc_leader_tab_id";
 var BRIDGE_ALLOWED_ORIGINS = [SLICC_HOSTED_ORIGIN];
@@ -1053,6 +1315,26 @@ async function writeStoredLeaderTabIdToSession(tabId) {
   } catch {
   }
 }
+function pickDefinedWindowFields(fields) {
+  const out = {};
+  for (const key of Object.keys(fields)) {
+    const value = fields[key];
+    if (value !== void 0) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+function chromeWindowInfoFromChrome(win, label, tabIdFallback) {
+  if (typeof win.id !== "number") {
+    throw new Error(`${label} did not return a window id`);
+  }
+  const tabId = win.tabs?.[0]?.id;
+  if (tabIdFallback === void 0 && typeof tabId !== "number") {
+    throw new Error(`${label} did not return windowId/tabId`);
+  }
+  return { windowId: win.id, tabId: typeof tabId === "number" ? tabId : tabIdFallback, left: win.left ?? 0, top: win.top ?? 0, width: win.width ?? 0, height: win.height ?? 0, state: win.state ?? "normal" };
+}
 function buildDefaultBridgeSwDeps(overrides) {
   const base = { readStoredLeaderTabId: readStoredLeaderTabIdFromSession, writeStoredLeaderTabId: writeStoredLeaderTabIdToSession, maybeUnmaskCdpFrame: async (_tabId, _method, params) => params, attachDebugger: async (tabId) => {
     await chrome.debugger.attach({ tabId }, "1.3");
@@ -1083,6 +1365,15 @@ function buildDefaultBridgeSwDeps(overrides) {
   }, createTab: async (url) => {
     const tab = await chrome.tabs.create({ url, active: false });
     return tab.id;
+  }, createWindow: async (opts) => {
+    const created = await chrome.windows.create({ url: opts.url, type: opts.type, focused: opts.focused, ...pickDefinedWindowFields({ width: opts.width, height: opts.height, left: opts.left, top: opts.top, state: opts.state }) });
+    return chromeWindowInfoFromChrome(created, "chrome.windows.create");
+  }, getWindow: async (windowId) => {
+    const win = await chrome.windows.get(windowId, { populate: true });
+    return chromeWindowInfoFromChrome(win, `chrome.windows.get(${windowId})`, -1);
+  }, updateWindow: async (windowId, props) => {
+    const updated = await chrome.windows.update(windowId, pickDefinedWindowFields({ left: props.left, top: props.top, width: props.width, height: props.height, state: props.state, focused: props.focused }));
+    return chromeWindowInfoFromChrome(updated, `chrome.windows.update(${windowId})`, -1);
   }, removeTab: (tabId) => chrome.tabs.remove(tabId), activateTab: async (tabId) => {
     try {
       const tab = await chrome.tabs.update(tabId, { active: true });
@@ -1210,6 +1501,11 @@ async function dispatchCdpCommand(req, state2, deps) {
   if (method === "Target.detachFromTarget") return cdpDetachFromTarget(params ?? {}, state2, deps);
   if (method === "Target.createTarget") return cdpCreateTarget(params ?? {}, deps);
   if (method === "Target.closeTarget") return cdpCloseTarget(params ?? {}, state2, deps);
+  if (method === "Browser.getWindowForTarget") {
+    return cdpGetWindowForTarget(params ?? {}, deps);
+  }
+  if (method === "Browser.getWindowBounds") return cdpGetWindowBounds(params ?? {}, deps);
+  if (method === "Browser.setWindowBounds") return cdpSetWindowBounds(params ?? {}, deps);
   const tabId = sessionId !== void 0 ? state2.sessionToTab.get(sessionId) : void 0;
   if (tabId === void 0) {
     throw new Error(`No tab attached for sessionId: ${sessionId ?? "(none)"}. Attach to a target first.`);
@@ -1227,7 +1523,7 @@ async function cdpGetTargets(_state, deps) {
 }
 async function cdpAttachToTarget(params, state2, deps) {
   { const _tab = await deps.getTab?.(parseInt(params["targetId"], 10)); if (_tab?.url && _isProtectedUrl(_tab.url)) throw new Error("slicc: refused: target is on a protected origin"); if (_tab?.pendingUrl && _isProtectedUrl(_tab.pendingUrl)) throw new Error("slicc: refused: target is on a protected origin"); }
-  const targetId = params["targetId"];
+  const targetId = readTargetIdParam(params);
   const tabId = parseInt(targetId, 10);
   if (!Number.isFinite(tabId) || tabId <= 0) {
     throw new Error(`Invalid targetId: ${targetId}`);
@@ -1243,6 +1539,7 @@ async function cdpAttachToTarget(params, state2, deps) {
 }
 async function cdpDetachFromTarget(params, state2, deps) {
   const sessionId = params["sessionId"];
+  if (typeof sessionId !== "string") return {};
   const tabId = state2.sessionToTab.get(sessionId);
   if (tabId === void 0) return {};
   const nextRefCount = (state2.attachRefCounts.get(tabId) ?? 1) - 1;
@@ -1262,12 +1559,82 @@ async function cdpDetachFromTarget(params, state2, deps) {
 }
 async function cdpCreateTarget(params, deps) {
   { const _u = params["url"]; if (_u && _isProtectedUrl(_u)) throw new Error("slicc: refused: target is on a protected origin"); }
-  const url = params["url"] ?? "about:blank";
-  const tabId = await deps.createTab(url);
-  return { targetId: String(tabId) };
+  const url = readCreateTargetUrl(params);
+  if (params["newWindow"] !== true) {
+    const tabId = await deps.createTab(url);
+    return { targetId: String(tabId) };
+  }
+  const state2 = readOptionalWindowState(params["windowState"]);
+  const opts = { url, type: params["decorated"] === false ? "popup" : "normal", focused: params["background"] !== true };
+  if (state2 && state2 !== "normal") {
+    opts.state = state2;
+  } else {
+    copyNumericFields(params, opts, GEOMETRY_KEYS);
+    if (state2) opts.state = state2;
+  }
+  const created = await deps.createWindow(opts);
+  return { targetId: String(created.tabId) };
+}
+async function cdpGetWindowForTarget(params, deps) {
+  const targetId = readTargetIdParam(params);
+  const tabId = parseInt(targetId, 10);
+  if (!Number.isFinite(tabId) || tabId <= 0) {
+    throw new Error(`Invalid targetId: ${targetId}`);
+  }
+  const tab = await deps.getTab(tabId);
+  if (!tab || typeof tab.windowId !== "number") {
+    throw new Error(`No window for targetId: ${targetId}`);
+  }
+  const win = await deps.getWindow(tab.windowId);
+  return { windowId: win.windowId, bounds: chromeWindowToCdpBounds(win) };
+}
+async function cdpGetWindowBounds(params, deps) {
+  const windowId = params["windowId"];
+  if (typeof windowId !== "number") {
+    throw new Error(`Invalid windowId: ${String(windowId)}`);
+  }
+  const win = await deps.getWindow(windowId);
+  return { bounds: chromeWindowToCdpBounds(win) };
+}
+async function cdpSetWindowBounds(params, deps) {
+  const windowId = params["windowId"];
+  if (typeof windowId !== "number") {
+    throw new Error(`Invalid windowId: ${String(windowId)}`);
+  }
+  const rawBounds = readCdpBoundsFields(params["bounds"]);
+  const state2 = readOptionalWindowState(rawBounds["windowState"] ?? rawBounds["state"]);
+  const props = {};
+  if (state2 && state2 !== "normal") {
+    props.state = state2;
+  } else {
+    copyNumericFields(rawBounds, props, GEOMETRY_KEYS);
+    if (state2) props.state = state2;
+  }
+  await deps.updateWindow(windowId, props);
+  return {};
+}
+var GEOMETRY_KEYS = ["left", "top", "width", "height"];
+var WINDOW_STATES = /* @__PURE__ */ new Set(["normal", "minimized", "maximized", "fullscreen"]);
+function copyNumericFields(source, target, keys) {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "number") target[key] = value;
+  }
+}
+function readCdpBoundsFields(value) {
+  return value !== null && typeof value === "object" ? value : {};
+}
+function chromeWindowToCdpBounds(win) {
+  return { left: win.left, top: win.top, width: win.width, height: win.height, windowState: win.state || "normal" };
+}
+function readOptionalWindowState(value) {
+  if (typeof value === "string" && WINDOW_STATES.has(value)) {
+    return value;
+  }
+  return void 0;
 }
 async function cdpCloseTarget(params, state2, deps) {
-  const targetId = params["targetId"];
+  const targetId = readTargetIdParam(params);
   const tabId = parseInt(targetId, 10);
   if (!Number.isFinite(tabId) || tabId <= 0) {
     throw new Error(`Invalid targetId: ${targetId}`);
@@ -1282,6 +1649,518 @@ async function cdpCloseTarget(params, state2, deps) {
   }
   await deps.removeTab(tabId);
   return { success: true };
+}
+function isCaptureOpenWindowMsg(msg) {
+  return typeof msg === "object" && msg !== null && "type" in msg && msg.type === "capture-open-window" && typeof msg.url === "string";
+}
+function handleCapturePopupMessage(message) {
+  if (!isCaptureOpenWindowMsg(message)) return "not-handled";
+  const requestId = message.requestId;
+  chrome.windows.create({ url: message.url, type: "popup", width: 360, height: 220, focused: true }).catch((err) => {
+    console.error("[slicc-sw] Failed to open capture popup window:", err);
+    if (requestId) {
+      chrome.runtime.sendMessage({ source: "capture-popup", requestId, ok: false, error: `failed to open capture window: ${err?.message || String(err)}` }).catch(() => {
+      });
+    }
+  });
+  return "handled";
+}
+async function listSecrets(storage) {
+  const all = await storage.get(null);
+  const entries = pairStorageEntries(all).map(({ name, domains }) => ({ name, domains }));
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  return entries;
+}
+async function setSecret(storage, name, value, domains) {
+  await storage.set({ [name]: value, [name + DOMAINS_SUFFIX]: domains.join(",") });
+}
+async function deleteSecret(storage, name) {
+  await storage.remove([name, name + DOMAINS_SUFFIX]);
+}
+async function listSecretsWithValues(storage) {
+  const all = await storage.get(null);
+  return pairStorageEntries(all);
+}
+function pairStorageEntries(all) {
+  return pairEnvEntriesToSecrets(Object.entries(all).flatMap(([key, value]) => typeof value === "string" ? [{ key, value }] : []));
+}
+function getMsgType(msg) {
+  if (typeof msg !== "object" || msg === null || !("type" in msg)) return void 0;
+  const t = msg.type;
+  return typeof t === "string" ? t : void 0;
+}
+function routeSwMessage(handlers, message, sender, sendResponse) {
+  for (const handler of handlers) {
+    const outcome = handler(message, sender, sendResponse);
+    if (outcome === "not-handled") continue;
+    return outcome === "handled-async";
+  }
+  return false;
+}
+function beginPortPin(port, deps, label) {
+  const verdict = validateBridgePin(port.sender, { readStoredLeaderTabId: deps.readStoredLeaderTabId, writeStoredLeaderTabId: deps.writeStoredLeaderTabId, allowedOrigins: deps.allowedOrigins }).then((pin) => pin.ok ? { ok: true } : { ok: false, error: `${label} pin failed: ${pin.reason ?? "pin-failed"}` }, (err) => ({ ok: false, error: `${label} pin failed: ${err instanceof Error ? err.message : String(err)}` }));
+  void verdict.then((result) => {
+    if (!result.ok) console.error(`[sw] external ${label} pin check failed`, result.error);
+  });
+  return verdict;
+}
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var KEY = "_session.id";
+async function readOrCreateSwSessionId() {
+  const got = await chrome.storage.local.get(KEY);
+  const existing = got[KEY];
+  if (existing && UUID_RE.test(existing)) return existing;
+  const fresh = crypto.randomUUID();
+  await chrome.storage.local.set({ [KEY]: fresh });
+  return fresh;
+}
+var sessionSecretStore = new SessionSecretStore();
+var storageLocal = chrome.storage.local;
+async function buildSecretsPipeline() {
+  const sessionId = await readOrCreateSwSessionId();
+  const source = { get: async (name) => {
+    const fromSession = sessionSecretStore.get(name);
+    if (fromSession !== void 0) return fromSession;
+    const got = await chrome.storage.local.get(name);
+    return got[name];
+  }, listAll: () => listSecretsWithValues(storageLocal) };
+  return new SecretsPipeline({ sessionId, source, sessionStore: sessionSecretStore });
+}
+async function reloadedPipeline() {
+  const pipeline = await buildSecretsPipeline();
+  await pipeline.reload();
+  return pipeline;
+}
+function buildReloadedPipelinePromise() {
+  return reloadedPipeline();
+}
+function getStringField(msg, field) {
+  if (typeof msg !== "object" || msg === null || !(field in msg)) return void 0;
+  const v = Reflect.get(msg, field);
+  return typeof v === "string" ? v : void 0;
+}
+function getStringArrayField(msg, field) {
+  if (typeof msg !== "object" || msg === null || !(field in msg)) return void 0;
+  const v = Reflect.get(msg, field);
+  if (!Array.isArray(v)) return void 0;
+  return v.filter((d) => typeof d === "string");
+}
+function errMsg(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+function runSecretsListMaskedEntries(_msg, sendResponse) {
+  void (async () => {
+    try {
+      const pipeline = await reloadedPipeline();
+      sendResponse({ entries: pipeline.getMaskedEntries() });
+    } catch (err) {
+      console.error("[sw] secrets.list-masked-entries failed", err);
+      sendResponse({ entries: [], error: errMsg(err) });
+    }
+  })();
+  return true;
+}
+function runSecretsScrubToolResult(msg, sendResponse) {
+  const text = getStringField(msg, "text");
+  if (text === void 0) return false;
+  void (async () => {
+    try {
+      const pipeline = await reloadedPipeline();
+      sendResponse({ text: pipeline.scrubResponse(text) });
+    } catch {
+      console.error("[sw] secrets.scrub-tool-result failed");
+      sendResponse({ error: "secret scrub failed" });
+    }
+  })();
+  return true;
+}
+function runSecretsListWithValuesForPipeline(_msg, sendResponse) {
+  void (async () => {
+    try {
+      const sessionId = await readOrCreateSwSessionId();
+      const persisted = await listSecretsWithValues(storageLocal);
+      const persistedNames = new Set(persisted.map((e) => e.name));
+      const session = sessionSecretStore.listAll().filter((s) => !persistedNames.has(s.name));
+      const entries = [...persisted, ...session];
+      sendResponse({ sessionId, entries });
+    } catch (err) {
+      console.error("[sw] secrets.list-with-values-for-pipeline failed", err);
+      sendResponse({ sessionId: void 0, entries: [], error: errMsg(err) });
+    }
+  })();
+  return true;
+}
+function runSecretsList(_msg, sendResponse) {
+  void (async () => {
+    try {
+      const entries = await listSecrets(storageLocal);
+      sendResponse({ entries });
+    } catch (err) {
+      console.error("[sw] secrets.list failed", err);
+      sendResponse({ entries: [], error: errMsg(err) });
+    }
+  })();
+  return true;
+}
+function runSecretsSet(msg, sendResponse) {
+  const name = getStringField(msg, "name");
+  const value = getStringField(msg, "value");
+  const domains = getStringArrayField(msg, "domains");
+  if (name === void 0 || value === void 0 || domains === void 0) return false;
+  void (async () => {
+    try {
+      await setSecret(storageLocal, name, value, domains);
+      sendResponse({ ok: true });
+    } catch (err) {
+      console.error("[sw] secrets.set failed", err);
+      sendResponse({ ok: false, error: errMsg(err) });
+    }
+  })();
+  return true;
+}
+function runSecretsDelete(msg, sendResponse) {
+  const name = getStringField(msg, "name");
+  if (name === void 0) return false;
+  void (async () => {
+    try {
+      if (sessionSecretStore.has(name)) {
+        sessionSecretStore.delete(name);
+        sendResponse({ ok: true, removed: true, fromSession: true });
+        return;
+      }
+      const existing = await listSecrets(storageLocal);
+      if (!existing.some((e) => e.name === name)) {
+        sendResponse({ ok: true, removed: false });
+        return;
+      }
+      await deleteSecret(storageLocal, name);
+      sendResponse({ ok: true, removed: true, fromSession: false });
+    } catch (err) {
+      console.error("[sw] secrets.delete failed", err);
+      sendResponse({ ok: false, error: errMsg(err) });
+    }
+  })();
+  return true;
+}
+function runSecretsSessionSet(msg, sendResponse) {
+  const name = getStringField(msg, "name");
+  const value = getStringField(msg, "value");
+  const domains = getStringArrayField(msg, "domains");
+  if (name === void 0 || value === void 0 || domains === void 0) return false;
+  sessionSecretStore.set(name, value, domains);
+  sendResponse({ ok: true });
+  return true;
+}
+function runSecretsSessionList(_msg, sendResponse) {
+  sendResponse({ entries: sessionSecretStore.list() });
+  return true;
+}
+function runSecretsPeek(msg, sendResponse) {
+  const name = getStringField(msg, "name");
+  if (name === void 0) return false;
+  void (async () => {
+    try {
+      const sessionRec = sessionSecretStore.getRecord(name);
+      if (sessionRec) {
+        sendResponse({ record: { name, preview: previewSecret(sessionRec.value), domains: sessionRec.domains } });
+        return;
+      }
+      const all = await listSecretsWithValues(storageLocal);
+      const found = all.find((e) => e.name === name);
+      sendResponse({ record: found ? { name, preview: previewSecret(found.value), domains: found.domains } : void 0 });
+    } catch (err) {
+      console.error("[sw] secrets.peek failed", err);
+      sendResponse({ record: void 0, error: errMsg(err) });
+    }
+  })();
+  return true;
+}
+function runSecretsSetDomains(msg, sendResponse) {
+  const name = getStringField(msg, "name");
+  const domains = getStringArrayField(msg, "domains");
+  if (name === void 0 || domains === void 0) return false;
+  void (async () => {
+    try {
+      if (sessionSecretStore.has(name)) {
+        sessionSecretStore.setDomains(name, domains);
+        sendResponse({ ok: true });
+        return;
+      }
+      const all = await listSecretsWithValues(storageLocal);
+      const found = all.find((e) => e.name === name);
+      if (!found) {
+        sendResponse({ ok: false, error: "secret not found" });
+        return;
+      }
+      await setSecret(storageLocal, name, found.value, domains);
+      sendResponse({ ok: true });
+    } catch {
+      console.error("[sw] secrets.set-domains failed");
+      sendResponse({ ok: false, error: "secret scope update failed" });
+    }
+  })();
+  return true;
+}
+async function runMaskOauthTokenWrite(providerId, accessToken, domains) {
+  if (accessToken && domains) {
+    await chrome.storage.local.set({ [`oauth.${providerId}.token`]: accessToken, [`oauth.${providerId}.token_DOMAINS`]: domains });
+  }
+  const pipeline = await reloadedPipeline();
+  const name = `oauth.${providerId}.token`;
+  return pipeline.getMaskedEntries().find((e) => e.name === name)?.maskedValue;
+}
+function runSecretsMaskOauthToken(msg, sendResponse) {
+  const providerId = getStringField(msg, "providerId");
+  if (providerId === void 0) return false;
+  const accessToken = getStringField(msg, "accessToken");
+  const domains = getStringField(msg, "domains");
+  void (async () => {
+    try {
+      const maskedValue = await runMaskOauthTokenWrite(providerId, accessToken, domains);
+      if (accessToken && domains && maskedValue === void 0) {
+        console.warn("[sw] secrets.mask-oauth-token: entry missing after write");
+        sendResponse({ maskedValue: void 0, error: "entry missing after write" });
+        return;
+      }
+      sendResponse({ maskedValue });
+    } catch {
+      console.error("[sw] secrets.mask-oauth-token failed");
+      sendResponse({ maskedValue: void 0, error: "OAuth token masking failed" });
+    }
+  })();
+  return true;
+}
+function runSecretsRedactExport(msg, sendResponse) {
+  const texts = getStringArrayField(msg, "texts");
+  if (texts === void 0) return false;
+  void (async () => {
+    try {
+      const pipeline = await reloadedPipeline();
+      sendResponse(pipeline.redactForExport(texts));
+    } catch (err) {
+      console.error("[sw] secrets.redact-export failed", err);
+      sendResponse({ error: errMsg(err) });
+    }
+  })();
+  return true;
+}
+var SECRETS_HANDLERS = { "secrets.list-masked-entries": runSecretsListMaskedEntries, "secrets.scrub-tool-result": runSecretsScrubToolResult, "secrets.list-with-values-for-pipeline": runSecretsListWithValuesForPipeline, "secrets.list": runSecretsList, "secrets.set": runSecretsSet, "secrets.delete": runSecretsDelete, "secrets.session.set": runSecretsSessionSet, "secrets.session.list": runSecretsSessionList, "secrets.peek": runSecretsPeek, "secrets.set-domains": runSecretsSetDomains, "secrets.mask-oauth-token": runSecretsMaskOauthToken, "secrets.redact-export": runSecretsRedactExport };
+function isSecretsMessageType(type) {
+  return Object.hasOwn(SECRETS_HANDLERS, type);
+}
+function resolveSecretsHandler(msg) {
+  const type = getMsgType(msg);
+  return type !== void 0 && isSecretsMessageType(type) ? SECRETS_HANDLERS[type] : void 0;
+}
+function handleSecretsMessage(message, _sender, sendResponse) {
+  const handler = resolveSecretsHandler(message);
+  if (!handler) return "not-handled";
+  return handler(message, sendResponse) ? "handled-async" : "not-handled";
+}
+function handleSecretsCrudPort(port, deps) {
+  const pinPromise = beginPortPin(port, deps, "secrets.crud");
+  port.onMessage.addListener(async (raw) => {
+    const id = raw?.id;
+    let replied = false;
+    const reply = (response) => {
+      if (replied) return;
+      replied = true;
+      port.postMessage({ id, response });
+    };
+    const pin = await pinPromise;
+    if (!pin.ok) {
+      reply({ error: pin.error });
+      return;
+    }
+    const handler = resolveSecretsHandler(raw);
+    if (!handler) {
+      reply({ error: `unknown secrets type: ${getMsgType(raw) ?? "undefined"}` });
+      return;
+    }
+    if (!handler(raw, reply)) {
+      reply({ error: `malformed secrets request: ${getMsgType(raw)}` });
+    }
+  });
+}
+async function sendServiceWorkerMessage(payload) {
+  await chrome.runtime.sendMessage({ source: "service-worker", payload });
+}
+function postServiceWorkerMessage(payload) {
+  sendServiceWorkerMessage(payload).catch(() => {
+  });
+}
+var sliccGroupId = null;
+async function addToSliccGroup(tabId) {
+  try {
+    if (sliccGroupId !== null) {
+      try {
+        await chrome.tabs.group({ tabIds: tabId, groupId: sliccGroupId });
+        return;
+      } catch (err) {
+        console.info("[slicc-tab-group] Tab group removed by user, recreating", { tabId, previousGroupId: sliccGroupId, error: err instanceof Error ? err.message : String(err) });
+        sliccGroupId = null;
+      }
+    }
+    sliccGroupId = await chrome.tabs.group({ tabIds: tabId });
+    await chrome.tabGroups.update(sliccGroupId, { title: "slicc", color: "pink", collapsed: false });
+  } catch (err) {
+    console.warn("[slicc-tab-group] Tab grouping failed (best-effort, continuing without group)", { tabId, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+var sessionToTab = /* @__PURE__ */ new Map();
+var debuggerAttachmentOwners = /* @__PURE__ */ new Map();
+async function acquireDebuggerAttachment(tabId, owner) {
+  if (debuggerAttachmentOwners.has(tabId)) return false;
+  await chrome.debugger.attach({ tabId }, "1.3");
+  debuggerAttachmentOwners.set(tabId, owner);
+  return true;
+}
+async function releaseDebuggerAttachment(tabId, owner) {
+  if (debuggerAttachmentOwners.get(tabId) !== owner) return;
+  debuggerAttachmentOwners.delete(tabId);
+  await chrome.debugger.detach({ tabId }).catch(() => {
+  });
+}
+async function forceReleaseDebuggerAttachment(tabId) {
+  if (!debuggerAttachmentOwners.has(tabId)) return;
+  debuggerAttachmentOwners.delete(tabId);
+  await chrome.debugger.detach({ tabId }).catch(() => {
+  });
+}
+function legacySessionIdForTab(tabId) {
+  for (const [sessionId, mapped] of sessionToTab) {
+    if (mapped === tabId) return sessionId;
+  }
+  return void 0;
+}
+async function handleCdpCommand(cmd) {
+  const { id, method, params, sessionId } = cmd;
+  try {
+    let result;
+    switch (method) {
+      case "Target.getTargets":
+        result = await cdpGetTargets2();
+        break;
+      case "Target.attachToTarget":
+        result = await cdpAttachToTarget2(params);
+        break;
+      case "Target.detachFromTarget":
+        result = await cdpDetachFromTarget2(params);
+        break;
+      case "Target.createTarget":
+        result = await cdpCreateTarget2(params);
+        break;
+      case "Target.closeTarget":
+        result = await cdpCloseTarget2(params);
+        break;
+      default:
+        result = await cdpSendCommand(method, params, sessionId);
+        break;
+    }
+    return { type: "cdp-response", id, result };
+  } catch (err) {
+    return { type: "cdp-response", id, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+async function cdpGetTargets2() {
+  const [tabs, activeTabs] = await Promise.all([chrome.tabs.query({}), chrome.tabs.query({ active: true, currentWindow: true })]);
+  const activeTabIds = new Set(activeTabs.map((t) => t.id));
+  const targetInfos = tabs.filter((tab) => typeof tab.id === "number").map((tab) => ({ targetId: String(tab.id), type: "page", title: tab.title ?? "", url: tab.url ?? "", attached: debuggerAttachmentOwners.has(tab.id), active: activeTabIds.has(tab.id) }));
+  return { targetInfos };
+}
+function tabIdFromTargetId(targetId) {
+  const tabId = parseInt(targetId, 10);
+  if (!Number.isFinite(tabId) || tabId <= 0) {
+    throw new Error(`Invalid targetId: ${targetId}`);
+  }
+  return tabId;
+}
+async function cdpAttachToTarget2(params) {
+  const targetId = params["targetId"];
+  const tabId = tabIdFromTargetId(targetId);
+  await acquireDebuggerAttachment(tabId, "legacy");
+  const sessionId = targetId;
+  sessionToTab.set(sessionId, tabId);
+  return { sessionId };
+}
+async function cdpDetachFromTarget2(params) {
+  const sessionId = params["sessionId"];
+  const tabId = sessionToTab.get(sessionId);
+  if (tabId !== void 0) {
+    sessionToTab.delete(sessionId);
+    const stillReferenced = legacySessionIdForTab(tabId) !== void 0;
+    if (!stillReferenced) {
+      await releaseDebuggerAttachment(tabId, "legacy");
+    }
+  }
+  return {};
+}
+async function cdpCreateTarget2(params) {
+  const url = params["url"] ?? "about:blank";
+  const tab = await chrome.tabs.create({ url, active: false });
+  await addToSliccGroup(tab.id);
+  return { targetId: String(tab.id) };
+}
+async function cdpCloseTarget2(params) {
+  const targetId = params["targetId"];
+  const tabId = tabIdFromTargetId(targetId);
+  for (const [sid, tid] of sessionToTab) {
+    if (tid === tabId) sessionToTab.delete(sid);
+  }
+  await forceReleaseDebuggerAttachment(tabId);
+  await chrome.tabs.remove(tabId);
+  return { success: true };
+}
+var CDP_UNMASK_METHODS = /* @__PURE__ */ new Set(["Runtime.evaluate", "Runtime.callFunctionOn", "Input.insertText"]);
+async function tabHostname(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const url = tab?.url;
+    if (typeof url !== "string" || url.length === 0) return null;
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+async function maybeUnmaskCdpFrame(tabId, method, params) {
+  if (!CDP_UNMASK_METHODS.has(method)) return params;
+  if (!params || typeof params !== "object") return params;
+  const hostname = await tabHostname(tabId);
+  if (!hostname) return params;
+  const pipeline = await buildSecretsPipeline();
+  await pipeline.reload();
+  if (!pipeline.hasSecrets()) return params;
+  const { frame, changed } = unmaskCdpFrame({ method, params }, hostname, pipeline);
+  if (!changed) return params;
+  const nextParams = frame.params;
+  return nextParams ?? params;
+}
+async function cdpSendCommand(method, params, sessionId) {
+  const tabId = sessionId ? sessionToTab.get(sessionId) : void 0;
+  if (tabId === void 0) {
+    throw new Error(`No tab attached for sessionId: ${sessionId ?? "(none)"}. Attach to a target first.`);
+  }
+  const effectiveParams = await maybeUnmaskCdpFrame(tabId, method, params);
+  const result = await chrome.debugger.sendCommand({ tabId }, method, effectiveParams);
+  return result ?? {};
+}
+function forwardDebuggerEvent(source, method, params) {
+  const sessionId = legacySessionIdForTab(source.tabId);
+  if (sessionId === void 0) return;
+  postServiceWorkerMessage({ type: "cdp-event", method, params: { ...params, sessionId } });
+}
+function handleDebuggerDetach(source) {
+  debuggerAttachmentOwners.delete(source.tabId);
+  for (const [sessionId, tabId] of sessionToTab) {
+    if (tabId === source.tabId) {
+      sessionToTab.delete(sessionId);
+    }
+  }
+  notifyBridgeDebuggerDetached(source.tabId);
+}
+function installCdpProxyListeners() {
+  chrome.debugger.onEvent.addListener(forwardDebuggerEvent);
+  chrome.debugger.onDetach.addListener(handleDebuggerDetach);
 }
 var CHERRY_PANEL_PORT_NAME = "cherry-panel";
 var panelPorts = /* @__PURE__ */ new Set();
@@ -1388,62 +2267,6 @@ function broadcastLeaderGone() {
   persist();
   broadcast();
 }
-var AI_CATALOG_REL = "ai-catalog";
-function extractCatalog(links) {
-  for (const link of links) {
-    if (link.rel.includes(AI_CATALOG_REL)) {
-      return { kind: "ai-catalog", url: link.href };
-    }
-  }
-  return null;
-}
-function discoveryFingerprint(input) {
-  return [input.origin ?? "", input.kind ?? "", input.url ?? ""].join("\0");
-}
-function extractCatalogFromWebRequest(headers, baseUrl) {
-  const values = getLinkHeaderValuesFromWebRequest(headers);
-  if (values.length === 0) return { match: null, links: [] };
-  const links = parseLinkHeader(values, baseUrl);
-  return { match: extractCatalog(links), links };
-}
-var TARGETS = [{ kind: "ai-catalog", path: "/.well-known/ai-catalog.json" }, { kind: "llms-txt", path: "/llms.txt" }];
-var DEFAULT_TIMEOUT_MS = 3e3;
-async function probeWellKnown(origin, fetchImpl, options = {}) {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  let base;
-  try {
-    base = new URL(origin).origin;
-  } catch {
-    return [];
-  }
-  const settled = await Promise.all(TARGETS.map((target) => probeOne(base, target, fetchImpl, timeoutMs)));
-  return settled.filter((m) => m !== null);
-}
-async function probeOne(base, target, fetchImpl, timeoutMs) {
-  const url = base + target.path;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(new Error("timeout")), timeoutMs);
-  try {
-    const res = await fetchImpl(url, { method: "GET", signal: ctrl.signal, redirect: "manual", credentials: "omit" });
-    if (res.status !== 200) return null;
-    if (!contentTypeOk(res.headers.get("content-type"), target.kind)) return null;
-    return { kind: target.kind, url };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-function contentTypeOk(raw, kind) {
-  if (raw == null) return true;
-  const ct = raw.toLowerCase();
-  if (ct.length === 0) return true;
-  if (ct.includes("text/html") || ct.includes("application/xhtml")) return false;
-  if (kind === "ai-catalog") {
-    return ct.includes("json") || ct.includes("text/plain") || ct.includes("octet-stream");
-  }
-  return ct.includes("text/plain") || ct.includes("markdown") || ct.includes("octet-stream");
-}
 function createDiscoveryObserver(deps) {
   const seenFingerprints = /* @__PURE__ */ new Set();
   const probedOrigins = /* @__PURE__ */ new Set();
@@ -1479,23 +2302,56 @@ function createDiscoveryObserver(deps) {
   };
   return { onHeaders };
 }
-function decodeForbiddenRequestHeaders(headers) {
-  const result = {};
-  for (const [key, value] of Object.entries(headers)) {
-    const lower = key.toLowerCase();
-    if (lower === "x-proxy-cookie") {
-      result["cookie"] = value;
-    } else if (lower === "x-proxy-origin") {
-      result["origin"] = value;
-    } else if (lower === "x-proxy-referer") {
-      result["referer"] = value;
-    } else if (lower.startsWith("x-proxy-proxy-")) {
-      result[lower.replace(/^x-proxy-/, "")] = value;
-    } else {
-      result[key] = value;
-    }
+var DISCOVERY_ENABLED_KEY = "slicc_discovery_enabled";
+var DISCOVERY_ALLOWED_ORIGINS = false ? [...BRIDGE_ALLOWED_ORIGINS, ...BRIDGE_DEV_ORIGINS] : BRIDGE_ALLOWED_ORIGINS;
+var discoveryLoaded = false;
+var discoveryEnabled = false;
+function loadDiscoveryPreference() {
+  void chrome.storage.local.get(DISCOVERY_ENABLED_KEY).then((result) => {
+    const r = result;
+    discoveryEnabled = r[DISCOVERY_ENABLED_KEY] !== false;
+    discoveryLoaded = true;
+  }).catch(() => {
+    discoveryEnabled = true;
+    discoveryLoaded = true;
+  });
+}
+function senderOrigin(sender) {
+  if (sender.origin !== void 0) return sender.origin;
+  try {
+    return new URL(sender.url ?? "").origin;
+  } catch {
+    return void 0;
   }
-  return result;
+}
+function handleDiscoverySetEnabled(message, sender) {
+  if (getMsgType(message) !== "discovery.set-enabled") return "not-handled";
+  const origin = senderOrigin(sender);
+  if (!origin || !DISCOVERY_ALLOWED_ORIGINS.includes(origin)) return "not-handled";
+  const enabled = message.enabled !== false;
+  void chrome.storage.local.set({ [DISCOVERY_ENABLED_KEY]: enabled }).catch(() => {
+  });
+  return "handled";
+}
+function installDiscoveryObserver() {
+  loadDiscoveryPreference();
+  chrome.storage.onChanged?.addListener?.((changes, area) => {
+    if (area !== "local") return;
+    const change = changes[DISCOVERY_ENABLED_KEY];
+    if (change) {
+      discoveryEnabled = change.newValue !== false;
+      discoveryLoaded = true;
+    }
+  });
+  chrome.runtime.onMessageExternal?.addListener?.((message, sender) => {
+    handleDiscoverySetEnabled(message, sender);
+    return false;
+  });
+  const discoveryObserver = createDiscoveryObserver({ fetchImpl: (url, init) => fetch(url, init), emit: (discovery) => postDiscoveryToWelcomedLeaderPorts({ kind: "extension.discovery", ...discovery }), isEnabled: () => discoveryLoaded && discoveryEnabled });
+  chrome.webRequest.onHeadersReceived.addListener((details) => {
+    if (_isProtectedUrl(details.url)) return;
+    discoveryObserver.onHeaders({ url: details.url, responseHeaders: details.responseHeaders });
+  }, { urls: ["<all_urls>"], types: ["main_frame"] }, ["responseHeaders"]);
 }
 var REQUEST_BODY_CAP = 32 * 1024 * 1024;
 function extractSetCookies(headers) {
@@ -1510,12 +2366,18 @@ function buildResponseHeaders(scrubbed, upstream, pipeline) {
   const out = {};
   for (const [k, v] of Object.entries(scrubbed)) {
     const lower = k.toLowerCase();
-    if (lower === "set-cookie" || lower.startsWith("x-proxy-")) continue;
+    if (lower === "set-cookie" || lower === "www-authenticate" || lower.startsWith("x-proxy-")) {
+      continue;
+    }
     out[k] = v;
   }
   const setCookies = extractSetCookies(upstream);
   if (setCookies.length > 0) {
     out["X-Proxy-Set-Cookie"] = pipeline.scrubResponse(JSON.stringify(setCookies));
+  }
+  const wwwAuthenticate = upstream.get("www-authenticate");
+  if (wwwAuthenticate) {
+    out[PROXY_WWW_AUTHENTICATE_HEADER] = pipeline.scrubResponse(wwwAuthenticate);
   }
   return out;
 }
@@ -1540,20 +2402,21 @@ function randomFragmentToken() {
   if (c && typeof c.randomUUID === "function") return c.randomUUID();
   return `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
-async function installForbiddenHeaderRule(url, headers) {
+async function installForbiddenHeaderRule(url, headers, options = {}) {
   const dnr = getDnr();
   const requestHeaders = [];
   for (const [k, v] of Object.entries(headers)) {
-    if (isForbiddenRequestHeader(k)) {
+    if (isForbiddenRequestHeader(k) || options.alsoRestore?.has(k.toLowerCase())) {
       requestHeaders.push({ header: k.toLowerCase(), operation: "set", value: v });
     }
   }
+  const tagged = options.fragment ? `${url.split("#")[0]}#${options.fragment}` : url;
   if (!dnr || requestHeaders.length === 0) {
-    return { fetchUrl: url, cleanup: async () => {
+    return { fetchUrl: tagged, cleanup: async () => {
     } };
   }
   const id = nextDnrRuleId++;
-  const fragment = `slicc-req-${randomFragmentToken()}`;
+  const fragment = options.fragment ?? `slicc-req-${randomFragmentToken()}`;
   const fetchUrl = `${url.split("#")[0]}#${fragment}`;
   const rule = { id, priority: 100, condition: { urlFilter: fetchUrl, resourceTypes: ["xmlhttprequest"] }, action: { type: "modifyHeaders", requestHeaders } };
   await dnr.updateSessionRules({ addRules: [rule] });
@@ -1574,7 +2437,7 @@ async function prepareUpstreamRequest(pipeline, msg) {
     return { error: `forbidden: ${credsResult.forbidden.secretName} on ${credsResult.forbidden.hostname}` };
   }
   const cleanedUrl = credsResult.url;
-  const host = new URL(cleanedUrl).host;
+  const host = secretScopeHostname(cleanedUrl);
   const headers = decodeForbiddenRequestHeaders(msg.headers);
   let hmacSpec;
   for (const key of Object.keys(headers)) {
@@ -1666,53 +2529,275 @@ async function handleProxyMessage(port, pipelinePromise, raw, signal) {
   }
   await processProxyRequest(port, pipeline, msg, signal);
 }
-function handleFetchProxyConnectionAsync(port, pipelinePromise) {
+function refuseRaw(port) {
+  port.postMessage({ type: "raw-response-error", code: "unsupported", status: 501, error: "raw fetch: this service worker has no raw mode" });
+  return () => {
+  };
+}
+function handleFetchProxyConnectionAsync(port, pipelinePromise, startRaw) {
   const ac = new AbortController();
   let started = false;
+  let rawSink = null;
   port.onDisconnect.addListener(() => ac.abort());
   port.onMessage.addListener((raw) => {
+    if (rawSink) {
+      rawSink(raw);
+      return;
+    }
     if (started) return;
     started = true;
+    const type = raw?.type;
+    if (type === "raw-request" || type === "raw-probe") {
+      rawSink = startRaw?.(raw, ac.signal) ?? refuseRaw(port);
+      return;
+    }
     handleProxyMessage(port, pipelinePromise, raw, ac.signal).catch((err) => {
       send(port, { type: "response-error", error: err instanceof Error ? err.message : String(err) });
     });
   });
 }
-var SILENT_RENEW_TIMEOUT_MS = 1e4;
-function buildWebAuthFlowOptions(url, interactive) {
-  if (interactive) {
-    return { url, interactive: true };
+var CAPTURE_WAIT_MS = 1e3;
+var REDIRECT_CAPTURE_WAIT_MS = 5e3;
+var RESTORE_ALSO = /* @__PURE__ */ new Set(["user-agent"]);
+var RawError = class extends Error {
+  constructor(code, status, message) {
+    super(message);
+    this.code = code;
+    this.status = status;
   }
-  return { url, interactive: false, abortOnLoadForNonInteractive: false, timeoutMsForNonInteractive: SILENT_RENEW_TIMEOUT_MS };
+  code;
+  status;
+};
+var Credits = class {
+  n;
+  waiters = [];
+  constructor(initial) {
+    this.n = initial;
+  }
+  grant(k) {
+    this.n += k;
+    for (const w of this.waiters.splice(0)) w();
+  }
+  async take(signal) {
+    while (this.n <= 0) {
+      if (signal.aborted) return false;
+      await new Promise((resolve) => {
+        const done = () => {
+          signal.removeEventListener("abort", done);
+          resolve();
+        };
+        this.waiters.push(done);
+        signal.addEventListener("abort", done, { once: true });
+      });
+    }
+    this.n -= 1;
+    return !signal.aborted;
+  }
+};
+var UploadQueue = class {
+  constructor(onConsumed) {
+    this.onConsumed = onConsumed;
+  }
+  onConsumed;
+  chunks = [];
+  ended = false;
+  waiter = null;
+  push(bytes) {
+    this.chunks.push(bytes);
+    this.wake();
+  }
+  end() {
+    this.ended = true;
+    this.wake();
+  }
+  async next() {
+    while (this.chunks.length === 0 && !this.ended) {
+      await new Promise((resolve) => {
+        this.waiter = resolve;
+      });
+    }
+    const chunk = this.chunks.shift();
+    if (!chunk) return null;
+    this.onConsumed();
+    return chunk;
+  }
+  wake() {
+    const w = this.waiter;
+    this.waiter = null;
+    w?.();
+  }
+};
+function forbidden(f) {
+  return new RawError("forbidden-secret", 403, `Secret "${f.secretName}" is not allowed for domain "${f.hostname}"`);
 }
-async function listSecrets(storage) {
-  const all = await storage.get(null);
-  const entries = pairStorageEntries(all).map(({ name, domains }) => ({ name, domains }));
-  entries.sort((a, b) => a.name.localeCompare(b.name));
-  return entries;
+function prepareHead(pipeline, head) {
+  const creds = pipeline.extractAndUnmaskUrlCredentials(head.url);
+  if (creds.forbidden) throw forbidden(creds.forbidden);
+  const host = secretScopeHostname(creds.url);
+  const headers = foldRawRequestHeaders(stripRawRequestHeaders(head.headers));
+  const hmacSpec = headers[HMAC_SIGN_HEADER];
+  delete headers[HMAC_SIGN_HEADER];
+  const unmasked = pipeline.unmaskHeaders(headers, host);
+  if (unmasked.forbidden) throw forbidden(unmasked.forbidden);
+  if (creds.syntheticAuthorization && !("authorization" in headers)) {
+    headers.authorization = creds.syntheticAuthorization;
+  }
+  return { url: creds.url, host, headers, hmacSpec };
 }
-async function setSecret(storage, name, value, domains) {
-  await storage.set({ [name]: value, [name + DOMAINS_SUFFIX]: domains.join(",") });
+function shouldStream(msg, deps) {
+  return msg.hasBody && rawUploadStreams({ headers: msg.head.headers, bodyLength: msg.bodyLength, canStream: (deps.supportsRequestStreams ?? supportsRequestStreams)() });
 }
-async function deleteSecret(storage, name) {
-  await storage.remove([name, name + DOMAINS_SUFFIX]);
+async function bufferUpload(queue) {
+  const parts = [];
+  let size = 0;
+  for (let chunk = await queue.next(); chunk; chunk = await queue.next()) {
+    size += chunk.byteLength;
+    if (size > RAW_FETCH_BUFFERED_REQUEST_BODY_CAP) {
+      throw new RawError("request-body-too-large", 413, `raw fetch: request body exceeds the ${RAW_FETCH_BUFFERED_REQUEST_BODY_CAP} byte limit of this float`);
+    }
+    parts.push(chunk);
+  }
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
 }
-async function listSecretsWithValues(storage) {
-  const all = await storage.get(null);
-  return pairStorageEntries(all);
+async function relayBody(port, body, scrub, credits, signal) {
+  const reader = body.getReader();
+  try {
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const bytes = scrub ? scrub(value) : value;
+      for (let off = 0; off < bytes.byteLength; off += RAW_FETCH_PORT_CHUNK_BYTES) {
+        if (!await credits.take(signal)) return;
+        const slice = bytes.subarray(off, off + RAW_FETCH_PORT_CHUNK_BYTES);
+        send2(port, { type: "raw-response-chunk", dataBase64: uint8ToBase64(slice) });
+      }
+    }
+  } finally {
+    if (signal.aborted) await reader.cancel().catch(() => void 0);
+  }
 }
-function pairStorageEntries(all) {
-  return pairEnvEntriesToSecrets(Object.entries(all).flatMap(([key, value]) => typeof value === "string" ? [{ key, value }] : []));
+function send2(port, msg) {
+  port.postMessage(msg);
 }
-var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var KEY = "_session.id";
-async function readOrCreateSwSessionId() {
-  const got = await chrome.storage.local.get(KEY);
-  const existing = got[KEY];
-  if (existing && UUID_RE.test(existing)) return existing;
-  const fresh = crypto.randomUUID();
-  await chrome.storage.local.set({ [KEY]: fresh });
-  return fresh;
+function contentTypeOf(headers) {
+  return headers.find(([name]) => name.toLowerCase() === "content-type")?.[1] ?? "";
+}
+var RawSession = class {
+  constructor(port, msg, deps, signal) {
+    this.port = port;
+    this.msg = msg;
+    this.deps = deps;
+    this.signal = signal;
+    this.credits = new Credits(msg.credits);
+    this.queue = new UploadQueue(() => send2(port, { type: "raw-body-credit", chunks: 1 }));
+    if (!msg.hasBody) this.queue.end();
+  }
+  port;
+  msg;
+  deps;
+  signal;
+  credits;
+  queue;
+  tag = `${RAW_FETCH_TAG_PREFIX}${randomFragmentToken()}`;
+  onMessage(raw) {
+    const msg = raw;
+    if (msg.type === "raw-body-chunk") this.queue.push(base64ToUint8(msg.dataBase64));
+    else if (msg.type === "raw-body-end") this.queue.end();
+    else if (msg.type === "raw-credit") this.credits.grant(msg.chunks);
+  }
+  async run(pipelinePromise) {
+    if (this.msg.hasBody) send2(this.port, { type: "raw-body-credit", chunks: RAW_FETCH_PORT_WINDOW });
+    this.deps.capture.expect(this.tag);
+    try {
+      const pipeline = await pipelinePromise;
+      const prepared = prepareHead(pipeline, this.msg.head);
+      const upstream = await this.fetchUpstream(pipeline, prepared);
+      await this.relay(pipeline, upstream);
+    } catch (err) {
+      if (this.signal.aborted) return;
+      const e = err instanceof RawError ? err : new RawError("upstream", 502, err instanceof Error ? err.message : String(err));
+      send2(this.port, { type: "raw-response-error", code: e.code, status: e.status, error: e.message });
+    } finally {
+      this.deps.capture.forget(this.tag);
+    }
+  }
+  async fetchUpstream(pipeline, prepared) {
+    const fetchImpl = this.deps.fetchImpl ?? fetch;
+    const streamed = shouldStream(this.msg, this.deps);
+    const rule = await installForbiddenHeaderRule(prepared.url, prepared.headers, { fragment: this.tag, alsoRestore: RESTORE_ALSO });
+    try {
+      const init = { method: this.msg.head.method, headers: prepared.headers, redirect: "manual", credentials: "omit", signal: this.signal };
+      if (!streamed) {
+        if (this.msg.hasBody) {
+          const bytes = pipeline.unmaskBodyBytes(await bufferUpload(this.queue), prepared.host).bytes;
+          await this.sign(pipeline, prepared, bytes);
+          init.body = new Blob([bytes]);
+        } else {
+          await this.sign(pipeline, prepared, new Uint8Array(0));
+        }
+        return await fetchImpl(rule.fetchUrl, init);
+      }
+      init.duplex = "half";
+      return await withUnsentUploadRetry(() => this.queue.next(), (body) => fetchImpl(rule.fetchUrl, { ...init, body }), this.signal);
+    } finally {
+      await rule.cleanup();
+    }
+  }
+  async sign(pipeline, prepared, body) {
+    if (!prepared.hmacSpec) return;
+    const signed = await pipeline.signHmac(prepared.hmacSpec, body, prepared.host);
+    if (signed.forbidden) throw forbidden(signed.forbidden);
+    if (signed.headerName && signed.signatureHex) {
+      prepared.headers[signed.headerName] = signed.signatureHex;
+    }
+    if (signed.timestampHeaderName && signed.timestampValue) {
+      prepared.headers[signed.timestampHeaderName] = signed.timestampValue;
+    }
+  }
+  async relay(pipeline, upstream) {
+    const method = this.msg.head.method;
+    const opaque = upstream.type === "opaqueredirect";
+    const captured = await this.deps.capture.wait(this.tag, opaque ? REDIRECT_CAPTURE_WAIT_MS : CAPTURE_WAIT_MS);
+    if (opaque && !captured) {
+      throw new RawError("upstream", 502, "raw fetch: the redirect response was not observed");
+    }
+    const status = captured?.status ?? upstream.status;
+    const upstreamHeaders = captured?.headers ?? [...upstream.headers];
+    if (isDecodedPartialResponse({ status, headers: upstreamHeaders, decodedCodings: BROWSER_DECODED_CODINGS })) {
+      await upstream.body?.cancel().catch(() => void 0);
+      throw new RawError("upstream", 502, "raw fetch: the upstream answered a range request with an encoded partial body");
+    }
+    const isText = isTextContentType(contentTypeOf(upstreamHeaders));
+    const headers = rawResponseHeaders({ method, status, headers: upstreamHeaders, bodyRewritten: isText, decodedCodings: BROWSER_DECODED_CODINGS }).map(([name, value]) => [name, pipeline.scrubResponse(value)]);
+    const hasBody = !opaque && upstream.body !== null && rawResponseHasBody(method, status);
+    send2(this.port, { type: "raw-response-head", head: { status, statusText: captured?.statusText || upstream.statusText, headers, url: this.msg.head.url }, hasBody });
+    if (hasBody && upstream.body) {
+      const scrub = isText ? (bytes) => pipeline.scrubResponseBytes(bytes) : null;
+      await relayBody(this.port, upstream.body, scrub, this.credits, this.signal);
+      if (this.signal.aborted) return;
+    } else {
+      await upstream.body?.cancel().catch(() => void 0);
+    }
+    send2(this.port, { type: "raw-response-end" });
+  }
+};
+function rawSessionStarter(port, pipelinePromise, deps) {
+  return (first, signal) => {
+    if (first.type === "raw-probe") {
+      send2(port, { type: "raw-probe-reply", reply: { rawFetch: RAW_FETCH_PROTOCOL_VERSION, requestBodyStreaming: (deps.supportsRequestStreams ?? supportsRequestStreams)(), maxRequestBodyBytes: RAW_FETCH_BUFFERED_REQUEST_BODY_CAP } });
+      return () => {
+      };
+    }
+    const session = new RawSession(port, first, deps, signal);
+    void session.run(pipelinePromise);
+    return (raw) => session.onMessage(raw);
+  };
 }
 var LEADER_TAB_ID_KEY2 = "slicc_leader_tab_id";
 var PROD_LEADER_TAB_URL = `${SLICC_HOSTED_ORIGIN}/?slicc=leader`;
@@ -1864,48 +2949,6 @@ async function reloadLeaderTabIfExists() {
     return false;
   }
 }
-reconcileLeaderTabOnBoot().catch((err) => {
-  console.error("[slicc-sw] reconcile leader tab failed", err);
-});
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => console.error("[slicc-sw] setPanelBehavior failed", err));
-setCherryPanelRecoveryDeps({ reloadLeaderTabIfExists });
-var UPDATE_RELOAD_GUARD_KEY = "slicc_update_reload_at";
-var UPDATE_RELOAD_GUARD_MS = 6e4;
-async function isWithinUpdateReloadGuard() {
-  const result = await chrome.storage.session.get(UPDATE_RELOAD_GUARD_KEY);
-  const stamp = result[UPDATE_RELOAD_GUARD_KEY];
-  if (typeof stamp !== "number") return false;
-  return Date.now() - stamp < UPDATE_RELOAD_GUARD_MS;
-}
-async function stampUpdateReloadGuard() {
-  await chrome.storage.session.set({ [UPDATE_RELOAD_GUARD_KEY]: Date.now() });
-}
-chrome.runtime.onUpdateAvailable.addListener((details) => {
-  console.log("[slicc-sw] Extension update available", details.version);
-  (async () => {
-    if (!await isWithinUpdateReloadGuard()) {
-      const reloaded = await reloadLeaderTabIfExists();
-      if (reloaded) {
-        await stampUpdateReloadGuard();
-      }
-    }
-    chrome.runtime.reload();
-  })().catch((err) => {
-    console.error("[slicc-sw] onUpdateAvailable handler failed", err);
-    chrome.runtime.reload();
-  });
-});
-async function handleLeaderTabRemoved(tabId) {
-  const storedId = await readStoredLeaderTabId();
-  if (storedId !== tabId) return;
-  await clearStoredLeaderTabId();
-  broadcastLeaderGone();
-}
-chrome.tabs.onRemoved.addListener((tabId) => {
-  handleLeaderTabRemoved(tabId).catch((err) => {
-    console.error("[slicc-sw] handleLeaderTabRemoved failed", err);
-  });
-});
 async function focusLeaderTab() {
   const storedId = await readStoredLeaderTabId();
   if (storedId !== void 0) {
@@ -1934,38 +2977,44 @@ async function focusLeaderTab() {
     await chrome.windows.update(tab.windowId, { focused: true });
   }
 }
-function isCaptureOpenWindowMsg(msg) {
-  return typeof msg === "object" && msg !== null && "type" in msg && msg.type === "capture-open-window" && typeof msg.url === "string";
+var UPDATE_RELOAD_GUARD_KEY = "slicc_update_reload_at";
+var UPDATE_RELOAD_GUARD_MS = 6e4;
+async function isWithinUpdateReloadGuard() {
+  const result = await chrome.storage.session.get(UPDATE_RELOAD_GUARD_KEY);
+  const stamp = result[UPDATE_RELOAD_GUARD_KEY];
+  if (typeof stamp !== "number") return false;
+  return Date.now() - stamp < UPDATE_RELOAD_GUARD_MS;
 }
-chrome.runtime.onMessage.addListener((message) => {
-  if (!isCaptureOpenWindowMsg(message)) return false;
-  const requestId = message.requestId;
-  chrome.windows.create({ url: message.url, type: "popup", width: 360, height: 220, focused: true }).catch((err) => {
-    console.error("[slicc-sw] Failed to open capture popup window:", err);
-    if (requestId) {
-      chrome.runtime.sendMessage({ source: "capture-popup", requestId, ok: false, error: `failed to open capture window: ${err?.message || String(err)}` }).catch(() => {
-      });
-    }
+async function stampUpdateReloadGuard() {
+  await chrome.storage.session.set({ [UPDATE_RELOAD_GUARD_KEY]: Date.now() });
+}
+async function reloadLeaderTabForUpdate() {
+  if (await isWithinUpdateReloadGuard()) return;
+  if (await reloadLeaderTabIfExists()) await stampUpdateReloadGuard();
+}
+async function handleLeaderTabRemoved(tabId) {
+  const storedId = await readStoredLeaderTabId();
+  if (storedId !== tabId) return;
+  await clearStoredLeaderTabId();
+  broadcastLeaderGone();
+}
+function installLeaderTabListeners() {
+  reconcileLeaderTabOnBoot().catch((err) => {
+    console.error("[slicc-sw] reconcile leader tab failed", err);
   });
-  return false;
-});
-var sliccGroupId = null;
-async function addToSliccGroup(tabId) {
-  try {
-    if (sliccGroupId !== null) {
-      try {
-        await chrome.tabs.group({ tabIds: tabId, groupId: sliccGroupId });
-        return;
-      } catch (err) {
-        console.info("[slicc-tab-group] Tab group removed by user, recreating", { tabId, previousGroupId: sliccGroupId, error: err instanceof Error ? err.message : String(err) });
-        sliccGroupId = null;
-      }
-    }
-    sliccGroupId = await chrome.tabs.group({ tabIds: tabId });
-    await chrome.tabGroups.update(sliccGroupId, { title: "slicc", color: "pink", collapsed: false });
-  } catch (err) {
-    console.warn("[slicc-tab-group] Tab grouping failed (best-effort, continuing without group)", { tabId, error: err instanceof Error ? err.message : String(err) });
-  }
+  chrome.runtime.onUpdateAvailable.addListener((details) => {
+    console.log("[slicc-sw] Extension update available", details.version);
+    reloadLeaderTabForUpdate().catch((err) => {
+      console.error("[slicc-sw] onUpdateAvailable handler failed", err);
+    }).finally(() => {
+      chrome.runtime.reload();
+    });
+  });
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    handleLeaderTabRemoved(tabId).catch((err) => {
+      console.error("[slicc-sw] handleLeaderTabRemoved failed", err);
+    });
+  });
 }
 var HANDOFF_NOTIFICATION_ID_PREFIX = "slicc-handoff-";
 var HANDOFF_INSTRUCTION_SNIPPET_MAX = 150;
@@ -2001,12 +3050,6 @@ function showHandoffNotification(match, sourceUrl) {
   chrome.action.setBadgeBackgroundColor({ color: "#ff5f72" });
   chrome.notifications.create(notificationId, { type: "basic", iconUrl: "logos/sliccy-color-1scoops-128x128.png", ...handoffNotificationContent(match, sourceUrl) });
 }
-chrome.notifications.onClicked.addListener((notificationId) => {
-  if (!notificationId.startsWith(HANDOFF_NOTIFICATION_ID_PREFIX)) return;
-  chrome.action.setBadgeText({ text: "" });
-  focusLeaderTab().catch(() => {
-  });
-});
 var notifiedHandoffFingerprints = /* @__PURE__ */ new Set();
 var HANDOFF_NOTIFIED_FINGERPRINTS_KEY = "slicc_handoff_notified_fingerprints";
 var HANDOFF_NOTIFIED_FINGERPRINTS_MAX = 100;
@@ -2034,135 +3077,44 @@ async function notifyHandoffOncePerSession(fingerprint, match, url) {
   stored.push(fingerprint);
   await chrome.storage.session.set({ [HANDOFF_NOTIFIED_FINGERPRINTS_KEY]: stored.slice(-HANDOFF_NOTIFIED_FINGERPRINTS_MAX) });
 }
-chrome.webRequest.onHeadersReceived.addListener((details) => {
+function buildNavigateLick(match, url, tabId) {
+  const payload = { type: "navigate-lick", url, verb: match.verb, target: match.target, tabId: tabId >= 0 ? tabId : void 0 };
+  if (match.instruction) payload.instruction = match.instruction;
+  if (match.branch) payload.branch = match.branch;
+  if (match.path) payload.path = match.path;
+  return payload;
+}
+function dispatchHandoffLick(payload) {
+  postLickToWelcomedLeaderPorts({ kind: "extension.lick", verb: payload.verb, target: payload.target, url: payload.url, ...payload.instruction ? { instruction: payload.instruction } : {}, ...payload.branch ? { branch: payload.branch } : {}, ...payload.path ? { path: payload.path } : {}, ...payload.title ? { title: payload.title } : {} });
+  chrome.runtime.sendMessage({ source: "service-worker", payload }).catch(() => {
+  });
+}
+function onHandoffHeaders(details) {
   const { match } = extractHandoffFromWebRequest(details.responseHeaders, details.url);
   if (!match) return;
   const fingerprint = handoffFingerprint(match);
   const alreadyNotified = notifiedHandoffFingerprints.has(fingerprint);
   notifiedHandoffFingerprints.add(fingerprint);
-  const payload = { type: "navigate-lick", url: details.url, verb: match.verb, target: match.target, tabId: details.tabId >= 0 ? details.tabId : void 0 };
-  if (match.instruction) payload.instruction = match.instruction;
-  if (match.branch) payload.branch = match.branch;
-  if (match.path) payload.path = match.path;
-  const tabId = details.tabId;
+  const payload = buildNavigateLick(match, details.url, details.tabId);
   const dispatch = (title) => {
     if (title) payload.title = title;
-    postLickToWelcomedLeaderPorts({ kind: "extension.lick", verb: payload.verb, target: payload.target, url: payload.url, ...payload.instruction ? { instruction: payload.instruction } : {}, ...payload.branch ? { branch: payload.branch } : {}, ...payload.path ? { path: payload.path } : {}, ...payload.title ? { title: payload.title } : {} });
-    chrome.runtime.sendMessage({ source: "service-worker", payload }).catch(() => {
-    });
+    dispatchHandoffLick(payload);
   };
   if (!alreadyNotified) queueHandoffNotification(fingerprint, match, details.url);
-  if (tabId >= 0) {
-    chrome.tabs.get(tabId).then((tab) => dispatch(tab.title)).catch(() => dispatch());
+  if (details.tabId >= 0) {
+    chrome.tabs.get(details.tabId).then((tab) => dispatch(tab.title)).catch(() => dispatch());
   } else {
     dispatch();
   }
-}, { urls: ["<all_urls>"], types: ["main_frame"] }, ["responseHeaders"]);
-var DISCOVERY_ENABLED_KEY = "slicc_discovery_enabled";
-var DISCOVERY_ALLOWED_ORIGINS = false ? [...BRIDGE_ALLOWED_ORIGINS, ...BRIDGE_DEV_ORIGINS] : BRIDGE_ALLOWED_ORIGINS;
-var discoveryLoaded = false;
-var discoveryEnabled = false;
-void chrome.storage.local.get(DISCOVERY_ENABLED_KEY).then((result) => {
-  const r = result;
-  discoveryEnabled = r[DISCOVERY_ENABLED_KEY] !== false;
-  discoveryLoaded = true;
-}).catch(() => {
-  discoveryEnabled = true;
-  discoveryLoaded = true;
-});
-chrome.storage.onChanged?.addListener?.((changes, area) => {
-  if (area !== "local") return;
-  const change = changes[DISCOVERY_ENABLED_KEY];
-  if (change) {
-    discoveryEnabled = change.newValue !== false;
-    discoveryLoaded = true;
-  }
-});
-chrome.runtime.onMessageExternal?.addListener?.((message, sender) => {
-  if (getMsgType(message) !== "discovery.set-enabled") return false;
-  const origin = sender.origin ?? (() => {
-    try {
-      return new URL(sender.url ?? "").origin;
-    } catch {
-      return void 0;
-    }
-  })();
-  if (!origin || !DISCOVERY_ALLOWED_ORIGINS.includes(origin)) return false;
-  const enabled = message.enabled !== false;
-  void chrome.storage.local.set({ [DISCOVERY_ENABLED_KEY]: enabled }).catch(() => {
-  });
-  return false;
-});
-var discoveryObserver = createDiscoveryObserver({ fetchImpl: (url, init) => fetch(url, init), emit: (discovery) => postDiscoveryToWelcomedLeaderPorts({ kind: "extension.discovery", ...discovery }), isEnabled: () => discoveryLoaded && discoveryEnabled });
-chrome.webRequest.onHeadersReceived.addListener((details) => {
-  discoveryObserver.onHeaders({ url: details.url, responseHeaders: details.responseHeaders });
-}, { urls: ["<all_urls>"], types: ["main_frame"] }, ["responseHeaders"]);
-var sessionToTab = /* @__PURE__ */ new Map();
-var debuggerAttachmentOwners = /* @__PURE__ */ new Map();
-var traySockets = /* @__PURE__ */ new Map();
-async function acquireDebuggerAttachment(tabId, owner) {
-  if (debuggerAttachmentOwners.has(tabId)) return false;
-  await chrome.debugger.attach({ tabId }, "1.3");
-  debuggerAttachmentOwners.set(tabId, owner);
-  return true;
 }
-async function releaseDebuggerAttachment(tabId, owner) {
-  if (debuggerAttachmentOwners.get(tabId) !== owner) return;
-  debuggerAttachmentOwners.delete(tabId);
-  await chrome.debugger.detach({ tabId }).catch(() => {
-  });
-}
-async function forceReleaseDebuggerAttachment(tabId) {
-  if (!debuggerAttachmentOwners.has(tabId)) return;
-  debuggerAttachmentOwners.delete(tabId);
-  await chrome.debugger.detach({ tabId }).catch(() => {
-  });
-}
-chrome.runtime.onMessage.addListener((message, _sender, _sendResponse) => {
-  if (!isExtMsg(message)) return false;
-  const msg = message;
-  if (msg.source === "panel") {
+function installHandoffNotifications() {
+  chrome.notifications.onClicked.addListener((notificationId) => {
+    if (!notificationId.startsWith(HANDOFF_NOTIFICATION_ID_PREFIX)) return;
     chrome.action.setBadgeText({ text: "" });
-    const panelPayload = msg.payload;
-    if (panelPayload.type === "oauth-request") {
-      const oauthMsg = panelPayload;
-      handleOAuthRequest(oauthMsg).then((result) => {
-        chrome.runtime.sendMessage({ source: "service-worker", payload: result }).catch((e) => {
-          console.error("[slicc-sw] Failed to send OAuth result:", e);
-        });
-      }).catch((err) => {
-        chrome.runtime.sendMessage({ source: "service-worker", payload: { type: "oauth-result", providerId: oauthMsg.providerId, error: err instanceof Error ? err.message : String(err) } }).catch((e) => {
-          console.error("[slicc-sw] Failed to send OAuth error:", e);
-        });
-      });
-      return false;
-    }
-    return false;
-  }
-  if (msg.source === "offscreen") {
-    const payload = msg.payload;
-    if (payload.type === "cdp-command") {
-      handleCdpCommand(payload).then((response) => {
-        chrome.runtime.sendMessage({ source: "service-worker", payload: response }).catch(() => {
-        });
-      }).catch((err) => {
-        chrome.runtime.sendMessage({ source: "service-worker", payload: { type: "cdp-response", id: payload.id, error: err instanceof Error ? err.message : String(err) } }).catch(() => {
-        });
-      });
-      return false;
-    }
-    if (isTraySocketCommand(payload)) {
-      void handleTraySocketCommand(payload).catch((err) => {
-        void sendServiceWorkerMessage({ type: "tray-socket-error", id: payload.id, error: err instanceof Error ? err.message : String(err) });
-      });
-      return false;
-    }
-    return false;
-  }
-  return false;
-});
-function isExtMsg(msg) {
-  return typeof msg === "object" && msg !== null && "source" in msg && "payload" in msg;
+    focusLeaderTab().catch(() => {
+    });
+  });
+  chrome.webRequest.onHeadersReceived.addListener((details) => { if (_isProtectedUrl(details.url)) return; return onHandoffHeaders(details); }, { urls: ["<all_urls>"], types: ["main_frame"] }, ["responseHeaders"]);
 }
 function isMountSignAndForwardRequest(msg) {
   return typeof msg === "object" && msg !== null && "type" in msg && "envelope" in msg && (msg.type === "mount.s3-sign-and-forward" || msg.type === "mount.da-sign-and-forward");
@@ -2178,18 +3130,103 @@ async function handleMountSignAndForward(msg) {
   }
   return executeDaSignAndForward(msg.envelope);
 }
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!isMountSignAndForwardRequest(message)) return false;
-  const respondError = (err) => {
-    sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err), errorCode: "internal" });
-  };
+function internalErrorReply(err) {
+  return { ok: false, error: err instanceof Error ? err.message : String(err), errorCode: "internal" };
+}
+function handleMountMessage(message, _sender, sendResponse) {
+  if (!isMountSignAndForwardRequest(message)) return "not-handled";
   try {
-    handleMountSignAndForward(message).then((reply) => sendResponse(reply)).catch(respondError);
+    handleMountSignAndForward(message).then((reply) => sendResponse(reply)).catch((err) => sendResponse(internalErrorReply(err)));
   } catch (err) {
-    respondError(err);
+    sendResponse(internalErrorReply(err));
   }
-  return true;
-});
+  return "handled-async";
+}
+function handleMountSignAndForwardPort(port, deps) {
+  const pinPromise = beginPortPin(port, deps, "mount.sign-and-forward");
+  port.onMessage.addListener(async (raw) => {
+    const id = raw?.id;
+    const reply = (response) => port.postMessage({ id, response });
+    const replyError = (message) => reply({ ok: false, error: message, errorCode: "internal" });
+    const pin = await pinPromise;
+    if (!pin.ok) {
+      replyError(pin.error);
+      return;
+    }
+    if (!isMountSignAndForwardRequest(raw)) {
+      replyError("invalid mount.sign-and-forward request");
+      return;
+    }
+    try {
+      reply(await handleMountSignAndForward(raw));
+    } catch (err) {
+      replyError(err instanceof Error ? err.message : String(err));
+    }
+  });
+}
+var ENTRY_TTL_MS = 10 * 60 * 1e3;
+function tagOf(url) {
+  const hash = url.indexOf("#");
+  if (hash < 0) return null;
+  const fragment = url.slice(hash + 1);
+  return fragment.startsWith(RAW_FETCH_TAG_PREFIX) ? fragment : null;
+}
+function createRawFetchCapture(now = Date.now) {
+  const entries = /* @__PURE__ */ new Map();
+  const sweep = () => {
+    const t = now();
+    for (const [tag, entry] of entries) if (entry.expires < t) entries.delete(tag);
+  };
+  return { expect(tag) {
+    sweep();
+    entries.set(tag, { head: null, waiters: [], expires: now() + ENTRY_TTL_MS });
+  }, wait(tag, timeoutMs) {
+    const entry = entries.get(tag);
+    if (!entry) return Promise.resolve(null);
+    if (entry.head) return Promise.resolve(entry.head);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(entry.head), timeoutMs);
+      entry.waiters.push((head) => {
+        clearTimeout(timer);
+        resolve(head);
+      });
+    });
+  }, forget(tag) {
+    entries.delete(tag);
+  }, onHeadersReceived(details) {
+    const tag = tagOf(details.url);
+    const entry = tag ? entries.get(tag) : void 0;
+    if (!entry) return;
+    entry.head = { status: details.statusCode, statusText: reasonFromStatusLine(details.statusLine), headers: (details.responseHeaders ?? []).map((h) => [h.name, h.value ?? ""]) };
+    for (const waiter of entry.waiters.splice(0)) waiter(entry.head);
+  } };
+}
+function installRawFetchCapture(capture) {
+  chrome.webRequest.onHeadersReceived.addListener((details) => capture.onHeadersReceived(details), { urls: ["<all_urls>"], types: ["xmlhttprequest", "other"], tabId: -1 }, ["responseHeaders", "extraHeaders"]);
+}
+var SILENT_RENEW_TIMEOUT_MS = 1e4;
+function buildWebAuthFlowOptions(url, interactive) {
+  if (interactive) {
+    return { url, interactive: true };
+  }
+  return { url, interactive: false, abortOnLoadForNonInteractive: false, timeoutMsForNonInteractive: SILENT_RENEW_TIMEOUT_MS };
+}
+async function handleOAuthRequest(msg) {
+  const redirectUrl = await chrome.identity.launchWebAuthFlow(buildWebAuthFlowOptions(msg.authorizeUrl, msg.interactive ?? true));
+  if (!redirectUrl) {
+    return { type: "oauth-result", providerId: msg.providerId, error: "OAuth flow was cancelled or returned no URL" };
+  }
+  const parsed = new URL(redirectUrl);
+  const params = parsed.searchParams;
+  const hashParams = new URLSearchParams(parsed.hash.slice(1));
+  const error = params.get("error") || hashParams.get("error");
+  if (error) {
+    return { type: "oauth-result", providerId: msg.providerId, error: params.get("error_description") || hashParams.get("error_description") || error };
+  }
+  return { type: "oauth-result", providerId: msg.providerId, code: params.get("code") ?? void 0, state: params.get("state") ?? void 0, redirectUrl };
+}
+var traySockets = /* @__PURE__ */ new Map();
+var supersededSockets = /* @__PURE__ */ new WeakSet();
 function isTraySocketCommand(payload) {
   return payload.type === "tray-socket-open" || payload.type === "tray-socket-send" || payload.type === "tray-socket-close";
 }
@@ -2215,294 +3252,128 @@ async function handleTraySocketCommand(command) {
   }
 }
 function openTraySocket(command) {
-  traySockets.get(command.id)?.close(1e3, "replaced");
+  const previous = traySockets.get(command.id);
+  if (previous !== void 0) {
+    supersededSockets.add(previous);
+    previous.close(1e3, "replaced");
+  }
   const socket = new WebSocket(command.url);
   traySockets.set(command.id, socket);
   socket.addEventListener("open", () => {
-    void sendServiceWorkerMessage({ type: "tray-socket-opened", id: command.id });
+    if (supersededSockets.has(socket)) return;
+    postServiceWorkerMessage({ type: "tray-socket-opened", id: command.id });
   });
   socket.addEventListener("message", (event) => {
-    void sendServiceWorkerMessage({ type: "tray-socket-message", id: command.id, data: typeof event.data === "string" ? event.data : String(event.data) });
+    if (supersededSockets.has(socket)) return;
+    postServiceWorkerMessage({ type: "tray-socket-message", id: command.id, data: typeof event.data === "string" ? event.data : String(event.data) });
   });
   socket.addEventListener("error", () => {
+    if (supersededSockets.has(socket)) return;
     if (traySockets.get(command.id) === socket) {
       traySockets.delete(command.id);
     }
-    void sendServiceWorkerMessage({ type: "tray-socket-error", id: command.id, error: "Tray leader WebSocket failed in extension service worker" });
+    postServiceWorkerMessage({ type: "tray-socket-error", id: command.id, error: "Tray leader WebSocket failed in extension service worker" });
   });
   socket.addEventListener("close", () => {
+    if (supersededSockets.has(socket)) return;
     if (traySockets.get(command.id) === socket) {
       traySockets.delete(command.id);
     }
-    void sendServiceWorkerMessage({ type: "tray-socket-closed", id: command.id });
+    postServiceWorkerMessage({ type: "tray-socket-closed", id: command.id });
   });
 }
-async function sendServiceWorkerMessage(payload) {
-  await chrome.runtime.sendMessage({ source: "service-worker", payload });
+function isExtMsg(msg) {
+  return typeof msg === "object" && msg !== null && "source" in msg && "payload" in msg;
 }
-async function handleCdpCommand(cmd) {
-  const { id, method, params, sessionId } = cmd;
-  try {
-    let result;
-    switch (method) {
-      case "Target.getTargets":
-        result = await cdpGetTargets2();
-        break;
-      case "Target.attachToTarget":
-        result = await cdpAttachToTarget2(params);
-        break;
-      case "Target.detachFromTarget":
-        result = await cdpDetachFromTarget2(params);
-        break;
-      case "Target.createTarget":
-        result = await cdpCreateTarget2(params);
-        break;
-      case "Target.closeTarget":
-        result = await cdpCloseTarget2(params);
-        break;
-      default:
-        result = await cdpSendCommand(method, params, sessionId);
-        break;
-    }
-    return { type: "cdp-response", id, result };
-  } catch (err) {
-    return { type: "cdp-response", id, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-async function cdpGetTargets2() {
-  const [tabs, activeTabs] = await Promise.all([chrome.tabs.query({}), chrome.tabs.query({ active: true, currentWindow: true })]);
-  const activeTabIds = new Set(activeTabs.map((t) => t.id));
-  const targetInfos = tabs.filter((tab) => typeof tab.id === "number").map((tab) => ({ targetId: String(tab.id), type: "page", title: tab.title ?? "", url: tab.url ?? "", attached: debuggerAttachmentOwners.has(tab.id), active: activeTabIds.has(tab.id) }));
-  return { targetInfos };
-}
-async function cdpAttachToTarget2(params) {
-  const targetId = params["targetId"];
-  const tabId = parseInt(targetId, 10);
-  if (!Number.isFinite(tabId) || tabId <= 0) {
-    throw new Error(`Invalid targetId: ${targetId}`);
-  }
-  await acquireDebuggerAttachment(tabId, "legacy");
-  const sessionId = targetId;
-  sessionToTab.set(sessionId, tabId);
-  return { sessionId };
-}
-async function cdpDetachFromTarget2(params) {
-  const sessionId = params["sessionId"];
-  const tabId = sessionToTab.get(sessionId);
-  if (tabId !== void 0) {
-    sessionToTab.delete(sessionId);
-    const stillReferenced = [...sessionToTab.values()].includes(tabId);
-    if (!stillReferenced) {
-      await releaseDebuggerAttachment(tabId, "legacy");
-    }
-  }
-  return {};
-}
-async function cdpCreateTarget2(params) {
-  const url = params["url"] ?? "about:blank";
-  const tab = await chrome.tabs.create({ url, active: false });
-  await addToSliccGroup(tab.id);
-  return { targetId: String(tab.id) };
-}
-async function cdpCloseTarget2(params) {
-  const targetId = params["targetId"];
-  const tabId = parseInt(targetId, 10);
-  if (!Number.isFinite(tabId) || tabId <= 0) {
-    throw new Error(`Invalid targetId: ${targetId}`);
-  }
-  for (const [sid, tid] of sessionToTab) {
-    if (tid === tabId) sessionToTab.delete(sid);
-  }
-  await forceReleaseDebuggerAttachment(tabId);
-  await chrome.tabs.remove(tabId);
-  return { success: true };
-}
-var CDP_UNMASK_METHODS = /* @__PURE__ */ new Set(["Runtime.evaluate", "Runtime.callFunctionOn", "Input.insertText"]);
-async function maybeUnmaskCdpFrame(tabId, method, params) {
-  if (!CDP_UNMASK_METHODS.has(method)) return params;
-  if (!params || typeof params !== "object") return params;
-  let hostname = null;
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    const url = tab?.url;
-    if (typeof url === "string" && url.length > 0) {
-      try {
-        hostname = new URL(url).hostname || null;
-      } catch {
-        hostname = null;
-      }
-    }
-  } catch {
-    hostname = null;
-  }
-  if (!hostname) return params;
-  const pipeline = await buildSecretsPipeline();
-  await pipeline.reload();
-  if (!pipeline.hasSecrets()) return params;
-  const { frame, changed } = unmaskCdpFrame({ method, params }, hostname, pipeline);
-  if (!changed) return params;
-  const nextParams = frame.params;
-  return nextParams ?? params;
-}
-async function cdpSendCommand(method, params, sessionId) {
-  const tabId = sessionId ? sessionToTab.get(sessionId) : void 0;
-  if (tabId === void 0) {
-    throw new Error(`No tab attached for sessionId: ${sessionId ?? "(none)"}. Attach to a target first.`);
-  }
-  const effectiveParams = await maybeUnmaskCdpFrame(tabId, method, params);
-  const result = await chrome.debugger.sendCommand({ tabId }, method, effectiveParams);
-  return result ?? {};
-}
-chrome.debugger.onEvent.addListener((source, method, params) => {
-  if (!debuggerAttachmentOwners.has(source.tabId)) return;
-  let sessionId;
-  for (const [sid, tabId] of sessionToTab) {
-    if (tabId === source.tabId) {
-      sessionId = sid;
-      break;
-    }
-  }
-  const cdpEvent = { type: "cdp-event", method, params: sessionId ? { ...params, sessionId } : params ?? {} };
-  chrome.runtime.sendMessage({ source: "service-worker", payload: cdpEvent }).catch(() => {
+function relayOAuthRequest(oauthMsg) {
+  handleOAuthRequest(oauthMsg).then((result) => {
+    sendServiceWorkerMessage(result).catch((e) => {
+      console.error("[slicc-sw] Failed to send OAuth result:", e);
+    });
+  }).catch((err) => {
+    sendServiceWorkerMessage({ type: "oauth-result", providerId: oauthMsg.providerId, error: err instanceof Error ? err.message : String(err) }).catch((e) => {
+      console.error("[slicc-sw] Failed to send OAuth error:", e);
+    });
   });
-});
-async function handleOAuthRequest(msg) {
-  const redirectUrl = await chrome.identity.launchWebAuthFlow(buildWebAuthFlowOptions(msg.authorizeUrl, msg.interactive ?? true));
-  if (!redirectUrl) {
-    return { type: "oauth-result", providerId: msg.providerId, error: "OAuth flow was cancelled or returned no URL" };
-  }
-  const parsed = new URL(redirectUrl);
-  const params = parsed.searchParams;
-  const hashParams = new URLSearchParams(parsed.hash.slice(1));
-  const error = params.get("error") || hashParams.get("error");
-  if (error) {
-    return { type: "oauth-result", providerId: msg.providerId, error: params.get("error_description") || hashParams.get("error_description") || error };
-  }
-  return { type: "oauth-result", providerId: msg.providerId, code: params.get("code") ?? void 0, state: params.get("state") ?? void 0, redirectUrl };
 }
-chrome.debugger.onDetach.addListener((source, _reason) => {
-  debuggerAttachmentOwners.delete(source.tabId);
-  for (const [sessionId, tabId] of sessionToTab) {
-    if (tabId === source.tabId) {
-      sessionToTab.delete(sessionId);
+function relayCdpCommand(command) {
+  handleCdpCommand(command).then((response) => postServiceWorkerMessage(response)).catch((err) => {
+    postServiceWorkerMessage({ type: "cdp-response", id: command.id, error: err instanceof Error ? err.message : String(err) });
+  });
+}
+function relayTraySocketCommand(command) {
+  handleTraySocketCommand(command).catch((err) => {
+    postServiceWorkerMessage({ type: "tray-socket-error", id: command.id, error: err instanceof Error ? err.message : String(err) });
+  });
+}
+function handleRelayMessage(message) {
+  if (!isExtMsg(message)) return "not-handled";
+  if (message.source === "panel") {
+    chrome.action.setBadgeText({ text: "" });
+    if (message.payload.type === "oauth-request") {
+      relayOAuthRequest(message.payload);
     }
+    return "handled";
   }
-  notifyBridgeDebuggerDetached(source.tabId);
-});
-var sessionSecretStore = new SessionSecretStore();
-var storageLocal = chrome.storage.local;
-async function buildSecretsPipeline() {
-  const sessionId = await readOrCreateSwSessionId();
-  const source = { get: async (name) => {
-    const fromSession = sessionSecretStore.get(name);
-    if (fromSession !== void 0) return fromSession;
-    const got = await chrome.storage.local.get(name);
-    return got[name];
-  }, listAll: () => listSecretsWithValues(storageLocal) };
-  return new SecretsPipeline({ sessionId, source, sessionStore: sessionSecretStore });
+  if (message.source === "offscreen") {
+    const payload = message.payload;
+    if (payload.type === "cdp-command") relayCdpCommand(payload);
+    else if (isTraySocketCommand(payload)) relayTraySocketCommand(payload);
+    return "handled";
+  }
+  return "not-handled";
 }
-var bridgeSwDeps = buildDefaultBridgeSwDeps({ writeStoredLeaderTabId: async (tabId) => {
+var BRIDGE_ORIGINS = false ? [...BRIDGE_ALLOWED_ORIGINS, ...BRIDGE_DEV_ORIGINS2] : BRIDGE_ALLOWED_ORIGINS;
+var selfAdoptLeaderTabId = async (tabId) => {
   try {
     await writeStoredLeaderTabId(tabId);
   } catch {
   }
-}, attachDebugger: (tabId) => acquireDebuggerAttachment(tabId, "bridge"), detachDebugger: (tabId) => releaseDebuggerAttachment(tabId, "bridge"), sendDebuggerCommand: async (tabId, method, params) => {
+};
+var bridgeSwDeps = buildDefaultBridgeSwDeps({ writeStoredLeaderTabId: selfAdoptLeaderTabId, attachDebugger: (tabId) => acquireDebuggerAttachment(tabId, "bridge"), detachDebugger: (tabId) => releaseDebuggerAttachment(tabId, "bridge"), sendDebuggerCommand: async (tabId, method, params) => {
   const result = await chrome.debugger.sendCommand({ tabId }, method, params);
   return result ?? {};
-}, maybeUnmaskCdpFrame, allowedOrigins: false ? [...BRIDGE_ALLOWED_ORIGINS, ...BRIDGE_DEV_ORIGINS] : BRIDGE_ALLOWED_ORIGINS, onLeaderJoinUrl: (joinUrl) => {
+}, maybeUnmaskCdpFrame, allowedOrigins: BRIDGE_ORIGINS, onLeaderJoinUrl: (joinUrl) => {
   setCherryPanelJoinUrl(joinUrl);
 } });
-function buildReloadedPipelinePromise() {
-  return buildSecretsPipeline().then(async (p) => {
-    await p.reload();
-    return p;
-  });
-}
+var portPinDeps = { readStoredLeaderTabId, writeStoredLeaderTabId: selfAdoptLeaderTabId, allowedOrigins: BRIDGE_ORIGINS };
+installLeaderTabListeners();
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => console.error("[slicc-sw] setPanelBehavior failed", err));
+setCherryPanelRecoveryDeps({ reloadLeaderTabIfExists });
+installHandoffNotifications();
+installDiscoveryObserver();
+installCdpProxyListeners();
+var rawFetchDeps = { capture: createRawFetchCapture() };
+installRawFetchCapture(rawFetchDeps.capture);
+var SW_MESSAGE_HANDLERS = [handleCapturePopupMessage, handleRelayMessage, handleMountMessage, handleSecretsMessage];
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => routeSwMessage(SW_MESSAGE_HANDLERS, message, sender, sendResponse));
 chrome.runtime.onConnectExternal.addListener((port) => {
   if (port.name === "fetch-proxy.fetch") {
-    const pipelinePromise = (async () => {
-      const pin = await validateBridgePin(port.sender, { readStoredLeaderTabId: bridgeSwDeps.readStoredLeaderTabId, writeStoredLeaderTabId: bridgeSwDeps.writeStoredLeaderTabId, allowedOrigins: bridgeSwDeps.allowedOrigins });
-      if (!pin.ok) throw new Error(`fetch-proxy pin failed: ${pin.reason ?? "pin-failed"}`);
-      return buildReloadedPipelinePromise();
-    })();
-    pipelinePromise.catch((err) => {
-      console.error("[sw] external fetch-proxy init failed", err);
-    });
-    handleFetchProxyConnectionAsync(port, pipelinePromise);
+    connectExternalFetchProxy(port);
     return;
   }
   if (port.name === "secrets.crud") {
-    const pinPromise = validateBridgePin(port.sender, { readStoredLeaderTabId: bridgeSwDeps.readStoredLeaderTabId, writeStoredLeaderTabId: bridgeSwDeps.writeStoredLeaderTabId, allowedOrigins: bridgeSwDeps.allowedOrigins });
-    pinPromise.catch((err) => {
-      console.error("[sw] external secrets.crud pin check failed", err);
-    });
-    port.onMessage.addListener(async (raw) => {
-      const id = raw?.id;
-      let replied = false;
-      const reply = (response) => {
-        if (replied) return;
-        replied = true;
-        port.postMessage({ id, response });
-      };
-      let pin;
-      try {
-        pin = await pinPromise;
-      } catch (err) {
-        reply({ error: `secrets.crud pin failed: ${err instanceof Error ? err.message : String(err)}` });
-        return;
-      }
-      if (!pin.ok) {
-        reply({ error: `secrets.crud pin failed: ${pin.reason ?? "pin-failed"}` });
-        return;
-      }
-      const type = getMsgType(raw);
-      const handler = type !== void 0 && isSecretsMessageType(type) ? SECRETS_HANDLERS[type] : void 0;
-      if (!handler) {
-        reply({ error: `unknown secrets type: ${type ?? "undefined"}` });
-        return;
-      }
-      if (!handler(raw, reply)) {
-        reply({ error: `malformed secrets request: ${type}` });
-      }
-    });
+    handleSecretsCrudPort(port, portPinDeps);
     return;
   }
   if (port.name === "mount.sign-and-forward") {
-    const pinPromise = validateBridgePin(port.sender, { readStoredLeaderTabId: bridgeSwDeps.readStoredLeaderTabId, writeStoredLeaderTabId: bridgeSwDeps.writeStoredLeaderTabId, allowedOrigins: bridgeSwDeps.allowedOrigins });
-    pinPromise.catch((err) => {
-      console.error("[sw] external mount.sign-and-forward pin check failed", err);
-    });
-    port.onMessage.addListener(async (raw) => {
-      const id = raw?.id;
-      const reply = (response) => port.postMessage({ id, response });
-      const replyError = (message) => reply({ ok: false, error: message, errorCode: "internal" });
-      let pin;
-      try {
-        pin = await pinPromise;
-      } catch (err) {
-        replyError(`mount.sign-and-forward pin failed: ${err instanceof Error ? err.message : String(err)}`);
-        return;
-      }
-      if (!pin.ok) {
-        replyError(`mount.sign-and-forward pin failed: ${pin.reason ?? "pin-failed"}`);
-        return;
-      }
-      if (!isMountSignAndForwardRequest(raw)) {
-        replyError("invalid mount.sign-and-forward request");
-        return;
-      }
-      try {
-        reply(await handleMountSignAndForward(raw));
-      } catch (err) {
-        replyError(err instanceof Error ? err.message : String(err));
-      }
-    });
+    handleMountSignAndForwardPort(port, portPinDeps);
     return;
   }
   handleBridgePortConnect(port, bridgeSwDeps).catch((err) => {
     console.error("[slicc-sw] CDP bridge connect failed", err);
   });
 });
+function connectExternalFetchProxy(port) {
+  const pipelinePromise = beginPortPin(port, portPinDeps, "fetch-proxy").then((pin) => {
+    if (!pin.ok) throw new Error(pin.error);
+    return buildReloadedPipelinePromise();
+  });
+  pipelinePromise.catch((err) => {
+    console.error("[sw] external fetch-proxy init failed", err);
+  });
+  handleFetchProxyConnectionAsync(port, pipelinePromise, rawSessionStarter(port, pipelinePromise, rawFetchDeps));
+}
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === CHERRY_PANEL_PORT_NAME) {
     chrome.action.setBadgeText({ text: "" }).catch(() => {
@@ -2517,236 +3388,5 @@ chrome.runtime.onConnect.addListener((port) => {
   pipelinePromise.catch((err) => {
     console.error("[sw] fetch-proxy init failed", err);
   });
-  handleFetchProxyConnectionAsync(port, pipelinePromise);
+  handleFetchProxyConnectionAsync(port, pipelinePromise, rawSessionStarter(port, pipelinePromise, rawFetchDeps));
 });
-function getMsgType(msg) {
-  if (typeof msg !== "object" || msg === null || !("type" in msg)) return void 0;
-  const t = msg.type;
-  return typeof t === "string" ? t : void 0;
-}
-function getStringField(msg, field) {
-  if (typeof msg !== "object" || msg === null || !(field in msg)) return void 0;
-  const v = Reflect.get(msg, field);
-  return typeof v === "string" ? v : void 0;
-}
-function getStringArrayField(msg, field) {
-  if (typeof msg !== "object" || msg === null || !(field in msg)) return void 0;
-  const v = Reflect.get(msg, field);
-  if (!Array.isArray(v)) return void 0;
-  return v.filter((d) => typeof d === "string");
-}
-function errMsg(err) {
-  return err instanceof Error ? err.message : String(err);
-}
-function runSecretsListMaskedEntries(_msg, sendResponse) {
-  void (async () => {
-    try {
-      const pipeline = await buildSecretsPipeline();
-      await pipeline.reload();
-      sendResponse({ entries: pipeline.getMaskedEntries() });
-    } catch (err) {
-      console.error("[sw] secrets.list-masked-entries failed", err);
-      sendResponse({ entries: [], error: errMsg(err) });
-    }
-  })();
-  return true;
-}
-function runSecretsScrubToolResult(msg, sendResponse) {
-  const text = getStringField(msg, "text");
-  if (text === void 0) return false;
-  void (async () => {
-    try {
-      const pipeline = await buildSecretsPipeline();
-      await pipeline.reload();
-      sendResponse({ text: pipeline.scrubResponse(text) });
-    } catch {
-      console.error("[sw] secrets.scrub-tool-result failed");
-      sendResponse({ error: "secret scrub failed" });
-    }
-  })();
-  return true;
-}
-function runSecretsListWithValuesForPipeline(_msg, sendResponse) {
-  void (async () => {
-    try {
-      const sessionId = await readOrCreateSwSessionId();
-      const persisted = await listSecretsWithValues(storageLocal);
-      const persistedNames = new Set(persisted.map((e) => e.name));
-      const session = sessionSecretStore.listAll().filter((s) => !persistedNames.has(s.name));
-      const entries = [...persisted, ...session];
-      sendResponse({ sessionId, entries });
-    } catch (err) {
-      console.error("[sw] secrets.list-with-values-for-pipeline failed", err);
-      sendResponse({ sessionId: void 0, entries: [], error: errMsg(err) });
-    }
-  })();
-  return true;
-}
-function runSecretsList(_msg, sendResponse) {
-  void (async () => {
-    try {
-      const entries = await listSecrets(storageLocal);
-      sendResponse({ entries });
-    } catch (err) {
-      console.error("[sw] secrets.list failed", err);
-      sendResponse({ entries: [], error: errMsg(err) });
-    }
-  })();
-  return true;
-}
-function runSecretsSet(msg, sendResponse) {
-  const name = getStringField(msg, "name");
-  const value = getStringField(msg, "value");
-  const domains = getStringArrayField(msg, "domains");
-  if (name === void 0 || value === void 0 || domains === void 0) return false;
-  void (async () => {
-    try {
-      await setSecret(storageLocal, name, value, domains);
-      sendResponse({ ok: true });
-    } catch (err) {
-      console.error("[sw] secrets.set failed", err);
-      sendResponse({ ok: false, error: errMsg(err) });
-    }
-  })();
-  return true;
-}
-function runSecretsDelete(msg, sendResponse) {
-  const name = getStringField(msg, "name");
-  if (name === void 0) return false;
-  void (async () => {
-    try {
-      if (sessionSecretStore.has(name)) {
-        sessionSecretStore.delete(name);
-        sendResponse({ ok: true, removed: true, fromSession: true });
-        return;
-      }
-      const existing = await listSecrets(storageLocal);
-      if (!existing.some((e) => e.name === name)) {
-        sendResponse({ ok: true, removed: false });
-        return;
-      }
-      await deleteSecret(storageLocal, name);
-      sendResponse({ ok: true, removed: true, fromSession: false });
-    } catch (err) {
-      console.error("[sw] secrets.delete failed", err);
-      sendResponse({ ok: false, error: errMsg(err) });
-    }
-  })();
-  return true;
-}
-function runSecretsSessionSet(msg, sendResponse) {
-  const name = getStringField(msg, "name");
-  const value = getStringField(msg, "value");
-  const domains = getStringArrayField(msg, "domains");
-  if (name === void 0 || value === void 0 || domains === void 0) return false;
-  sessionSecretStore.set(name, value, domains);
-  sendResponse({ ok: true });
-  return true;
-}
-function runSecretsSessionList(_msg, sendResponse) {
-  sendResponse({ entries: sessionSecretStore.list() });
-  return true;
-}
-function runSecretsPeek(msg, sendResponse) {
-  const name = getStringField(msg, "name");
-  if (name === void 0) return false;
-  void (async () => {
-    try {
-      const sessionRec = sessionSecretStore.getRecord(name);
-      if (sessionRec) {
-        sendResponse({ record: { name, preview: previewSecret(sessionRec.value), domains: sessionRec.domains } });
-        return;
-      }
-      const all = await listSecretsWithValues(storageLocal);
-      const found = all.find((e) => e.name === name);
-      sendResponse({ record: found ? { name, preview: previewSecret(found.value), domains: found.domains } : void 0 });
-    } catch (err) {
-      console.error("[sw] secrets.peek failed", err);
-      sendResponse({ record: void 0, error: errMsg(err) });
-    }
-  })();
-  return true;
-}
-function runSecretsSetDomains(msg, sendResponse) {
-  const name = getStringField(msg, "name");
-  const domains = getStringArrayField(msg, "domains");
-  if (name === void 0 || domains === void 0) return false;
-  void (async () => {
-    try {
-      if (sessionSecretStore.has(name)) {
-        sessionSecretStore.setDomains(name, domains);
-        sendResponse({ ok: true });
-        return;
-      }
-      const all = await listSecretsWithValues(storageLocal);
-      const found = all.find((e) => e.name === name);
-      if (!found) {
-        sendResponse({ ok: false, error: "secret not found" });
-        return;
-      }
-      await setSecret(storageLocal, name, found.value, domains);
-      sendResponse({ ok: true });
-    } catch {
-      console.error("[sw] secrets.set-domains failed");
-      sendResponse({ ok: false, error: "secret scope update failed" });
-    }
-  })();
-  return true;
-}
-async function runMaskOauthTokenWrite(providerId, accessToken, domains) {
-  if (accessToken && domains) {
-    await chrome.storage.local.set({ [`oauth.${providerId}.token`]: accessToken, [`oauth.${providerId}.token_DOMAINS`]: domains });
-  }
-  const pipeline = await buildSecretsPipeline();
-  await pipeline.reload();
-  const name = `oauth.${providerId}.token`;
-  return pipeline.getMaskedEntries().find((e) => e.name === name)?.maskedValue;
-}
-function runSecretsMaskOauthToken(msg, sendResponse) {
-  const providerId = getStringField(msg, "providerId");
-  if (providerId === void 0) return false;
-  const accessToken = getStringField(msg, "accessToken");
-  const domains = getStringField(msg, "domains");
-  void (async () => {
-    try {
-      const maskedValue = await runMaskOauthTokenWrite(providerId, accessToken, domains);
-      if (accessToken && domains && maskedValue === void 0) {
-        console.warn("[sw] secrets.mask-oauth-token: entry missing after write");
-        sendResponse({ maskedValue: void 0, error: "entry missing after write" });
-        return;
-      }
-      sendResponse({ maskedValue });
-    } catch {
-      console.error("[sw] secrets.mask-oauth-token failed");
-      sendResponse({ maskedValue: void 0, error: "OAuth token masking failed" });
-    }
-  })();
-  return true;
-}
-function runSecretsRedactExport(msg, sendResponse) {
-  const texts = getStringArrayField(msg, "texts");
-  if (texts === void 0) return false;
-  void (async () => {
-    try {
-      const pipeline = await buildSecretsPipeline();
-      await pipeline.reload();
-      const result = pipeline.redactForExport(texts);
-      sendResponse(result);
-    } catch (err) {
-      console.error("[sw] secrets.redact-export failed", err);
-      sendResponse({ error: errMsg(err) });
-    }
-  })();
-  return true;
-}
-var SECRETS_HANDLERS = { "secrets.list-masked-entries": runSecretsListMaskedEntries, "secrets.scrub-tool-result": runSecretsScrubToolResult, "secrets.list-with-values-for-pipeline": runSecretsListWithValuesForPipeline, "secrets.list": runSecretsList, "secrets.set": runSecretsSet, "secrets.delete": runSecretsDelete, "secrets.session.set": runSecretsSessionSet, "secrets.session.list": runSecretsSessionList, "secrets.peek": runSecretsPeek, "secrets.set-domains": runSecretsSetDomains, "secrets.mask-oauth-token": runSecretsMaskOauthToken, "secrets.redact-export": runSecretsRedactExport };
-function isSecretsMessageType(type) {
-  return Object.hasOwn(SECRETS_HANDLERS, type);
-}
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  const type = getMsgType(msg);
-  if (type === void 0 || !isSecretsMessageType(type)) return false;
-  const handler = SECRETS_HANDLERS[type];
-  return handler(msg, sendResponse);
-});
-export { appendLeaderExtIdParam, getLeaderTabOrigin, getLeaderTabUrl, getLeaderTabUrlGlob, leaderUrlHasExtId };

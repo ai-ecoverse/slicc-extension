@@ -1,5 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { argv, cwd } from 'node:process';
@@ -17,16 +25,21 @@ const valid =
 if (version !== undefined && !valid) {
   throw new Error(`not a Chrome extension version: ${version}`);
 }
+
+const sixTagPath = join(root, '.six-tag');
+const sixTag = existsSync(sixTagPath) ? readFileSync(sixTagPath, 'utf8').trim() : null;
+
 cpSync(join(root, 'extension'), stage, {
   recursive: true,
   filter: (path) => !path.includes('_metadata'),
 });
 if (version) {
   const manifest = JSON.parse(readFileSync(join(stage, 'manifest.json'), 'utf8'));
-  writeFileSync(
-    join(stage, 'manifest.json'),
-    `${JSON.stringify({ ...manifest, version }, null, 2)}\n`
-  );
+  const stamped = { ...manifest, version };
+  if (sixTag) {
+    stamped.version_name = `${version} (six ${sixTag})`;
+  }
+  writeFileSync(join(stage, 'manifest.json'), `${JSON.stringify(stamped, null, 2)}\n`);
 }
 mkdirSync(outDir, { recursive: true });
 rmSync(zipPath, { force: true });

@@ -29,8 +29,12 @@ const sixSwPath = join(ext, 'six-sw.js');
 let content = readFileSync(sixSwPath, 'utf8');
 content = `${guardFn}\n${content}`;
 content = content.replace(
-  /(chrome\.webRequest\.onHeadersReceived\.addListener\(\n\s*\(details\) => \{)/g,
+  /(chrome\.webRequest\.onHeadersReceived\.addListener\(\s*\(details\) => \{)/g,
   '$1\n    if (_isProtectedUrl(details.url)) return;'
+);
+content = content.replace(
+  /(chrome\.webRequest\.onHeadersReceived\.addListener\()(onHandoffHeaders)/g,
+  '$1(details) => { if (_isProtectedUrl(details.url)) return; return $2(details); }'
 );
 content = content.replace(
   /(async function cdpAttachToTarget\(params, state2, deps\) \{)/,

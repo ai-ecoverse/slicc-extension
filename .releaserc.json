@@ -6,6 +6,7 @@
     [
       "@semantic-release/exec",
       {
+        "verifyReleaseCmd": "node scripts/check-six-version.mjs",
         "prepareCmd": "node scripts/pack.mjs ${nextRelease.version}"
       }
     ],
