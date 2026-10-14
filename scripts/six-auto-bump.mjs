@@ -1,38 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareVersions, parseSixVersion, resolveLatestV6Tag } from './check-six-version.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-export function deriveSixPaths(buildScript) {
-  const paths = new Set();
-  const pkgPatterns = [
-    /packages\/chrome-extension/g,
-    /packages\/shared-ts/g,
-    /packages\/webapp/g,
-    /packages\/cherry/g,
-  ];
-  for (const pattern of pkgPatterns) {
-    if (pattern.test(buildScript)) {
-      const dir = pattern.source.replace(/\\/g, '');
-      paths.add(dir);
-    }
-  }
-  const resolveMatches = buildScript.matchAll(
-    /resolve\(sixDir,\s*'(packages\/[^']+?)(?:\/[^']*)?'\)/g
-  );
-  for (const m of resolveMatches) {
-    const top = m[1].split('/').slice(0, 2).join('/');
-    paths.add(top);
-  }
-  const relImportMatch = buildScript.match(/args\.path\.replace\(['"]\.\.\/\.\.\/([^/]+)\/src\//);
-  if (relImportMatch) {
-    paths.add(`packages/${relImportMatch[1]}`);
-  }
-  return [...paths].sort();
-}
+const SLICC_REPO = 'https://github.com/ai-ecoverse/slicc.git';
+const BUNDLE_FILES = ['extension/six-sw.js', 'extension/sidepanel.js', 'extension/secrets.js'];
 
 export function resolveLatestTag(sliccRepoUrl) {
   const raw = execFileSync('git', ['ls-remote', '--tags', sliccRepoUrl, 'refs/tags/v6.*'], {
@@ -42,84 +18,36 @@ export function resolveLatestTag(sliccRepoUrl) {
   return resolveLatestV6Tag(raw);
 }
 
-export function diffHasRelevantChanges(sliccRepoUrl, oldTag, newTag, relevantPaths) {
-  const tmp = execFileSync('mktemp', ['-d'], { encoding: 'utf8' }).trim();
-  try {
-    execFileSync('git', ['clone', '--bare', '--filter=blob:none', '--no-tags', sliccRepoUrl, tmp], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    execFileSync(
-      'git',
-      [
-        '-C',
-        tmp,
-        'fetch',
-        'origin',
-        `+refs/tags/${oldTag}:refs/tags/${oldTag}`,
-        `+refs/tags/${newTag}:refs/tags/${newTag}`,
-      ],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-    const diff = execFileSync(
-      'git',
-      [
-        '-C',
-        tmp,
-        'diff',
-        '--name-only',
-        `refs/tags/${oldTag}`,
-        `refs/tags/${newTag}`,
-        '--',
-        ...relevantPaths,
-      ],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
-    ).trim();
-    return { changed: diff.length > 0, files: diff ? diff.split('\n') : [] };
-  } finally {
-    execFileSync('rm', ['-rf', tmp]);
+export function hashBundles(rootDir, files) {
+  const hashes = {};
+  for (const f of files) {
+    const content = readFileSync(resolve(rootDir, f));
+    hashes[f] = createHash('sha256').update(content).digest('hex');
   }
+  return hashes;
 }
 
-export function shouldBump({ currentTag, latestTag, relevantPaths, sliccRepoUrl }) {
+export function bundlesChanged(before, after) {
+  const changed = [];
+  for (const f of Object.keys(before)) {
+    if (before[f] !== after[f]) changed.push(f);
+  }
+  return changed;
+}
+
+export function isNewerTag(currentTag, latestTag) {
   const currentVersion = parseSixVersion(currentTag);
   const latestVersion = parseSixVersion(latestTag);
-
-  if (!currentVersion || !latestVersion) {
-    return { bump: false, reason: `Invalid tag: current=${currentTag} latest=${latestTag}` };
-  }
-
-  if (compareVersions(latestVersion, currentVersion) <= 0) {
-    return { bump: false, reason: `Current ${currentTag} is up to date with ${latestTag}` };
-  }
-
-  const { changed, files } = diffHasRelevantChanges(
-    sliccRepoUrl,
-    currentTag,
-    latestTag,
-    relevantPaths
-  );
-
-  if (!changed) {
-    return {
-      bump: false,
-      reason: `${latestTag} is newer than ${currentTag} but no extension-relevant files changed in: ${relevantPaths.join(', ')}`,
-    };
-  }
-
-  return { bump: true, reason: `Bumping ${currentTag} → ${latestTag}`, files, latestTag };
+  if (!currentVersion || !latestVersion) return false;
+  return compareVersions(latestVersion, currentVersion) > 0;
 }
-
-const SLICC_REPO = 'https://github.com/ai-ecoverse/slicc.git';
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   const dryRun = process.argv.includes('--dry-run');
   const currentTag = readFileSync(resolve(root, '.six-tag'), 'utf8').trim();
-  const buildScript = readFileSync(resolve(root, 'scripts/build-six.mjs'), 'utf8');
-  const relevantPaths = deriveSixPaths(buildScript);
 
   process.stdout.write(`Current six tag: ${currentTag}\n`);
-  process.stdout.write(`Relevant paths: ${relevantPaths.join(', ')}\n`);
 
   const latestTag = resolveLatestTag(SLICC_REPO);
   if (!latestTag) {
@@ -128,32 +56,59 @@ if (isMain) {
   }
   process.stdout.write(`Latest v6 tag: ${latestTag}\n`);
 
-  const result = shouldBump({
-    currentTag,
-    latestTag,
-    relevantPaths,
-    sliccRepoUrl: SLICC_REPO,
-  });
-
-  process.stdout.write(`${result.reason}\n`);
-
-  if (!result.bump) {
+  if (!isNewerTag(currentTag, latestTag)) {
+    process.stdout.write(`Current ${currentTag} is up to date with ${latestTag}\n`);
     process.exit(0);
   }
 
-  if (result.files) {
-    process.stdout.write(`Changed files:\n${result.files.map((f) => `  ${f}`).join('\n')}\n`);
+  process.stdout.write(
+    `${latestTag} is newer than ${currentTag} — building both to compare bundles\n`
+  );
+
+  process.stdout.write(`Building at current tag (${currentTag})…\n`);
+  execFileSync('npm', ['run', 'build'], {
+    cwd: root,
+    stdio: 'inherit',
+    env: { ...process.env, SIX_REF: currentTag },
+  });
+  const before = hashBundles(root, BUNDLE_FILES);
+  for (const [f, h] of Object.entries(before)) {
+    process.stdout.write(`  ${f}: ${h}\n`);
   }
+
+  process.stdout.write(`Building at latest tag (${latestTag})…\n`);
+  execFileSync('npm', ['run', 'build'], {
+    cwd: root,
+    stdio: 'inherit',
+    env: { ...process.env, SIX_REF: latestTag },
+  });
+  const after = hashBundles(root, BUNDLE_FILES);
+  for (const [f, h] of Object.entries(after)) {
+    process.stdout.write(`  ${f}: ${h}\n`);
+  }
+
+  const changed = bundlesChanged(before, after);
+  if (changed.length === 0) {
+    process.stdout.write(
+      `${latestTag} is newer than ${currentTag} but built bundles are identical — skipping bump\n`
+    );
+    process.exit(0);
+  }
+
+  process.stdout.write(`Bundles differ: ${changed.join(', ')}\n`);
 
   if (dryRun) {
-    process.stdout.write('Dry run — skipping build and commit\n');
+    process.stdout.write('Dry run — would bump .six-tag and dispatch release\n');
     process.exit(0);
   }
+
+  writeFileSync(resolve(root, '.six-tag'), latestTag);
+  process.stdout.write(`Updated .six-tag to ${latestTag}\n`);
 
   const setOutput = process.env.GITHUB_OUTPUT;
   if (setOutput) {
     const { appendFileSync } = await import('node:fs');
     appendFileSync(setOutput, `bump=true\n`);
-    appendFileSync(setOutput, `new_tag=${result.latestTag}\n`);
+    appendFileSync(setOutput, `new_tag=${latestTag}\n`);
   }
 }

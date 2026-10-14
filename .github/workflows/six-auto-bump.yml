@@ -7,9 +7,10 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
-  group: six-auto-bump
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -30,17 +31,9 @@ jobs:
 
       - run: npm ci
 
-      - name: Check for six update
+      - name: Check for six update and build comparison
         id: check
         run: node scripts/six-auto-bump.mjs
-
-      - name: Update .six-tag
-        if: steps.check.outputs.bump == 'true'
-        run: printf '%s' "${{ steps.check.outputs.new_tag }}" > .six-tag
-
-      - name: Build at new tag
-        if: steps.check.outputs.bump == 'true'
-        run: npm run build
 
       - name: Lint
         if: steps.check.outputs.bump == 'true'
@@ -64,3 +57,9 @@ jobs:
           git add .six-tag
           git commit -m "fix: build six ${{ steps.check.outputs.new_tag }}"
           git push origin HEAD:main
+
+      - name: Dispatch release
+        if: steps.check.outputs.bump == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release.yml --ref main
