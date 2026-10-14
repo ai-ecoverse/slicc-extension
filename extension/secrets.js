@@ -1,45 +1,6 @@
 (() => {
-
-  var KNOWN_PREFIXES = [
-    "ghp_",
-
-    "gho_",
-
-    "ghu_",
-
-    "ghs_",
-
-    "ghr_",
-
-    "github_pat_",
-
-    "sk-",
-
-    "pk-",
-
-    "xoxb-",
-
-    "xoxp-",
-
-    "xoxa-",
-
-    "xoxs-",
-
-    "AKIA",
-
-    "ABIA",
-
-    "ACCA",
-
-    "ASIA",
-
-    "sk-ant-",
-
-    "Bearer "
-
-  ];
+  var KNOWN_PREFIXES = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "pk-", "xoxb-", "xoxp-", "xoxa-", "xoxs-", "AKIA", "ABIA", "ACCA", "ASIA", "sk-ant-", "Bearer "];
   var SORTED_PREFIXES = [...KNOWN_PREFIXES].sort((a, b) => b.length - a.length);
-
   var OAUTH_EXTRA_DOMAINS_KEY = "slicc_oauth_extra_domains";
   function readOAuthExtras(storage2) {
     try {
@@ -62,9 +23,7 @@
     try {
       storage2.setItem(OAUTH_EXTRA_DOMAINS_KEY, JSON.stringify(store));
     } catch (err) {
-      throw new Error(
-        `Failed to persist OAuth extras (localStorage quota exceeded?): ${err instanceof Error ? err.message : String(err)}`
-      );
+      throw new Error(`Failed to persist OAuth extras (localStorage quota exceeded?): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   function addOAuthExtraDomain(storage2, providerId, domain) {
@@ -99,14 +58,13 @@
     delete store[providerId];
     writeOAuthExtras(storage2, store);
   }
-
   var DOMAINS_SUFFIX = "_DOMAINS";
   function parseDomainsCsv(raw) {
     return raw.split(",").map((domain) => domain.trim()).filter((domain) => domain.length > 0);
   }
   function pairEnvEntriesToSecrets(entries) {
-    const values =  new Map();
-    const domains =  new Map();
+    const values = /* @__PURE__ */ new Map();
+    const domains = /* @__PURE__ */ new Map();
     const order = [];
     for (const entry of entries) {
       if (entry.key.endsWith(DOMAINS_SUFFIX)) {
@@ -143,7 +101,6 @@
     const resolvedDomains = input.domains && input.domains.length > 0 ? input.domains : deriveS3Domains(input.endpoint);
     return { ok: true, resolvedDomains };
   }
-
   async function listSecrets(storage2) {
     const all = await storage2.get(null);
     const entries = pairStorageEntries(all).map(({ name, domains }) => ({ name, domains }));
@@ -151,10 +108,7 @@
     return entries;
   }
   async function setSecret(storage2, name, value, domains) {
-    await storage2.set({
-      [name]: value,
-      [name + DOMAINS_SUFFIX]: domains.join(",")
-    });
+    await storage2.set({ [name]: value, [name + DOMAINS_SUFFIX]: domains.join(",") });
   }
   async function deleteSecret(storage2, name) {
     await storage2.remove([name, name + DOMAINS_SUFFIX]);
@@ -190,13 +144,8 @@
     return v;
   }
   function pairStorageEntries(all) {
-    return pairEnvEntriesToSecrets(
-      Object.entries(all).flatMap(
-        ([key, value]) => typeof value === "string" ? [{ key, value }] : []
-      )
-    );
+    return pairEnvEntriesToSecrets(Object.entries(all).flatMap(([key, value]) => typeof value === "string" ? [{ key, value }] : []));
   }
-
   var $ = (id) => document.getElementById(id);
   function el(tag, props, ...children) {
     const node = document.createElement(tag);
@@ -245,48 +194,23 @@
       return;
     }
     for (const entry of entries) {
-      const row = el(
-        "div",
-        { class: "secret-row", dataset: { name: entry.name } },
-        el(
-          "div",
-          { class: "secret-meta" },
-          el("div", { class: "secret-name", text: entry.name }),
-          el("div", { class: "secret-domains", text: entry.domains.join(", ") })
-        ),
-        el("button", {
-          class: "btn-secondary btn",
-          text: "Copy name",
-          "style:font-size": "11px",
-          "style:padding": "4px 8px",
-          on: {
-            click: async () => {
-              try {
-                await navigator.clipboard.writeText(entry.name);
-                showToast(`Copied "${entry.name}"`);
-              } catch {
-                showToast("Clipboard failed", true);
-              }
-            }
-          }
-        }),
-        el("button", {
-          class: "btn-danger",
-          text: "Delete",
-          on: {
-            click: async () => {
-              if (!confirm(`Delete secret "${entry.name}"?`)) return;
-              try {
-                await deleteSecret(storage, entry.name);
-                showToast(`Deleted ${entry.name}`);
-                renderList();
-              } catch (err) {
-                showToast(`Failed: ${err}`, true);
-              }
-            }
-          }
-        })
-      );
+      const row = el("div", { class: "secret-row", dataset: { name: entry.name } }, el("div", { class: "secret-meta" }, el("div", { class: "secret-name", text: entry.name }), el("div", { class: "secret-domains", text: entry.domains.join(", ") })), el("button", { class: "btn-secondary btn", text: "Copy name", "style:font-size": "11px", "style:padding": "4px 8px", on: { click: async () => {
+        try {
+          await navigator.clipboard.writeText(entry.name);
+          showToast(`Copied "${entry.name}"`);
+        } catch {
+          showToast("Clipboard failed", true);
+        }
+      } } }), el("button", { class: "btn-danger", text: "Delete", on: { click: async () => {
+        if (!confirm(`Delete secret "${entry.name}"?`)) return;
+        try {
+          await deleteSecret(storage, entry.name);
+          showToast(`Deleted ${entry.name}`);
+          renderList();
+        } catch (err) {
+          showToast(`Failed: ${err}`, true);
+        }
+      } } }));
       container.appendChild(row);
     }
   }
@@ -304,15 +228,7 @@
     });
   }
   async function onSaveS3() {
-    const result = await saveS3Profile(storage, {
-      profile: $("s3-profile").value.trim(),
-      accessKey: $("s3-key").value.trim(),
-      secretKey: $("s3-secret").value,
-      region: $("s3-region").value.trim() || void 0,
-      endpoint: $("s3-endpoint").value.trim() || void 0,
-      pathStyle: $("s3-pathstyle").value === "true",
-      domains: $("s3-domains").value.trim().split(",").map((d) => d.trim()).filter(Boolean) || void 0
-    });
+    const result = await saveS3Profile(storage, { profile: $("s3-profile").value.trim(), accessKey: $("s3-key").value.trim(), secretKey: $("s3-secret").value, region: $("s3-region").value.trim() || void 0, endpoint: $("s3-endpoint").value.trim() || void 0, pathStyle: $("s3-pathstyle").value === "true", domains: $("s3-domains").value.trim().split(",").map((d) => d.trim()).filter(Boolean) || void 0 });
     if (!result.ok) {
       showToast(result.error ?? "Failed", true);
       return;
@@ -329,11 +245,7 @@
     $("s3-pathstyle").value = "";
   }
   async function onSaveCustom() {
-    const result = await saveCustomSecret(storage, {
-      name: $("c-name").value.trim(),
-      value: $("c-value").value,
-      domains: $("c-domains").value.trim().split(",").map((d) => d.trim()).filter(Boolean)
-    });
+    const result = await saveCustomSecret(storage, { name: $("c-name").value.trim(), value: $("c-value").value, domains: $("c-domains").value.trim().split(",").map((d) => d.trim()).filter(Boolean) });
     if (!result.ok) {
       showToast(result.error ?? "Failed", true);
       return;
@@ -360,48 +272,19 @@
     for (const providerId of providers) {
       const domains = store[providerId] ?? [];
       if (domains.length === 0) continue;
-      const row = el(
-        "div",
-        { class: "secret-row", dataset: { provider: providerId } },
-        el(
-          "div",
-          { class: "secret-meta" },
-          el("div", { class: "secret-name", text: providerId }),
-          el("div", { class: "secret-domains", text: domains.join(", ") })
-        ),
-        el("button", {
-          class: "btn-danger",
-          text: "Clear",
-          on: {
-            click: () => {
-              if (!confirm(`Clear all extras for "${providerId}"?`)) return;
-              clearOAuthExtras(localStorage, providerId);
-              showToast(`Cleared extras for ${providerId}`);
-              renderOAuthExtras();
-            }
-          }
-        })
-      );
+      const row = el("div", { class: "secret-row", dataset: { provider: providerId } }, el("div", { class: "secret-meta" }, el("div", { class: "secret-name", text: providerId }), el("div", { class: "secret-domains", text: domains.join(", ") })), el("button", { class: "btn-danger", text: "Clear", on: { click: () => {
+        if (!confirm(`Clear all extras for "${providerId}"?`)) return;
+        clearOAuthExtras(localStorage, providerId);
+        showToast(`Cleared extras for ${providerId}`);
+        renderOAuthExtras();
+      } } }));
       container.appendChild(row);
       for (const d of domains) {
-        const domainRow = el(
-          "div",
-          { class: "secret-row", "style:padding-left": "24px" },
-          el("div", { class: "secret-meta" }, el("div", { class: "secret-domains", text: d })),
-          el("button", {
-            class: "btn-secondary btn",
-            text: "Remove",
-            "style:font-size": "11px",
-            "style:padding": "4px 8px",
-            on: {
-              click: () => {
-                const r = removeOAuthExtraDomain(localStorage, providerId, d);
-                if (r.removed) showToast(`Removed ${d} from ${providerId}`);
-                renderOAuthExtras();
-              }
-            }
-          })
-        );
+        const domainRow = el("div", { class: "secret-row", "style:padding-left": "24px" }, el("div", { class: "secret-meta" }, el("div", { class: "secret-domains", text: d })), el("button", { class: "btn-secondary btn", text: "Remove", "style:font-size": "11px", "style:padding": "4px 8px", on: { click: () => {
+          const r = removeOAuthExtraDomain(localStorage, providerId, d);
+          if (r.removed) showToast(`Removed ${d} from ${providerId}`);
+          renderOAuthExtras();
+        } } }));
         container.appendChild(domainRow);
       }
     }
@@ -419,10 +302,7 @@
     }
     const r = addOAuthExtraDomain(localStorage, provider, domain);
     if (!r.added) {
-      showToast(
-        r.reason === "duplicate" ? `Already in ${provider} extras` : r.reason ?? "Failed",
-        true
-      );
+      showToast(r.reason === "duplicate" ? `Already in ${provider} extras` : r.reason ?? "Failed", true);
       return;
     }
     showToast(`Added ${domain} to ${provider}`);

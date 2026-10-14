@@ -25,42 +25,33 @@ const guardFn = [
   '}',
 ].join('\n');
 
-const files = ['six-sw.js', 'sidepanel.js', 'secrets.js', 'capture-popup.js', 'picker-popup.js'];
-
-for (const file of files) {
-  const path = join(ext, file);
-  let content;
-  try {
-    content = readFileSync(path, 'utf8');
-  } catch {
-    continue;
-  }
-  content = content.replace(/\/\*\*[\s\S]*?\*\//g, '');
-  content = content.replace(/\/\*[^*][\s\S]*?\*\//g, '');
-  content = content.replace(/\/\* @__PURE__ \*\/ /g, '');
-  content = content.replace(/^\s*\/\/.*$/gm, '');
-  content = content.replace(/\s+\/\/[^"'`\n]*$/gm, '');
-  content = content.replace(/\n{3,}/g, '\n\n');
-  if (file === 'six-sw.js') {
-    content = `${guardFn}\n${content}`;
-    content = content.replace(
-      /(chrome\.webRequest\.onHeadersReceived\.addListener\(\n\s*\(details\) => \{)/g,
-      '$1\n    if (_isProtectedUrl(details.url)) return;'
-    );
-  }
-  writeFileSync(path, content);
-}
+const sixSwPath = join(ext, 'six-sw.js');
+let content = readFileSync(sixSwPath, 'utf8');
+content = `${guardFn}\n${content}`;
+content = content.replace(
+  /(chrome\.webRequest\.onHeadersReceived\.addListener\(\n\s*\(details\) => \{)/g,
+  '$1\n    if (_isProtectedUrl(details.url)) return;'
+);
+content = content.replace(
+  /(async function cdpAttachToTarget\(params, state2, deps\) \{)/,
+  '$1\n  { const _tab = await deps.getTab?.(parseInt(params["targetId"], 10)); if (_tab?.url && _isProtectedUrl(_tab.url)) throw new Error("slicc: refused: target is on a protected origin"); if (_tab?.pendingUrl && _isProtectedUrl(_tab.pendingUrl)) throw new Error("slicc: refused: target is on a protected origin"); }'
+);
+content = content.replace(
+  /(async function cdpCreateTarget\(params, deps\) \{)/,
+  '$1\n  { const _u = params["url"]; if (_u && _isProtectedUrl(_u)) throw new Error("slicc: refused: target is on a protected origin"); }'
+);
+writeFileSync(sixSwPath, content);
 
 const htmlFiles = ['sidepanel.html', 'secrets.html', 'capture-popup.html', 'picker-popup.html'];
 for (const file of htmlFiles) {
   const path = join(ext, file);
-  let content;
+  let html;
   try {
-    content = readFileSync(path, 'utf8');
+    html = readFileSync(path, 'utf8');
   } catch {
     continue;
   }
-  content = content.replace(/<!--[\s\S]*?-->/g, '');
-  content = content.replace(/\n{3,}/g, '\n\n');
-  writeFileSync(path, content);
+  html = html.replace(/<!--[\s\S]*?-->/g, '');
+  html = html.replace(/\n{3,}/g, '\n\n');
+  writeFileSync(path, html);
 }

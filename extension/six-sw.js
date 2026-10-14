@@ -10,9 +10,7 @@ function _isProtectedUrl(url) {
     return _protDomains.some(function(d) { return h === d || h.endsWith("." + d); });
   } catch { return false; }
 }
-
 var SLICC_HOSTED_ORIGIN = "https://www.sliccy.ai";
-
 function unmaskString(pipeline, hostname, value) {
   const { text } = pipeline.unmaskBody(value, hostname);
   return { text, changed: text !== value };
@@ -28,20 +26,14 @@ function unmaskCdpFrame(frame, hostname, pipeline) {
     if (typeof p.expression !== "string") return { frame, changed: false };
     const { text, changed } = unmaskString(pipeline, hostname, p.expression);
     if (!changed) return { frame, changed: false };
-    return {
-      frame: { ...frame, params: { ...p, expression: text } },
-      changed: true
-    };
+    return { frame: { ...frame, params: { ...p, expression: text } }, changed: true };
   }
   if (method === "Input.insertText") {
     const p = params;
     if (typeof p.text !== "string") return { frame, changed: false };
     const { text, changed } = unmaskString(pipeline, hostname, p.text);
     if (!changed) return { frame, changed: false };
-    return {
-      frame: { ...frame, params: { ...p, text } },
-      changed: true
-    };
+    return { frame: { ...frame, params: { ...p, text } }, changed: true };
   }
   if (method === "Runtime.callFunctionOn") {
     const p = params;
@@ -57,52 +49,11 @@ function unmaskCdpFrame(frame, hostname, pipeline) {
       return { ...a, value: text };
     });
     if (!argsChanged) return { frame, changed: false };
-    return {
-      frame: { ...frame, params: { ...p, arguments: nextArgs } },
-      changed: true
-    };
+    return { frame: { ...frame, params: { ...p, arguments: nextArgs } }, changed: true };
   }
   return { frame, changed: false };
 }
-
-var KNOWN_PREFIXES = [
-  "ghp_",
-
-  "gho_",
-
-  "ghu_",
-
-  "ghs_",
-
-  "ghr_",
-
-  "github_pat_",
-
-  "sk-",
-
-  "pk-",
-
-  "xoxb-",
-
-  "xoxp-",
-
-  "xoxa-",
-
-  "xoxs-",
-
-  "AKIA",
-
-  "ABIA",
-
-  "ACCA",
-
-  "ASIA",
-
-  "sk-ant-",
-
-  "Bearer "
-
-];
+var KNOWN_PREFIXES = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "pk-", "xoxb-", "xoxp-", "xoxa-", "xoxs-", "AKIA", "ABIA", "ACCA", "ASIA", "sk-ant-", "Bearer "];
 var SORTED_PREFIXES = [...KNOWN_PREFIXES].sort((a, b) => b.length - a.length);
 function detectPrefix(value) {
   for (const p of SORTED_PREFIXES) {
@@ -112,13 +63,7 @@ function detectPrefix(value) {
 }
 async function hmacSha256(key, message) {
   const enc = new TextEncoder();
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
+  const cryptoKey = await crypto.subtle.importKey("raw", enc.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
   return new Uint8Array(sig);
 }
@@ -126,13 +71,7 @@ function toHex(bytes) {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 async function hmacSha256Hex(key, message) {
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
+  const cryptoKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sig = await crypto.subtle.sign("HMAC", cryptoKey, message);
   return toHex(new Uint8Array(sig));
 }
@@ -176,7 +115,6 @@ function isAllowedDomain(patterns, hostname) {
 function matchesDomains(hostname, patterns) {
   return isAllowedDomain(patterns, hostname);
 }
-
 function indexOfBytes(haystack, needle, from = 0) {
   outer: for (let i = from; i <= haystack.length - needle.length; i++) {
     for (let j = 0; j < needle.length; j++) {
@@ -207,15 +145,11 @@ var SecretsPipeline = class {
   sessionId;
   source;
   sessionStore;
-  maskedToSecret =  new Map();
-  
+  maskedToSecret = /* @__PURE__ */ new Map();
   exportPairs = [];
-  
   exportShortPairs = [];
-
-  consumableShortSecrets =  new Map();
-
-  byName =  new Map();
+  consumableShortSecrets = /* @__PURE__ */ new Map();
+  byName = /* @__PURE__ */ new Map();
   scrubber = (t) => t;
   constructor(opts) {
     this.sessionId = opts.sessionId;
@@ -227,48 +161,31 @@ var SecretsPipeline = class {
     const persistedNames = new Set(all.map((s) => s.name));
     const session = (this.sessionStore?.listAll() ?? []).filter((s) => !persistedNames.has(s.name));
     const merged = [...all, ...session];
-    const next =  new Map();
-    const nextShort =  new Map();
+    const next = /* @__PURE__ */ new Map();
+    const nextShort = /* @__PURE__ */ new Map();
     for (const s of merged) {
       if (s.value.length < MIN_MASKABLE_SECRET_LENGTH) {
-        console.warn(
-          `[slicc:secrets] secret "${s.name}" not masked: value shorter than ${MIN_MASKABLE_SECRET_LENGTH} chars`
-        );
-        nextShort.set(s.name, {
-          name: s.name,
-          realValue: s.value,
-          maskedValue: s.value,
-          domains: s.domains
-        });
+        console.warn(`[slicc:secrets] secret "${s.name}" not masked: value shorter than ${MIN_MASKABLE_SECRET_LENGTH} chars`);
+        nextShort.set(s.name, { name: s.name, realValue: s.value, maskedValue: s.value, domains: s.domains });
         continue;
       }
       const maskedValue = await mask(this.sessionId, s.name, s.value);
-      next.set(maskedValue, {
-        name: s.name,
-        realValue: s.value,
-        maskedValue,
-        domains: s.domains
-      });
+      next.set(maskedValue, { name: s.name, realValue: s.value, maskedValue, domains: s.domains });
     }
     this.maskedToSecret = next;
     this.exportPairs = Array.from(next.values());
     this.exportShortPairs = Array.from(nextShort.values());
     this.consumableShortSecrets = nextShort;
-    const nextByName =  new Map();
+    const nextByName = /* @__PURE__ */ new Map();
     for (const ms of next.values()) nextByName.set(ms.name, ms);
     for (const ms of nextShort.values()) {
       if (nextByName.has(ms.name)) {
-        console.warn(
-          `[slicc:secrets] secret "${ms.name}" registered as both maskable and short-consumable`
-        );
+        console.warn(`[slicc:secrets] secret "${ms.name}" registered as both maskable and short-consumable`);
       }
       nextByName.set(ms.name, ms);
     }
     this.byName = nextByName;
-    const pairs = Array.from(next.values()).map((ms) => ({
-      realValue: ms.realValue,
-      maskedValue: ms.maskedValue
-    }));
+    const pairs = Array.from(next.values()).map((ms) => ({ realValue: ms.realValue, maskedValue: ms.maskedValue }));
     this.scrubber = buildScrubber(pairs);
   }
   async maskOne(name, value) {
@@ -287,7 +204,6 @@ var SecretsPipeline = class {
     }
     return entries;
   }
-  
   unmask(text, hostname) {
     let result = text;
     for (const [maskedValue, ms] of this.maskedToSecret) {
@@ -299,7 +215,6 @@ var SecretsPipeline = class {
     }
     return { text: result };
   }
-  
   unmaskBody(text, hostname) {
     let result = text;
     for (const [maskedValue, ms] of this.maskedToSecret) {
@@ -369,7 +284,6 @@ var SecretsPipeline = class {
     parsed.password = "";
     return { url: parsed.toString(), syntheticAuthorization: synthetic };
   }
-  
   unmaskHeaders(headers, hostname) {
     for (const [key, val] of Object.entries(headers)) {
       if (key.toLowerCase() === "authorization" && /^Basic\s/i.test(val)) {
@@ -384,7 +298,6 @@ var SecretsPipeline = class {
     }
     return {};
   }
-  
   async signHmac(spec, body, hostname, now = Date.now) {
     const sep = spec.indexOf(":");
     if (sep < 0) return {};
@@ -445,47 +358,33 @@ var SecretsPipeline = class {
     });
     return out;
   }
-  
   redactForExport(texts) {
     const base = this.exportPairs.length;
-    const markers = this.exportPairs.map((pair, index) => ({
-      values: [pair.realValue, pair.maskedValue].filter(Boolean),
-      marker: `\u27E6REDACTED:known-secret:k${index + 1}\u27E7`
-    }));
-    const shortMarkers = this.exportShortPairs.map((pair, index) => ({
-      values: [pair.realValue],
-      marker: `\u27E6REDACTED:known-secret:k${base + index + 1}\u27E7`
-    }));
+    const markers = this.exportPairs.map((pair, index) => ({ values: [pair.realValue, pair.maskedValue].filter(Boolean), marker: `\u27E6REDACTED:known-secret:k${index + 1}\u27E7` }));
+    const shortMarkers = this.exportShortPairs.map((pair, index) => ({ values: [pair.realValue], marker: `\u27E6REDACTED:known-secret:k${base + index + 1}\u27E7` }));
     const allMarkers = [...markers, ...shortMarkers];
     let redactionCount = 0;
-    return {
-      texts: texts.map((input) => {
-        let output = input;
-        for (const { values, marker } of allMarkers) {
-          for (const value of values) {
-            const occurrences = output.split(value).length - 1;
-            redactionCount += occurrences;
-            output = output.replaceAll(value, marker);
-          }
+    return { texts: texts.map((input) => {
+      let output = input;
+      for (const { values, marker } of allMarkers) {
+        for (const value of values) {
+          const occurrences = output.split(value).length - 1;
+          redactionCount += occurrences;
+          output = output.replaceAll(value, marker);
         }
-        return output;
-      }),
-      redactionCount
-    };
+      }
+      return output;
+    }), redactionCount };
   }
 };
-
 var SessionSecretStore = class {
-  entries =  new Map();
-  
+  entries = /* @__PURE__ */ new Map();
   set(name, value, domains = []) {
     this.entries.set(name, { name, value, domains: [...domains] });
   }
-  
   get(name) {
     return this.entries.get(name)?.value;
   }
-  
   getRecord(name) {
     const r = this.entries.get(name);
     return r ? { name: r.name, value: r.value, domains: [...r.domains] } : void 0;
@@ -493,7 +392,6 @@ var SessionSecretStore = class {
   has(name) {
     return this.entries.has(name);
   }
-  
   setDomains(name, domains) {
     const r = this.entries.get(name);
     if (!r) return false;
@@ -503,20 +401,11 @@ var SessionSecretStore = class {
   delete(name) {
     return this.entries.delete(name);
   }
-  
   listAll() {
-    return Array.from(this.entries.values()).map((r) => ({
-      name: r.name,
-      value: r.value,
-      domains: [...r.domains]
-    }));
+    return Array.from(this.entries.values()).map((r) => ({ name: r.name, value: r.value, domains: [...r.domains] }));
   }
-  
   list() {
-    return Array.from(this.entries.values()).map((r) => ({
-      name: r.name,
-      domains: [...r.domains]
-    }));
+    return Array.from(this.entries.values()).map((r) => ({ name: r.name, domains: [...r.domains] }));
   }
   size() {
     return this.entries.size;
@@ -529,7 +418,6 @@ function previewSecret(value, edge = 4) {
   const e = Math.min(Math.max(1, edge), Math.floor((len - 1) / 2));
   return `${value.slice(0, e)}\u2026${value.slice(len - e)}`;
 }
-
 var CHUNK_SIZE = 32768;
 function nodeBuffer() {
   return globalThis.Buffer;
@@ -562,7 +450,6 @@ function uint8ToBase64(bytes) {
   }
   return btoa(binary);
 }
-
 var SIGNED_ALGORITHM = "AWS4-HMAC-SHA256";
 var EMPTY_BODY_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 function hex(bytes) {
@@ -578,13 +465,7 @@ async function sha256(data) {
   return hex(digest);
 }
 async function hmacSha2562(key, data) {
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    key,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(data));
 }
 function ymd(d) {
@@ -597,12 +478,7 @@ function iso8601(d) {
 }
 function canonicalUri(url) {
   const segments = url.pathname.split("/");
-  const encoded = segments.map(
-    (s) => encodeURIComponent(s).replace(
-      /[!'()*]/g,
-      (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`
-    )
-  );
+  const encoded = segments.map((s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`));
   const path = encoded.join("/");
   return path === "" ? "/" : path;
 }
@@ -611,33 +487,23 @@ function canonicalQuery(url) {
   for (const [k, v] of url.searchParams.entries()) {
     params.push([k, v]);
   }
-  params.sort(
-    ([ak, av], [bk, bv]) => ak === bk ? av < bv ? -1 : av > bv ? 1 : 0 : ak < bk ? -1 : 1
-  );
-  return params.map(
-    ([k, v]) => `${encodeURIComponent(k).replace(/\+/g, "%20")}=${encodeURIComponent(v).replace(/\+/g, "%20")}`
-  ).join("&");
+  params.sort(([ak, av], [bk, bv]) => ak === bk ? av < bv ? -1 : av > bv ? 1 : 0 : ak < bk ? -1 : 1);
+  return params.map(([k, v]) => `${encodeURIComponent(k).replace(/\+/g, "%20")}=${encodeURIComponent(v).replace(/\+/g, "%20")}`).join("&");
 }
 function canonicalHeaders(headers) {
-  const entries = Object.entries(headers).map(
-    ([k, v]) => [k.toLowerCase(), v.trim().replace(/\s+/g, " ")]
-  );
+  const entries = Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v.trim().replace(/\s+/g, " ")]);
   entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   const canonical = entries.map(([k, v]) => `${k}:${v}
 `).join("");
   const signed = entries.map(([k]) => k).join(";");
   return { canonical, signed };
 }
-async function signSigV4(req, creds, region, service = "s3", now =  new Date()) {
+async function signSigV4(req, creds, region, service = "s3", now = /* @__PURE__ */ new Date()) {
   const date = ymd(now);
   const dateTime = iso8601(now);
   const bodyBytes = req.body ?? new Uint8Array(0);
   const bodyHash = bodyBytes.byteLength === 0 ? EMPTY_BODY_HASH : await sha256(bodyBytes);
-  const headers = {
-    ...req.headers,
-    host: req.headers.host ?? req.headers.Host ?? req.url.host,
-    "x-amz-date": dateTime
-  };
+  const headers = { ...req.headers, host: req.headers.host ?? req.headers.Host ?? req.url.host, "x-amz-date": dateTime };
   if (service === "s3") {
     headers["x-amz-content-sha256"] = bodyHash;
   }
@@ -646,50 +512,22 @@ async function signSigV4(req, creds, region, service = "s3", now =  new Date()) 
   }
   delete headers.Host;
   const { canonical: canonicalHeadersStr, signed: signedHeaders } = canonicalHeaders(headers);
-  const canonicalRequest = [
-    req.method,
-    canonicalUri(req.url),
-    canonicalQuery(req.url),
-    canonicalHeadersStr,
-    signedHeaders,
-    bodyHash
-  ].join("\n");
+  const canonicalRequest = [req.method, canonicalUri(req.url), canonicalQuery(req.url), canonicalHeadersStr, signedHeaders, bodyHash].join("\n");
   const credentialScope = `${date}/${region}/${service}/aws4_request`;
-  const stringToSign = [
-    SIGNED_ALGORITHM,
-    dateTime,
-    credentialScope,
-    await sha256(new TextEncoder().encode(canonicalRequest))
-  ].join("\n");
+  const stringToSign = [SIGNED_ALGORITHM, dateTime, credentialScope, await sha256(new TextEncoder().encode(canonicalRequest))].join("\n");
   const kDate = await hmacSha2562(new TextEncoder().encode(`AWS4${creds.secretAccessKey}`), date);
   const kRegion = await hmacSha2562(kDate, region);
   const kService = await hmacSha2562(kRegion, service);
   const kSigning = await hmacSha2562(kService, "aws4_request");
   const signature = hex(await hmacSha2562(kSigning, stringToSign));
   const authorization = `${SIGNED_ALGORITHM} Credential=${creds.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-  return {
-    ...req,
-    headers: {
-      ...headers,
-      Authorization: authorization
-    }
-  };
+  return { ...req, headers: { ...headers, Authorization: authorization } };
 }
-
 var ALLOWED_METHODS = ["GET", "PUT", "POST", "DELETE", "HEAD"];
 var PROFILE_NAME_REGEX = /^[a-zA-Z0-9._-]+$/;
-var HOP_BY_HOP =  new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade"
-]);
+var HOP_BY_HOP = /* @__PURE__ */ new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"]);
 var DA_ORIGIN = "https://admin.da.live";
-var DA_ALLOWED_ORIGINS =  new Set([DA_ORIGIN, "https://api.aem.live"]);
+var DA_ALLOWED_ORIGINS = /* @__PURE__ */ new Set([DA_ORIGIN, "https://api.aem.live"]);
 function isAllowedMethod(m) {
   return typeof m === "string" && ALLOWED_METHODS.includes(m);
 }
@@ -703,23 +541,12 @@ async function resolveS3Profile(name, store) {
   const accessKeyId = await store.get(`s3.${name}.access_key_id`);
   const secretAccessKey = await store.get(`s3.${name}.secret_access_key`);
   if (!accessKeyId) {
-    throw new ProfileNotConfiguredError(
-      `profile '${name}' missing required field 'access_key_id'. Set it via: secret set s3.${name}.access_key_id <value>`
-    );
+    throw new ProfileNotConfiguredError(`profile '${name}' missing required field 'access_key_id'. Set it via: secret set s3.${name}.access_key_id <value>`);
   }
   if (!secretAccessKey) {
-    throw new ProfileNotConfiguredError(
-      `profile '${name}' missing required field 'secret_access_key'. Set it via: secret set s3.${name}.secret_access_key <value>`
-    );
+    throw new ProfileNotConfiguredError(`profile '${name}' missing required field 'secret_access_key'. Set it via: secret set s3.${name}.secret_access_key <value>`);
   }
-  return {
-    accessKeyId,
-    secretAccessKey,
-    sessionToken: await store.get(`s3.${name}.session_token`),
-    region: await store.get(`s3.${name}.region`) ?? "us-east-1",
-    endpoint: await store.get(`s3.${name}.endpoint`),
-    pathStyle: await store.get(`s3.${name}.path_style`) === "true"
-  };
+  return { accessKeyId, secretAccessKey, sessionToken: await store.get(`s3.${name}.session_token`), region: await store.get(`s3.${name}.region`) ?? "us-east-1", endpoint: await store.get(`s3.${name}.endpoint`), pathStyle: await store.get(`s3.${name}.path_style`) === "true" };
 }
 function buildS3Url(profile, bucket, key, query) {
   let host;
@@ -755,11 +582,7 @@ function passthroughHeaders(upstream) {
 }
 async function executeS3SignAndForward(env, store, fetchImpl = fetch) {
   if (typeof env?.profile !== "string" || env.profile.length === 0 || !PROFILE_NAME_REGEX.test(env.profile)) {
-    return {
-      ok: false,
-      error: "invalid profile name (allowed: alphanumeric, dot, underscore, hyphen)",
-      errorCode: "invalid_profile"
-    };
+    return { ok: false, error: "invalid profile name (allowed: alphanumeric, dot, underscore, hyphen)", errorCode: "invalid_profile" };
   }
   if (!isAllowedMethod(env.method)) {
     return { ok: false, error: "invalid method", errorCode: "invalid_request" };
@@ -783,49 +606,18 @@ async function executeS3SignAndForward(env, store, fetchImpl = fetch) {
   try {
     url = buildS3Url(profile, env.bucket, env.key, env.query);
   } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : "failed to build URL",
-      errorCode: "invalid_request"
-    };
+    return { ok: false, error: err instanceof Error ? err.message : "failed to build URL", errorCode: "invalid_request" };
   }
   const body = typeof env.bodyBase64 === "string" && env.bodyBase64.length > 0 ? base64ToUint8(env.bodyBase64) : void 0;
-  const signed = await signSigV4(
-    {
-      method: env.method,
-      url,
-      headers: { ...env.headers ?? {}, Host: url.host },
-      body
-    },
-    {
-      accessKeyId: profile.accessKeyId,
-      secretAccessKey: profile.secretAccessKey,
-      sessionToken: profile.sessionToken
-    },
-    profile.region,
-    "s3"
-  );
+  const signed = await signSigV4({ method: env.method, url, headers: { ...env.headers ?? {}, Host: url.host }, body }, { accessKeyId: profile.accessKeyId, secretAccessKey: profile.secretAccessKey, sessionToken: profile.sessionToken }, profile.region, "s3");
   let upstream;
   try {
-    upstream = await fetchImpl(url.toString(), {
-      method: signed.method,
-      headers: signed.headers,
-      body: signed.body
-    });
+    upstream = await fetchImpl(url.toString(), { method: signed.method, headers: signed.headers, body: signed.body });
   } catch (err) {
-    return {
-      ok: false,
-      error: `S3 fetch failed: ${err instanceof Error ? err.message : String(err)}`,
-      errorCode: "fetch_failed"
-    };
+    return { ok: false, error: `S3 fetch failed: ${err instanceof Error ? err.message : String(err)}`, errorCode: "fetch_failed" };
   }
   const upstreamBody = new Uint8Array(await upstream.arrayBuffer());
-  return {
-    ok: true,
-    status: upstream.status,
-    headers: passthroughHeaders(upstream),
-    bodyBase64: uint8ToBase64(upstreamBody)
-  };
+  return { ok: true, status: upstream.status, headers: passthroughHeaders(upstream), bodyBase64: uint8ToBase64(upstreamBody) };
 }
 async function executeDaSignAndForward(env, fetchImpl = fetch) {
   if (typeof env?.imsToken !== "string" || env.imsToken.length === 0) {
@@ -835,19 +627,11 @@ async function executeDaSignAndForward(env, fetchImpl = fetch) {
     return { ok: false, error: "invalid method", errorCode: "invalid_request" };
   }
   if (typeof env.path !== "string" || !env.path.startsWith("/")) {
-    return {
-      ok: false,
-      error: "path must be a string starting with /",
-      errorCode: "invalid_request"
-    };
+    return { ok: false, error: "path must be a string starting with /", errorCode: "invalid_request" };
   }
   const origin = env.origin ?? DA_ORIGIN;
   if (!DA_ALLOWED_ORIGINS.has(origin)) {
-    return {
-      ok: false,
-      error: `origin '${origin}' is not an allowed DA upstream`,
-      errorCode: "invalid_request"
-    };
+    return { ok: false, error: `origin '${origin}' is not an allowed DA upstream`, errorCode: "invalid_request" };
   }
   let url;
   try {
@@ -858,46 +642,25 @@ async function executeDaSignAndForward(env, fetchImpl = fetch) {
       }
     }
   } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : "failed to build URL",
-      errorCode: "invalid_request"
-    };
+    return { ok: false, error: err instanceof Error ? err.message : "failed to build URL", errorCode: "invalid_request" };
   }
   const body = typeof env.bodyBase64 === "string" && env.bodyBase64.length > 0 ? base64ToUint8(env.bodyBase64) : void 0;
   let upstream;
   try {
-    upstream = await fetchImpl(url.toString(), {
-      method: env.method,
-      headers: {
-        ...env.headers ?? {},
-        Authorization: `Bearer ${env.imsToken}`
-      },
-      body
-    });
+    upstream = await fetchImpl(url.toString(), { method: env.method, headers: { ...env.headers ?? {}, Authorization: `Bearer ${env.imsToken}` }, body });
   } catch (err) {
-    return {
-      ok: false,
-      error: `DA fetch failed: ${err instanceof Error ? err.message : String(err)}`,
-      errorCode: "fetch_failed"
-    };
+    return { ok: false, error: `DA fetch failed: ${err instanceof Error ? err.message : String(err)}`, errorCode: "fetch_failed" };
   }
   const upstreamBody = new Uint8Array(await upstream.arrayBuffer());
-  return {
-    ok: true,
-    status: upstream.status,
-    headers: passthroughHeaders(upstream),
-    bodyBase64: uint8ToBase64(upstreamBody)
-  };
+  return { ok: true, status: upstream.status, headers: passthroughHeaders(upstream), bodyBase64: uint8ToBase64(upstreamBody) };
 }
-
 var DOMAINS_SUFFIX = "_DOMAINS";
 function parseDomainsCsv(raw) {
   return raw.split(",").map((domain) => domain.trim()).filter((domain) => domain.length > 0);
 }
 function pairEnvEntriesToSecrets(entries) {
-  const values =  new Map();
-  const domains =  new Map();
+  const values = /* @__PURE__ */ new Map();
+  const domains = /* @__PURE__ */ new Map();
   const order = [];
   for (const entry of entries) {
     if (entry.key.endsWith(DOMAINS_SUFFIX)) {
@@ -914,9 +677,7 @@ function pairEnvEntriesToSecrets(entries) {
     return value !== void 0 && allowedDomains?.length ? [{ name, value, domains: allowedDomains }] : [];
   });
 }
-
 var LEADER_EXT_ID_QUERY_NAME = "ext";
-
 function parseLinkHeader(input, baseUrl) {
   if (input == null) return [];
   let headerString;
@@ -975,8 +736,7 @@ function parseLinkHeader(input, baseUrl) {
           i = r.end;
         } else {
           const start = i;
-          while (i < len && headerString[i] !== ";" && headerString[i] !== "," && !isOWSChar(headerString[i]))
-            i++;
+          while (i < len && headerString[i] !== ";" && headerString[i] !== "," && !isOWSChar(headerString[i])) i++;
           value = headerString.slice(start, i);
         }
       }
@@ -1038,33 +798,19 @@ function isTokenChar(code) {
   if (code >= 97 && code <= 122) return true;
   switch (code) {
     case 33:
-
     case 35:
-
     case 36:
-
     case 37:
-
     case 38:
-
     case 39:
-
     case 42:
-
     case 43:
-
     case 45:
-
     case 46:
-
     case 94:
-
     case 95:
-
     case 96:
-
     case 124:
-
     case 126:
       return true;
   }
@@ -1126,7 +872,6 @@ function getLinkHeaderValuesFromWebRequest(headers) {
   }
   return out;
 }
-
 var HANDOFF_REL = `${SLICC_HOSTED_ORIGIN}/rel/handoff`;
 var UPSKILL_REL = `${SLICC_HOSTED_ORIGIN}/rel/upskill`;
 function canonicaliseUpskillPath(raw) {
@@ -1181,13 +926,7 @@ function extractHandoff(links) {
   return null;
 }
 function handoffFingerprint(input) {
-  return [
-    input.verb,
-    input.target,
-    input.branch ?? "",
-    input.path ?? "",
-    input.instruction ?? ""
-  ].join("\0");
+  return [input.verb, input.target, input.branch ?? "", input.path ?? "", input.instruction ?? ""].join("\0");
 }
 function extractHandoffFromWebRequest(headers, baseUrl) {
   const values = getLinkHeaderValuesFromWebRequest(headers);
@@ -1195,21 +934,9 @@ function extractHandoffFromWebRequest(headers, baseUrl) {
   const links = parseLinkHeader(values, baseUrl);
   return { match: extractHandoff(links), links };
 }
-
 var EXTENSION_BRIDGE_PROTOCOL_VERSION = 1;
 var EXTENSION_BRIDGE_PORT_NAME = "slicc.cdp-bridge";
-var KINDS =  new Set([
-  "handshake.hello",
-  "handshake.welcome",
-  "handshake.rejected",
-  "cdp.request",
-  "cdp.response",
-  "cdp.event",
-  "extension.lick",
-  "extension.discovery",
-  "leader.join-url",
-  "extension.open-settings"
-]);
+var KINDS = /* @__PURE__ */ new Set(["handshake.hello", "handshake.welcome", "handshake.rejected", "cdp.request", "cdp.response", "cdp.event", "extension.lick", "extension.discovery", "leader.join-url", "extension.open-settings"]);
 function isExtensionBridgeEnvelope(value) {
   if (typeof value !== "object" || value === null) return false;
   const v = value;
@@ -1220,7 +947,6 @@ function isBridgeVersionMismatch(value) {
   const v = value;
   return typeof v.bridge === "number" && v.bridge !== EXTENSION_BRIDGE_PROTOCOL_VERSION && typeof v.channelId === "string" && typeof v.kind === "string";
 }
-
 var LEADER_TAB_ID_KEY = "slicc_leader_tab_id";
 var BRIDGE_ALLOWED_ORIGINS = [SLICC_HOSTED_ORIGIN];
 function senderUrlIsLeaderTab(rawUrl) {
@@ -1257,8 +983,8 @@ async function validateBridgePin(sender, deps) {
   }
   return { ok: true };
 }
-var welcomedLeaderPorts =  new Map();
-var liveBridgePortStates =  new Map();
+var welcomedLeaderPorts = /* @__PURE__ */ new Map();
+var liveBridgePortStates = /* @__PURE__ */ new Map();
 function invalidatePortDebuggerAttachment(state2, tabId) {
   state2.ownedTabs.delete(tabId);
   state2.attachRefCounts.delete(tabId);
@@ -1273,13 +999,7 @@ function notifyBridgeDebuggerDetached(tabId) {
     if (state2.channelId === null) continue;
     for (const sessionId of detachedSessionIds) {
       try {
-        port.postMessage({
-          bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-          channelId: state2.channelId,
-          kind: "cdp.event",
-          method: "Target.detachedFromTarget",
-          params: { sessionId, targetId: String(tabId) }
-        });
+        port.postMessage({ bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId: state2.channelId, kind: "cdp.event", method: "Target.detachedFromTarget", params: { sessionId, targetId: String(tabId) } });
       } catch {
       }
     }
@@ -1289,11 +1009,7 @@ function postLickToWelcomedLeaderPorts(lick) {
   let delivered = 0;
   for (const [port, channelId] of welcomedLeaderPorts) {
     try {
-      port.postMessage({
-        ...lick,
-        bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-        channelId
-      });
+      port.postMessage({ ...lick, bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId });
       delivered += 1;
     } catch {
     }
@@ -1304,11 +1020,7 @@ function postOpenSettingsToWelcomedLeaderPorts() {
   let delivered = 0;
   for (const [port, channelId] of welcomedLeaderPorts) {
     try {
-      port.postMessage({
-        kind: "extension.open-settings",
-        bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-        channelId
-      });
+      port.postMessage({ kind: "extension.open-settings", bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId });
       delivered += 1;
     } catch {
     }
@@ -1319,11 +1031,7 @@ function postDiscoveryToWelcomedLeaderPorts(discovery) {
   let delivered = 0;
   for (const [port, channelId] of welcomedLeaderPorts) {
     try {
-      port.postMessage({
-        ...discovery,
-        bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-        channelId
-      });
+      port.postMessage({ ...discovery, bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId });
       delivered += 1;
     } catch {
     }
@@ -1346,69 +1054,49 @@ async function writeStoredLeaderTabIdToSession(tabId) {
   }
 }
 function buildDefaultBridgeSwDeps(overrides) {
-  const base = {
-    readStoredLeaderTabId: readStoredLeaderTabIdFromSession,
-    writeStoredLeaderTabId: writeStoredLeaderTabIdToSession,
-    maybeUnmaskCdpFrame: async (_tabId, _method, params) => params,
-    attachDebugger: async (tabId) => {
-      await chrome.debugger.attach({ tabId }, "1.3");
-      return true;
-    },
-    detachDebugger: async (tabId) => {
-      await chrome.debugger.detach({ tabId }).catch(() => {
-      });
-    },
-    sendDebuggerCommand: async (tabId, method, params) => {
-      const result = await chrome.debugger.sendCommand({ tabId }, method, params);
-      return result ?? {};
-    },
-    subscribeDebuggerEvents: (handler) => {
-      const wrapped = (source, method, params) => handler(source.tabId, method, params);
-      chrome.debugger.onEvent.addListener(wrapped);
-      return () => chrome.debugger.onEvent.removeListener(wrapped);
-    },
-    queryTabs: () => chrome.tabs.query({}),
-    queryActiveTabId: async () => {
-      try {
-        const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-        return typeof t?.id === "number" ? t.id : void 0;
-      } catch {
-        return void 0;
-      }
-    },
-    getTab: async (tabId) => {
-      try {
-        return await chrome.tabs.get(tabId);
-      } catch {
-        return void 0;
-      }
-    },
-    createTab: async (url) => {
-      const tab = await chrome.tabs.create({ url, active: false });
-      return tab.id;
-    },
-    removeTab: (tabId) => chrome.tabs.remove(tabId),
-    activateTab: async (tabId) => {
-      try {
-        const tab = await chrome.tabs.update(tabId, { active: true });
-        if (typeof tab?.windowId === "number") {
-          await chrome.windows.update(tab.windowId, { focused: true });
-        }
-      } catch {
-      }
+  const base = { readStoredLeaderTabId: readStoredLeaderTabIdFromSession, writeStoredLeaderTabId: writeStoredLeaderTabIdToSession, maybeUnmaskCdpFrame: async (_tabId, _method, params) => params, attachDebugger: async (tabId) => {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    return true;
+  }, detachDebugger: async (tabId) => {
+    await chrome.debugger.detach({ tabId }).catch(() => {
+    });
+  }, sendDebuggerCommand: async (tabId, method, params) => {
+    const result = await chrome.debugger.sendCommand({ tabId }, method, params);
+    return result ?? {};
+  }, subscribeDebuggerEvents: (handler) => {
+    const wrapped = (source, method, params) => handler(source.tabId, method, params);
+    chrome.debugger.onEvent.addListener(wrapped);
+    return () => chrome.debugger.onEvent.removeListener(wrapped);
+  }, queryTabs: () => chrome.tabs.query({}), queryActiveTabId: async () => {
+    try {
+      const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      return typeof t?.id === "number" ? t.id : void 0;
+    } catch {
+      return void 0;
     }
-  };
+  }, getTab: async (tabId) => {
+    try {
+      return await chrome.tabs.get(tabId);
+    } catch {
+      return void 0;
+    }
+  }, createTab: async (url) => {
+    const tab = await chrome.tabs.create({ url, active: false });
+    return tab.id;
+  }, removeTab: (tabId) => chrome.tabs.remove(tabId), activateTab: async (tabId) => {
+    try {
+      const tab = await chrome.tabs.update(tabId, { active: true });
+      if (typeof tab?.windowId === "number") {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+    } catch {
+    }
+  } };
   return { ...base, ...overrides ?? {} };
 }
 async function handleBridgePortConnect(port, deps) {
   if (port.name !== EXTENSION_BRIDGE_PORT_NAME) return;
-  const state2 = {
-    channelId: null,
-    sessionToTab:  new Map(),
-    attachRefCounts:  new Map(),
-    ownedTabs:  new Set(),
-    unsubscribeEvents: null
-  };
+  const state2 = { channelId: null, sessionToTab: /* @__PURE__ */ new Map(), attachRefCounts: /* @__PURE__ */ new Map(), ownedTabs: /* @__PURE__ */ new Set(), unsubscribeEvents: null };
   let pinned = false;
   let rejected = false;
   const earlyQueue = [];
@@ -1444,12 +1132,7 @@ async function handleBridgePortConnect(port, deps) {
   if (!pin.ok) {
     rejected = true;
     try {
-      port.postMessage({
-        bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-        channelId: "rejected",
-        kind: "handshake.rejected",
-        reason: pin.reason ?? "pin-failed"
-      });
+      port.postMessage({ bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId: "rejected", kind: "handshake.rejected", reason: pin.reason ?? "pin-failed" });
     } catch {
     }
     try {
@@ -1464,17 +1147,9 @@ async function handleBridgePortConnect(port, deps) {
 }
 async function handleBridgeMessage(port, state2, raw, deps) {
   if (isBridgeVersionMismatch(raw)) {
-    console.warn("[slicc-bridge-sw] bridge protocol version mismatch \u2014 update the older side", {
-      peerVersion: raw.bridge,
-      ourVersion: EXTENSION_BRIDGE_PROTOCOL_VERSION
-    });
+    console.warn("[slicc-bridge-sw] bridge protocol version mismatch \u2014 update the older side", { peerVersion: raw.bridge, ourVersion: EXTENSION_BRIDGE_PROTOCOL_VERSION });
     try {
-      port.postMessage({
-        bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-        channelId: raw.channelId,
-        kind: "handshake.rejected",
-        reason: "version-mismatch"
-      });
+      port.postMessage({ bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId: raw.channelId, kind: "handshake.rejected", reason: "version-mismatch" });
       port.disconnect();
     } catch {
     }
@@ -1484,12 +1159,7 @@ async function handleBridgeMessage(port, state2, raw, deps) {
   const env = raw;
   if (state2.channelId === null) {
     if (env.kind !== "handshake.hello") {
-      port.postMessage({
-        bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-        channelId: env.channelId,
-        kind: "handshake.rejected",
-        reason: "expected-hello-first"
-      });
+      port.postMessage({ bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId: env.channelId, kind: "handshake.rejected", reason: "expected-hello-first" });
       try {
         port.disconnect();
       } catch {
@@ -1510,22 +1180,11 @@ async function handleBridgeMessage(port, state2, raw, deps) {
       const channelId = state2.channelId;
       if (channelId === null) return;
       try {
-        port.postMessage({
-          bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-          channelId,
-          kind: "cdp.event",
-          method,
-          params,
-          sessionId
-        });
+        port.postMessage({ bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId, kind: "cdp.event", method, params, sessionId });
       } catch {
       }
     });
-    port.postMessage({
-      bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-      channelId: state2.channelId,
-      kind: "handshake.welcome"
-    });
+    port.postMessage({ bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId: state2.channelId, kind: "handshake.welcome" });
     welcomedLeaderPorts.set(port, state2.channelId);
     return;
   }
@@ -1539,21 +1198,9 @@ async function handleBridgeMessage(port, state2, raw, deps) {
   const id = env.id;
   try {
     const result = await dispatchCdpCommand(env, state2, deps);
-    port.postMessage({
-      bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-      channelId: state2.channelId,
-      kind: "cdp.response",
-      id,
-      result
-    });
+    port.postMessage({ bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId: state2.channelId, kind: "cdp.response", id, result });
   } catch (err) {
-    port.postMessage({
-      bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
-      channelId: state2.channelId,
-      kind: "cdp.response",
-      id,
-      error: err instanceof Error ? err.message : String(err)
-    });
+    port.postMessage({ bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION, channelId: state2.channelId, kind: "cdp.response", id, error: err instanceof Error ? err.message : String(err) });
   }
 }
 async function dispatchCdpCommand(req, state2, deps) {
@@ -1565,9 +1212,7 @@ async function dispatchCdpCommand(req, state2, deps) {
   if (method === "Target.closeTarget") return cdpCloseTarget(params ?? {}, state2, deps);
   const tabId = sessionId !== void 0 ? state2.sessionToTab.get(sessionId) : void 0;
   if (tabId === void 0) {
-    throw new Error(
-      `No tab attached for sessionId: ${sessionId ?? "(none)"}. Attach to a target first.`
-    );
+    throw new Error(`No tab attached for sessionId: ${sessionId ?? "(none)"}. Attach to a target first.`);
   }
   if (method === "Page.bringToFront") {
     await deps.activateTab(tabId);
@@ -1577,17 +1222,11 @@ async function dispatchCdpCommand(req, state2, deps) {
 }
 async function cdpGetTargets(_state, deps) {
   const [tabs, activeId] = await Promise.all([deps.queryTabs(), deps.queryActiveTabId()]);
-  const targetInfos = tabs.filter((t) => typeof t.id === "number").map((t) => ({
-    targetId: String(t.id),
-    type: "page",
-    title: t.title ?? "",
-    url: t.url ?? "",
-    attached: false,
-    active: t.id === activeId
-  }));
+  const targetInfos = tabs.filter((t) => typeof t.id === "number").map((t) => ({ targetId: String(t.id), type: "page", title: t.title ?? "", url: t.url ?? "", attached: false, active: t.id === activeId }));
   return { targetInfos };
 }
 async function cdpAttachToTarget(params, state2, deps) {
+  { const _tab = await deps.getTab?.(parseInt(params["targetId"], 10)); if (_tab?.url && _isProtectedUrl(_tab.url)) throw new Error("slicc: refused: target is on a protected origin"); if (_tab?.pendingUrl && _isProtectedUrl(_tab.pendingUrl)) throw new Error("slicc: refused: target is on a protected origin"); }
   const targetId = params["targetId"];
   const tabId = parseInt(targetId, 10);
   if (!Number.isFinite(tabId) || tabId <= 0) {
@@ -1622,6 +1261,7 @@ async function cdpDetachFromTarget(params, state2, deps) {
   return {};
 }
 async function cdpCreateTarget(params, deps) {
+  { const _u = params["url"]; if (_u && _isProtectedUrl(_u)) throw new Error("slicc: refused: target is on a protected origin"); }
   const url = params["url"] ?? "about:blank";
   const tabId = await deps.createTab(url);
   return { targetId: String(tabId) };
@@ -1643,10 +1283,8 @@ async function cdpCloseTarget(params, state2, deps) {
   await deps.removeTab(tabId);
   return { success: true };
 }
-
 var CHERRY_PANEL_PORT_NAME = "cherry-panel";
-
-var panelPorts =  new Set();
+var panelPorts = /* @__PURE__ */ new Set();
 var state = { kind: "join-url", state: "booting" };
 var hasSeenReady = false;
 var lastLeaderReloadAt = 0;
@@ -1675,9 +1313,7 @@ function ensureLoaded() {
 }
 function persist() {
   try {
-    void chrome.storage?.session?.set({
-      [STORAGE_KEY]: { state, hasSeenReady, lastLeaderReloadAt }
-    });
+    void chrome.storage?.session?.set({ [STORAGE_KEY]: { state, hasSeenReady, lastLeaderReloadAt } });
   } catch {
   }
 }
@@ -1730,10 +1366,7 @@ async function handleCherryPanelConnect(port, deps) {
   }
   await deps.ensureLeaderTab();
   if (wasTrayGaveUp) {
-    maybeRecoverLeader(
-      Date.now(),
-      deps.reloadLeaderTabIfExists ?? recoveryDeps?.reloadLeaderTabIfExists
-    );
+    maybeRecoverLeader(Date.now(), deps.reloadLeaderTabIfExists ?? recoveryDeps?.reloadLeaderTabIfExists);
   }
 }
 function setCherryPanelJoinUrl(joinUrl) {
@@ -1755,7 +1388,6 @@ function broadcastLeaderGone() {
   persist();
   broadcast();
 }
-
 var AI_CATALOG_REL = "ai-catalog";
 function extractCatalog(links) {
   for (const link of links) {
@@ -1774,11 +1406,7 @@ function extractCatalogFromWebRequest(headers, baseUrl) {
   const links = parseLinkHeader(values, baseUrl);
   return { match: extractCatalog(links), links };
 }
-
-var TARGETS = [
-  { kind: "ai-catalog", path: "/.well-known/ai-catalog.json" },
-  { kind: "llms-txt", path: "/llms.txt" }
-];
+var TARGETS = [{ kind: "ai-catalog", path: "/.well-known/ai-catalog.json" }, { kind: "llms-txt", path: "/llms.txt" }];
 var DEFAULT_TIMEOUT_MS = 3e3;
 async function probeWellKnown(origin, fetchImpl, options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -1788,9 +1416,7 @@ async function probeWellKnown(origin, fetchImpl, options = {}) {
   } catch {
     return [];
   }
-  const settled = await Promise.all(
-    TARGETS.map((target) => probeOne(base, target, fetchImpl, timeoutMs))
-  );
+  const settled = await Promise.all(TARGETS.map((target) => probeOne(base, target, fetchImpl, timeoutMs)));
   return settled.filter((m) => m !== null);
 }
 async function probeOne(base, target, fetchImpl, timeoutMs) {
@@ -1798,12 +1424,7 @@ async function probeOne(base, target, fetchImpl, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error("timeout")), timeoutMs);
   try {
-    const res = await fetchImpl(url, {
-      method: "GET",
-      signal: ctrl.signal,
-      redirect: "manual",
-      credentials: "omit"
-    });
+    const res = await fetchImpl(url, { method: "GET", signal: ctrl.signal, redirect: "manual", credentials: "omit" });
     if (res.status !== 200) return null;
     if (!contentTypeOk(res.headers.get("content-type"), target.kind)) return null;
     return { kind: target.kind, url };
@@ -1823,28 +1444,20 @@ function contentTypeOk(raw, kind) {
   }
   return ct.includes("text/plain") || ct.includes("markdown") || ct.includes("octet-stream");
 }
-
 function createDiscoveryObserver(deps) {
-  const seenFingerprints =  new Set();
-  const probedOrigins =  new Set();
+  const seenFingerprints = /* @__PURE__ */ new Set();
+  const probedOrigins = /* @__PURE__ */ new Set();
   const forward = (origin, kind, artifactUrl, pageUrl) => {
     const fingerprint = discoveryFingerprint({ origin, kind, url: artifactUrl });
     if (seenFingerprints.has(fingerprint)) return;
-    const delivered = deps.emit({
-      discoveryOrigin: origin,
-      discoveryKind: kind,
-      discoveryUrl: artifactUrl,
-      url: pageUrl
-    });
+    const delivered = deps.emit({ discoveryOrigin: origin, discoveryKind: kind, discoveryUrl: artifactUrl, url: pageUrl });
     if (delivered >= 1) seenFingerprints.add(fingerprint);
   };
   const probeOrigin = async (origin, pageUrl) => {
     if (probedOrigins.has(origin)) return;
     probedOrigins.add(origin);
     try {
-      const matches = await probeWellKnown(origin, deps.fetchImpl, {
-        timeoutMs: deps.probeTimeoutMs
-      });
+      const matches = await probeWellKnown(origin, deps.fetchImpl, { timeoutMs: deps.probeTimeoutMs });
       for (const match of matches) forward(origin, match.kind, match.url, pageUrl);
     } catch {
     }
@@ -1866,7 +1479,6 @@ function createDiscoveryObserver(deps) {
   };
   return { onHeaders };
 }
-
 function decodeForbiddenRequestHeaders(headers) {
   const result = {};
   for (const [key, value] of Object.entries(headers)) {
@@ -1885,7 +1497,6 @@ function decodeForbiddenRequestHeaders(headers) {
   }
   return result;
 }
-
 var REQUEST_BODY_CAP = 32 * 1024 * 1024;
 function extractSetCookies(headers) {
   const get = headers.getSetCookie;
@@ -1944,12 +1555,7 @@ async function installForbiddenHeaderRule(url, headers) {
   const id = nextDnrRuleId++;
   const fragment = `slicc-req-${randomFragmentToken()}`;
   const fetchUrl = `${url.split("#")[0]}#${fragment}`;
-  const rule = {
-    id,
-    priority: 100,
-    condition: { urlFilter: fetchUrl, resourceTypes: ["xmlhttprequest"] },
-    action: { type: "modifyHeaders", requestHeaders }
-  };
+  const rule = { id, priority: 100, condition: { urlFilter: fetchUrl, resourceTypes: ["xmlhttprequest"] }, action: { type: "modifyHeaders", requestHeaders } };
   await dnr.updateSessionRules({ addRules: [rule] });
   let removed = false;
   const cleanup = async () => {
@@ -1965,9 +1571,7 @@ async function installForbiddenHeaderRule(url, headers) {
 async function prepareUpstreamRequest(pipeline, msg) {
   const credsResult = pipeline.extractAndUnmaskUrlCredentials(msg.url);
   if (credsResult.forbidden) {
-    return {
-      error: `forbidden: ${credsResult.forbidden.secretName} on ${credsResult.forbidden.hostname}`
-    };
+    return { error: `forbidden: ${credsResult.forbidden.secretName} on ${credsResult.forbidden.hostname}` };
   }
   const cleanedUrl = credsResult.url;
   const host = new URL(cleanedUrl).host;
@@ -1982,9 +1586,7 @@ async function prepareUpstreamRequest(pipeline, msg) {
   }
   const headersResult = pipeline.unmaskHeaders(headers, host);
   if (headersResult.forbidden) {
-    return {
-      error: `forbidden: ${headersResult.forbidden.secretName} on ${headersResult.forbidden.hostname}`
-    };
+    return { error: `forbidden: ${headersResult.forbidden.secretName} on ${headersResult.forbidden.hostname}` };
   }
   if (credsResult.syntheticAuthorization && !("authorization" in headers)) {
     headers.authorization = credsResult.syntheticAuthorization;
@@ -2002,9 +1604,7 @@ async function prepareUpstreamRequest(pipeline, msg) {
   if (hmacSpec) {
     const signResult = await pipeline.signHmac(hmacSpec, body ?? new Uint8Array(0), host);
     if (signResult.forbidden) {
-      return {
-        error: `forbidden: ${signResult.forbidden.secretName} on ${signResult.forbidden.hostname}`
-      };
+      return { error: `forbidden: ${signResult.forbidden.secretName} on ${signResult.forbidden.hostname}` };
     }
     if (signResult.headerName && signResult.signatureHex) {
       headers[signResult.headerName] = signResult.signatureHex;
@@ -2018,12 +1618,7 @@ async function prepareUpstreamRequest(pipeline, msg) {
 async function streamUpstreamResponse(port, pipeline, upstream) {
   const scrubbed = pipeline.scrubHeaders(upstream.headers);
   const respHeaders = buildResponseHeaders(scrubbed, upstream.headers, pipeline);
-  send(port, {
-    type: "response-head",
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: respHeaders
-  });
+  send(port, { type: "response-head", status: upstream.status, statusText: upstream.statusText, headers: respHeaders });
   if (upstream.body) {
     const reader = upstream.body.getReader();
     while (true) {
@@ -2045,33 +1640,20 @@ async function processProxyRequest(port, pipeline, msg, signal) {
     const { cleanedUrl, headers, body } = prepared;
     const dnrRule = await installForbiddenHeaderRule(cleanedUrl, headers);
     try {
-      const upstream = await fetch(dnrRule.fetchUrl, {
-        method: msg.method,
-        headers,
-        body,
-        signal
-      });
+      const upstream = await fetch(dnrRule.fetchUrl, { method: msg.method, headers, body, signal });
       await streamUpstreamResponse(port, pipeline, upstream);
     } finally {
       await dnrRule.cleanup();
     }
   } catch (err) {
-    send(port, {
-      type: "response-error",
-      error: err instanceof Error ? err.message : String(err)
-    });
+    send(port, { type: "response-error", error: err instanceof Error ? err.message : String(err) });
   }
 }
 async function handleProxyMessage(port, pipelinePromise, raw, signal) {
   const msg = raw;
   if (msg.type !== "request") return;
   if (msg.requestBodyTooLarge) {
-    send(port, {
-      type: "response-head",
-      status: 413,
-      statusText: "Payload Too Large",
-      headers: {}
-    });
+    send(port, { type: "response-head", status: 413, statusText: "Payload Too Large", headers: {} });
     send(port, { type: "response-end" });
     return;
   }
@@ -2079,10 +1661,7 @@ async function handleProxyMessage(port, pipelinePromise, raw, signal) {
   try {
     pipeline = await pipelinePromise;
   } catch (err) {
-    send(port, {
-      type: "response-error",
-      error: `fetch-proxy init failed: ${err instanceof Error ? err.message : String(err)}`
-    });
+    send(port, { type: "response-error", error: `fetch-proxy init failed: ${err instanceof Error ? err.message : String(err)}` });
     return;
   }
   await processProxyRequest(port, pipeline, msg, signal);
@@ -2095,27 +1674,17 @@ function handleFetchProxyConnectionAsync(port, pipelinePromise) {
     if (started) return;
     started = true;
     handleProxyMessage(port, pipelinePromise, raw, ac.signal).catch((err) => {
-      send(port, {
-        type: "response-error",
-        error: err instanceof Error ? err.message : String(err)
-      });
+      send(port, { type: "response-error", error: err instanceof Error ? err.message : String(err) });
     });
   });
 }
-
 var SILENT_RENEW_TIMEOUT_MS = 1e4;
 function buildWebAuthFlowOptions(url, interactive) {
   if (interactive) {
     return { url, interactive: true };
   }
-  return {
-    url,
-    interactive: false,
-    abortOnLoadForNonInteractive: false,
-    timeoutMsForNonInteractive: SILENT_RENEW_TIMEOUT_MS
-  };
+  return { url, interactive: false, abortOnLoadForNonInteractive: false, timeoutMsForNonInteractive: SILENT_RENEW_TIMEOUT_MS };
 }
-
 async function listSecrets(storage) {
   const all = await storage.get(null);
   const entries = pairStorageEntries(all).map(({ name, domains }) => ({ name, domains }));
@@ -2123,10 +1692,7 @@ async function listSecrets(storage) {
   return entries;
 }
 async function setSecret(storage, name, value, domains) {
-  await storage.set({
-    [name]: value,
-    [name + DOMAINS_SUFFIX]: domains.join(",")
-  });
+  await storage.set({ [name]: value, [name + DOMAINS_SUFFIX]: domains.join(",") });
 }
 async function deleteSecret(storage, name) {
   await storage.remove([name, name + DOMAINS_SUFFIX]);
@@ -2136,13 +1702,8 @@ async function listSecretsWithValues(storage) {
   return pairStorageEntries(all);
 }
 function pairStorageEntries(all) {
-  return pairEnvEntriesToSecrets(
-    Object.entries(all).flatMap(
-      ([key, value]) => typeof value === "string" ? [{ key, value }] : []
-    )
-  );
+  return pairEnvEntriesToSecrets(Object.entries(all).flatMap(([key, value]) => typeof value === "string" ? [{ key, value }] : []));
 }
-
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var KEY = "_session.id";
 async function readOrCreateSwSessionId() {
@@ -2153,10 +1714,300 @@ async function readOrCreateSwSessionId() {
   await chrome.storage.local.set({ [KEY]: fresh });
   return fresh;
 }
-
 var LEADER_TAB_ID_KEY2 = "slicc_leader_tab_id";
 var PROD_LEADER_TAB_URL = `${SLICC_HOSTED_ORIGIN}/?slicc=leader`;
-var PROD_LEADER_TAB_URL_GLOB = `${SLICC_HOSTED_ORIGIN} new Set();
+var PROD_LEADER_TAB_URL_GLOB = `${SLICC_HOSTED_ORIGIN}/*`;
+var PROD_LEADER_TAB_ORIGIN = SLICC_HOSTED_ORIGIN;
+var DEV_LEADER_TAB_URL = "http://localhost:8787/?slicc=leader";
+var DEV_LEADER_TAB_URL_GLOB = "http://localhost:8787/*";
+var DEV_LEADER_TAB_ORIGIN = "http://localhost:8787";
+function getLeaderTabUrl(isExtDev) {
+  return isExtDev ? DEV_LEADER_TAB_URL : PROD_LEADER_TAB_URL;
+}
+function getLeaderTabUrlGlob(isExtDev) {
+  return isExtDev ? DEV_LEADER_TAB_URL_GLOB : PROD_LEADER_TAB_URL_GLOB;
+}
+function getLeaderTabOrigin(isExtDev) {
+  return isExtDev ? DEV_LEADER_TAB_ORIGIN : PROD_LEADER_TAB_ORIGIN;
+}
+function appendLeaderExtIdParam(leaderUrl, extensionId) {
+  if (!extensionId) return leaderUrl;
+  try {
+    const u = new URL(leaderUrl);
+    u.searchParams.set(LEADER_EXT_ID_QUERY_NAME, extensionId);
+    return u.toString();
+  } catch {
+    return leaderUrl;
+  }
+}
+function leaderUrlHasExtId(rawUrl, extensionId) {
+  if (!rawUrl || !extensionId) return false;
+  try {
+    return new URL(rawUrl).searchParams.get(LEADER_EXT_ID_QUERY_NAME) === extensionId;
+  } catch {
+    return false;
+  }
+}
+var LEADER_TAB_URL = getLeaderTabUrl(false);
+var LEADER_TAB_URL_GLOB = getLeaderTabUrlGlob(false);
+var LEADER_TAB_ORIGIN = getLeaderTabOrigin(false);
+async function readStoredLeaderTabId() {
+  try {
+    const result = await chrome.storage.session.get(LEADER_TAB_ID_KEY2);
+    const raw = result[LEADER_TAB_ID_KEY2];
+    return typeof raw === "number" ? raw : void 0;
+  } catch (err) {
+    console.error("[slicc-sw] storage.session.get leader tab id failed", err);
+    return void 0;
+  }
+}
+async function writeStoredLeaderTabId(tabId) {
+  await chrome.storage.session.set({ [LEADER_TAB_ID_KEY2]: tabId });
+  await markLeaderTabNotDiscardable(tabId);
+}
+async function markLeaderTabNotDiscardable(tabId) {
+  try {
+    await chrome.tabs.update(tabId, { autoDiscardable: false });
+  } catch (err) {
+    console.warn("[slicc-sw] failed to exempt leader tab from discard/freeze", err);
+  }
+}
+async function clearStoredLeaderTabId() {
+  await chrome.storage.session.remove(LEADER_TAB_ID_KEY2);
+}
+function isLeaderTabUrl(rawUrl) {
+  if (!rawUrl) return false;
+  let u;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (u.origin !== LEADER_TAB_ORIGIN) return false;
+  return u.searchParams.get("slicc") === "leader";
+}
+async function reconcileLeaderTabOnBoot() {
+  const storedId = await readStoredLeaderTabId();
+  if (storedId === void 0) return;
+  let tab;
+  try {
+    tab = await chrome.tabs.get(storedId);
+  } catch {
+  }
+  if (tab !== void 0 && isLeaderTabUrl(tab.url)) return;
+  await clearStoredLeaderTabId();
+}
+var leaderTabLock = null;
+async function queryLeaderTabs() {
+  try {
+    const matches = await chrome.tabs.query({ url: LEADER_TAB_URL_GLOB });
+    return matches.filter((t) => isLeaderTabUrl(t.url) && t.id !== void 0);
+  } catch (err) {
+    console.error("[slicc-sw] tabs.query for leader tab failed", err);
+    return [];
+  }
+}
+async function createLeaderTab() {
+  const created = await chrome.tabs.create({ url: appendLeaderExtIdParam(LEADER_TAB_URL, chrome.runtime.id), active: false, pinned: true });
+  if (created.id !== void 0) await writeStoredLeaderTabId(created.id);
+}
+function isUnloadedTab(tab) {
+  return tab.discarded === true || tab.status === "unloaded";
+}
+async function adoptSingleLeaderTab(matches) {
+  const keep = matches.find((t) => !isUnloadedTab(t)) ?? matches[0];
+  const extras = matches.filter((t) => t !== keep);
+  if (keep.id === void 0) return;
+  for (const extra of extras) {
+    if (extra.id === void 0 || extra.id === keep.id) continue;
+    try {
+      await chrome.tabs.remove(extra.id);
+    } catch (err) {
+      console.error("[slicc-sw] failed to close duplicate leader tab", err);
+    }
+  }
+  const extIdUrl = keep.url !== void 0 && chrome.runtime.id !== void 0 && !leaderUrlHasExtId(keep.url, chrome.runtime.id) ? appendLeaderExtIdParam(keep.url, chrome.runtime.id) : void 0;
+  if (extIdUrl !== void 0 || keep.pinned !== true) {
+    const props = { pinned: true };
+    if (extIdUrl !== void 0) props.url = extIdUrl;
+    await chrome.tabs.update(keep.id, props);
+  }
+  if (extIdUrl === void 0 && isUnloadedTab(keep)) {
+    try {
+      await chrome.tabs.reload(keep.id);
+    } catch (err) {
+      console.error("[slicc-sw] failed to reload unloaded leader tab", err);
+    }
+  }
+  await writeStoredLeaderTabId(keep.id);
+}
+async function ensureLeaderTab() {
+  if (leaderTabLock !== null) return leaderTabLock;
+  leaderTabLock = (async () => {
+    try {
+      const matches = await queryLeaderTabs();
+      if (matches.length === 0) await createLeaderTab();
+      else await adoptSingleLeaderTab(matches);
+    } finally {
+      leaderTabLock = null;
+    }
+  })();
+  return leaderTabLock;
+}
+async function reloadLeaderTabIfExists() {
+  const id = await readStoredLeaderTabId();
+  if (typeof id !== "number") return false;
+  try {
+    await chrome.tabs.reload(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+reconcileLeaderTabOnBoot().catch((err) => {
+  console.error("[slicc-sw] reconcile leader tab failed", err);
+});
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => console.error("[slicc-sw] setPanelBehavior failed", err));
+setCherryPanelRecoveryDeps({ reloadLeaderTabIfExists });
+var UPDATE_RELOAD_GUARD_KEY = "slicc_update_reload_at";
+var UPDATE_RELOAD_GUARD_MS = 6e4;
+async function isWithinUpdateReloadGuard() {
+  const result = await chrome.storage.session.get(UPDATE_RELOAD_GUARD_KEY);
+  const stamp = result[UPDATE_RELOAD_GUARD_KEY];
+  if (typeof stamp !== "number") return false;
+  return Date.now() - stamp < UPDATE_RELOAD_GUARD_MS;
+}
+async function stampUpdateReloadGuard() {
+  await chrome.storage.session.set({ [UPDATE_RELOAD_GUARD_KEY]: Date.now() });
+}
+chrome.runtime.onUpdateAvailable.addListener((details) => {
+  console.log("[slicc-sw] Extension update available", details.version);
+  (async () => {
+    if (!await isWithinUpdateReloadGuard()) {
+      const reloaded = await reloadLeaderTabIfExists();
+      if (reloaded) {
+        await stampUpdateReloadGuard();
+      }
+    }
+    chrome.runtime.reload();
+  })().catch((err) => {
+    console.error("[slicc-sw] onUpdateAvailable handler failed", err);
+    chrome.runtime.reload();
+  });
+});
+async function handleLeaderTabRemoved(tabId) {
+  const storedId = await readStoredLeaderTabId();
+  if (storedId !== tabId) return;
+  await clearStoredLeaderTabId();
+  broadcastLeaderGone();
+}
+chrome.tabs.onRemoved.addListener((tabId) => {
+  handleLeaderTabRemoved(tabId).catch((err) => {
+    console.error("[slicc-sw] handleLeaderTabRemoved failed", err);
+  });
+});
+async function focusLeaderTab() {
+  const storedId = await readStoredLeaderTabId();
+  if (storedId !== void 0) {
+    let leaderTab;
+    try {
+      leaderTab = await chrome.tabs.get(storedId);
+    } catch {
+      leaderTab = void 0;
+    }
+    if (leaderTab !== void 0 && isLeaderTabUrl(leaderTab.url)) {
+      await chrome.tabs.update(storedId, { active: true });
+      if (leaderTab.windowId !== void 0) {
+        await chrome.windows.update(leaderTab.windowId, { focused: true });
+      }
+      return;
+    }
+    await clearStoredLeaderTabId();
+  }
+  await ensureLeaderTab();
+  const newId = await readStoredLeaderTabId();
+  if (newId === void 0) return;
+  const tab = await chrome.tabs.get(newId).catch(() => void 0);
+  if (tab === void 0) return;
+  await chrome.tabs.update(newId, { active: true });
+  if (tab.windowId !== void 0) {
+    await chrome.windows.update(tab.windowId, { focused: true });
+  }
+}
+function isCaptureOpenWindowMsg(msg) {
+  return typeof msg === "object" && msg !== null && "type" in msg && msg.type === "capture-open-window" && typeof msg.url === "string";
+}
+chrome.runtime.onMessage.addListener((message) => {
+  if (!isCaptureOpenWindowMsg(message)) return false;
+  const requestId = message.requestId;
+  chrome.windows.create({ url: message.url, type: "popup", width: 360, height: 220, focused: true }).catch((err) => {
+    console.error("[slicc-sw] Failed to open capture popup window:", err);
+    if (requestId) {
+      chrome.runtime.sendMessage({ source: "capture-popup", requestId, ok: false, error: `failed to open capture window: ${err?.message || String(err)}` }).catch(() => {
+      });
+    }
+  });
+  return false;
+});
+var sliccGroupId = null;
+async function addToSliccGroup(tabId) {
+  try {
+    if (sliccGroupId !== null) {
+      try {
+        await chrome.tabs.group({ tabIds: tabId, groupId: sliccGroupId });
+        return;
+      } catch (err) {
+        console.info("[slicc-tab-group] Tab group removed by user, recreating", { tabId, previousGroupId: sliccGroupId, error: err instanceof Error ? err.message : String(err) });
+        sliccGroupId = null;
+      }
+    }
+    sliccGroupId = await chrome.tabs.group({ tabIds: tabId });
+    await chrome.tabGroups.update(sliccGroupId, { title: "slicc", color: "pink", collapsed: false });
+  } catch (err) {
+    console.warn("[slicc-tab-group] Tab grouping failed (best-effort, continuing without group)", { tabId, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+var HANDOFF_NOTIFICATION_ID_PREFIX = "slicc-handoff-";
+var HANDOFF_INSTRUCTION_SNIPPET_MAX = 150;
+var handoffNotificationSeq = 0;
+function truncateInstruction(text) {
+  if (text.length <= HANDOFF_INSTRUCTION_SNIPPET_MAX) return text;
+  return `${text.slice(0, HANDOFF_INSTRUCTION_SNIPPET_MAX - 1)}\u2026`;
+}
+var CONTROL_CHARS_RE = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]+`, "g");
+function sanitizeInstruction(text) {
+  return text.replace(CONTROL_CHARS_RE, " ");
+}
+function handoffSourceLabel(sourceUrl) {
+  try {
+    const origin = new URL(sourceUrl).origin;
+    return origin === "null" ? "A page" : origin;
+  } catch {
+    return "A page";
+  }
+}
+function handoffNotificationContent(match, sourceUrl) {
+  const source = handoffSourceLabel(sourceUrl);
+  if (match.verb === "upskill") {
+    const repo = match.target.replace(/^https?:\/\//, "");
+    const skill = match.path ? `${repo} (${match.path})` : repo;
+    return { title: "Slicc skill available", message: `${source} offers a skill: ${skill}. Click to open the Slicc leader tab.` };
+  }
+  return { title: "Slicc handoff received", message: match.instruction ? `${source} asks: ${truncateInstruction(sanitizeInstruction(match.instruction))} \u2014 click to open the Slicc leader tab.` : `${source} sent a handoff. Click to open the Slicc leader tab.` };
+}
+function showHandoffNotification(match, sourceUrl) {
+  const notificationId = `${HANDOFF_NOTIFICATION_ID_PREFIX}${Date.now()}-${handoffNotificationSeq++}`;
+  chrome.action.setBadgeText({ text: "!" });
+  chrome.action.setBadgeBackgroundColor({ color: "#ff5f72" });
+  chrome.notifications.create(notificationId, { type: "basic", iconUrl: "logos/sliccy-color-1scoops-128x128.png", ...handoffNotificationContent(match, sourceUrl) });
+}
+chrome.notifications.onClicked.addListener((notificationId) => {
+  if (!notificationId.startsWith(HANDOFF_NOTIFICATION_ID_PREFIX)) return;
+  chrome.action.setBadgeText({ text: "" });
+  focusLeaderTab().catch(() => {
+  });
+});
+var notifiedHandoffFingerprints = /* @__PURE__ */ new Set();
 var HANDOFF_NOTIFIED_FINGERPRINTS_KEY = "slicc_handoff_notified_fingerprints";
 var HANDOFF_NOTIFIED_FINGERPRINTS_MAX = 100;
 var handoffNotifyChain = Promise.resolve();
@@ -2181,54 +2032,32 @@ async function notifyHandoffOncePerSession(fingerprint, match, url) {
   showHandoffNotification(match, url);
   if (!readOk) return;
   stored.push(fingerprint);
-  await chrome.storage.session.set({
-    [HANDOFF_NOTIFIED_FINGERPRINTS_KEY]: stored.slice(-HANDOFF_NOTIFIED_FINGERPRINTS_MAX)
-  });
+  await chrome.storage.session.set({ [HANDOFF_NOTIFIED_FINGERPRINTS_KEY]: stored.slice(-HANDOFF_NOTIFIED_FINGERPRINTS_MAX) });
 }
-chrome.webRequest.onHeadersReceived.addListener(
-  (details) => {
-    if (_isProtectedUrl(details.url)) return;
-    const { match } = extractHandoffFromWebRequest(details.responseHeaders, details.url);
-    if (!match) return;
-    const fingerprint = handoffFingerprint(match);
-    const alreadyNotified = notifiedHandoffFingerprints.has(fingerprint);
-    notifiedHandoffFingerprints.add(fingerprint);
-    const payload = {
-      type: "navigate-lick",
-      url: details.url,
-      verb: match.verb,
-      target: match.target,
-      tabId: details.tabId >= 0 ? details.tabId : void 0
-    };
-    if (match.instruction) payload.instruction = match.instruction;
-    if (match.branch) payload.branch = match.branch;
-    if (match.path) payload.path = match.path;
-    const tabId = details.tabId;
-    const dispatch = (title) => {
-      if (title) payload.title = title;
-      postLickToWelcomedLeaderPorts({
-        kind: "extension.lick",
-        verb: payload.verb,
-        target: payload.target,
-        url: payload.url,
-        ...payload.instruction ? { instruction: payload.instruction } : {},
-        ...payload.branch ? { branch: payload.branch } : {},
-        ...payload.path ? { path: payload.path } : {},
-        ...payload.title ? { title: payload.title } : {}
-      });
-      chrome.runtime.sendMessage({ source: "service-worker", payload }).catch(() => {
-      });
-    };
-    if (!alreadyNotified) queueHandoffNotification(fingerprint, match, details.url);
-    if (tabId >= 0) {
-      chrome.tabs.get(tabId).then((tab) => dispatch(tab.title)).catch(() => dispatch());
-    } else {
-      dispatch();
-    }
-  },
-  { urls: ["<all_urls>"], types: ["main_frame"] },
-  ["responseHeaders"]
-);
+chrome.webRequest.onHeadersReceived.addListener((details) => {
+  const { match } = extractHandoffFromWebRequest(details.responseHeaders, details.url);
+  if (!match) return;
+  const fingerprint = handoffFingerprint(match);
+  const alreadyNotified = notifiedHandoffFingerprints.has(fingerprint);
+  notifiedHandoffFingerprints.add(fingerprint);
+  const payload = { type: "navigate-lick", url: details.url, verb: match.verb, target: match.target, tabId: details.tabId >= 0 ? details.tabId : void 0 };
+  if (match.instruction) payload.instruction = match.instruction;
+  if (match.branch) payload.branch = match.branch;
+  if (match.path) payload.path = match.path;
+  const tabId = details.tabId;
+  const dispatch = (title) => {
+    if (title) payload.title = title;
+    postLickToWelcomedLeaderPorts({ kind: "extension.lick", verb: payload.verb, target: payload.target, url: payload.url, ...payload.instruction ? { instruction: payload.instruction } : {}, ...payload.branch ? { branch: payload.branch } : {}, ...payload.path ? { path: payload.path } : {}, ...payload.title ? { title: payload.title } : {} });
+    chrome.runtime.sendMessage({ source: "service-worker", payload }).catch(() => {
+    });
+  };
+  if (!alreadyNotified) queueHandoffNotification(fingerprint, match, details.url);
+  if (tabId >= 0) {
+    chrome.tabs.get(tabId).then((tab) => dispatch(tab.title)).catch(() => dispatch());
+  } else {
+    dispatch();
+  }
+}, { urls: ["<all_urls>"], types: ["main_frame"] }, ["responseHeaders"]);
 var DISCOVERY_ENABLED_KEY = "slicc_discovery_enabled";
 var DISCOVERY_ALLOWED_ORIGINS = false ? [...BRIDGE_ALLOWED_ORIGINS, ...BRIDGE_DEV_ORIGINS] : BRIDGE_ALLOWED_ORIGINS;
 var discoveryLoaded = false;
@@ -2249,42 +2078,28 @@ chrome.storage.onChanged?.addListener?.((changes, area) => {
     discoveryLoaded = true;
   }
 });
-chrome.runtime.onMessageExternal?.addListener?.(
-  (message, sender) => {
-    if (getMsgType(message) !== "discovery.set-enabled") return false;
-    const origin = sender.origin ?? (() => {
-      try {
-        return new URL(sender.url ?? "").origin;
-      } catch {
-        return void 0;
-      }
-    })();
-    if (!origin || !DISCOVERY_ALLOWED_ORIGINS.includes(origin)) return false;
-    const enabled = message.enabled !== false;
-    void chrome.storage.local.set({ [DISCOVERY_ENABLED_KEY]: enabled }).catch(() => {
-    });
-    return false;
-  }
-);
-var discoveryObserver = createDiscoveryObserver({
-  fetchImpl: (url, init) => fetch(url, init),
-  emit: (discovery) => postDiscoveryToWelcomedLeaderPorts({ kind: "extension.discovery", ...discovery }),
-  isEnabled: () => discoveryLoaded && discoveryEnabled
+chrome.runtime.onMessageExternal?.addListener?.((message, sender) => {
+  if (getMsgType(message) !== "discovery.set-enabled") return false;
+  const origin = sender.origin ?? (() => {
+    try {
+      return new URL(sender.url ?? "").origin;
+    } catch {
+      return void 0;
+    }
+  })();
+  if (!origin || !DISCOVERY_ALLOWED_ORIGINS.includes(origin)) return false;
+  const enabled = message.enabled !== false;
+  void chrome.storage.local.set({ [DISCOVERY_ENABLED_KEY]: enabled }).catch(() => {
+  });
+  return false;
 });
-chrome.webRequest.onHeadersReceived.addListener(
-  (details) => {
-    if (_isProtectedUrl(details.url)) return;
-    discoveryObserver.onHeaders({
-      url: details.url,
-      responseHeaders: details.responseHeaders
-    });
-  },
-  { urls: ["<all_urls>"], types: ["main_frame"] },
-  ["responseHeaders"]
-);
-var sessionToTab =  new Map();
-var debuggerAttachmentOwners =  new Map();
-var traySockets =  new Map();
+var discoveryObserver = createDiscoveryObserver({ fetchImpl: (url, init) => fetch(url, init), emit: (discovery) => postDiscoveryToWelcomedLeaderPorts({ kind: "extension.discovery", ...discovery }), isEnabled: () => discoveryLoaded && discoveryEnabled });
+chrome.webRequest.onHeadersReceived.addListener((details) => {
+  discoveryObserver.onHeaders({ url: details.url, responseHeaders: details.responseHeaders });
+}, { urls: ["<all_urls>"], types: ["main_frame"] }, ["responseHeaders"]);
+var sessionToTab = /* @__PURE__ */ new Map();
+var debuggerAttachmentOwners = /* @__PURE__ */ new Map();
+var traySockets = /* @__PURE__ */ new Map();
 async function acquireDebuggerAttachment(tabId, owner) {
   if (debuggerAttachmentOwners.has(tabId)) return false;
   await chrome.debugger.attach({ tabId }, "1.3");
@@ -2303,115 +2118,78 @@ async function forceReleaseDebuggerAttachment(tabId) {
   await chrome.debugger.detach({ tabId }).catch(() => {
   });
 }
-chrome.runtime.onMessage.addListener(
-  (message, _sender, _sendResponse) => {
-    if (!isExtMsg(message)) return false;
-    const msg = message;
-    if (msg.source === "panel") {
-      chrome.action.setBadgeText({ text: "" });
-      const panelPayload = msg.payload;
-      if (panelPayload.type === "oauth-request") {
-        const oauthMsg = panelPayload;
-        handleOAuthRequest(oauthMsg).then((result) => {
-          chrome.runtime.sendMessage({
-            source: "service-worker",
-            payload: result
-          }).catch((e) => {
-            console.error("[slicc-sw] Failed to send OAuth result:", e);
-          });
-        }).catch((err) => {
-          chrome.runtime.sendMessage({
-            source: "service-worker",
-            payload: {
-              type: "oauth-result",
-              providerId: oauthMsg.providerId,
-              error: err instanceof Error ? err.message : String(err)
-            }
-          }).catch((e) => {
-            console.error("[slicc-sw] Failed to send OAuth error:", e);
-          });
+chrome.runtime.onMessage.addListener((message, _sender, _sendResponse) => {
+  if (!isExtMsg(message)) return false;
+  const msg = message;
+  if (msg.source === "panel") {
+    chrome.action.setBadgeText({ text: "" });
+    const panelPayload = msg.payload;
+    if (panelPayload.type === "oauth-request") {
+      const oauthMsg = panelPayload;
+      handleOAuthRequest(oauthMsg).then((result) => {
+        chrome.runtime.sendMessage({ source: "service-worker", payload: result }).catch((e) => {
+          console.error("[slicc-sw] Failed to send OAuth result:", e);
         });
-        return false;
-      }
-      return false;
-    }
-    if (msg.source === "offscreen") {
-      const payload = msg.payload;
-      if (payload.type === "cdp-command") {
-        handleCdpCommand(payload).then((response) => {
-          chrome.runtime.sendMessage({
-            source: "service-worker",
-            payload: response
-          }).catch(() => {
-          });
-        }).catch((err) => {
-          chrome.runtime.sendMessage({
-            source: "service-worker",
-            payload: {
-              type: "cdp-response",
-              id: payload.id,
-              error: err instanceof Error ? err.message : String(err)
-            }
-          }).catch(() => {
-          });
+      }).catch((err) => {
+        chrome.runtime.sendMessage({ source: "service-worker", payload: { type: "oauth-result", providerId: oauthMsg.providerId, error: err instanceof Error ? err.message : String(err) } }).catch((e) => {
+          console.error("[slicc-sw] Failed to send OAuth error:", e);
         });
-        return false;
-      }
-      if (isTraySocketCommand(payload)) {
-        void handleTraySocketCommand(payload).catch((err) => {
-          void sendServiceWorkerMessage({
-            type: "tray-socket-error",
-            id: payload.id,
-            error: err instanceof Error ? err.message : String(err)
-          });
-        });
-        return false;
-      }
+      });
       return false;
     }
     return false;
   }
-);
+  if (msg.source === "offscreen") {
+    const payload = msg.payload;
+    if (payload.type === "cdp-command") {
+      handleCdpCommand(payload).then((response) => {
+        chrome.runtime.sendMessage({ source: "service-worker", payload: response }).catch(() => {
+        });
+      }).catch((err) => {
+        chrome.runtime.sendMessage({ source: "service-worker", payload: { type: "cdp-response", id: payload.id, error: err instanceof Error ? err.message : String(err) } }).catch(() => {
+        });
+      });
+      return false;
+    }
+    if (isTraySocketCommand(payload)) {
+      void handleTraySocketCommand(payload).catch((err) => {
+        void sendServiceWorkerMessage({ type: "tray-socket-error", id: payload.id, error: err instanceof Error ? err.message : String(err) });
+      });
+      return false;
+    }
+    return false;
+  }
+  return false;
+});
 function isExtMsg(msg) {
   return typeof msg === "object" && msg !== null && "source" in msg && "payload" in msg;
 }
 function isMountSignAndForwardRequest(msg) {
   return typeof msg === "object" && msg !== null && "type" in msg && "envelope" in msg && (msg.type === "mount.s3-sign-and-forward" || msg.type === "mount.da-sign-and-forward");
 }
-var chromeStorageSecretGetter = {
-  async get(key) {
-    const result = await chrome.storage.local.get(key);
-    const value = result[key];
-    return typeof value === "string" ? value : void 0;
-  }
-};
+var chromeStorageSecretGetter = { async get(key) {
+  const result = await chrome.storage.local.get(key);
+  const value = result[key];
+  return typeof value === "string" ? value : void 0;
+} };
 async function handleMountSignAndForward(msg) {
   if (msg.type === "mount.s3-sign-and-forward") {
-    return executeS3SignAndForward(
-      msg.envelope,
-      chromeStorageSecretGetter
-    );
+    return executeS3SignAndForward(msg.envelope, chromeStorageSecretGetter);
   }
   return executeDaSignAndForward(msg.envelope);
 }
-chrome.runtime.onMessage.addListener(
-  (message, _sender, sendResponse) => {
-    if (!isMountSignAndForwardRequest(message)) return false;
-    const respondError = (err) => {
-      sendResponse({
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-        errorCode: "internal"
-      });
-    };
-    try {
-      handleMountSignAndForward(message).then((reply) => sendResponse(reply)).catch(respondError);
-    } catch (err) {
-      respondError(err);
-    }
-    return true;
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!isMountSignAndForwardRequest(message)) return false;
+  const respondError = (err) => {
+    sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err), errorCode: "internal" });
+  };
+  try {
+    handleMountSignAndForward(message).then((reply) => sendResponse(reply)).catch(respondError);
+  } catch (err) {
+    respondError(err);
   }
-);
+  return true;
+});
 function isTraySocketCommand(payload) {
   return payload.type === "tray-socket-open" || payload.type === "tray-socket-send" || payload.type === "tray-socket-close";
 }
@@ -2441,27 +2219,16 @@ function openTraySocket(command) {
   const socket = new WebSocket(command.url);
   traySockets.set(command.id, socket);
   socket.addEventListener("open", () => {
-    void sendServiceWorkerMessage({
-      type: "tray-socket-opened",
-      id: command.id
-    });
+    void sendServiceWorkerMessage({ type: "tray-socket-opened", id: command.id });
   });
   socket.addEventListener("message", (event) => {
-    void sendServiceWorkerMessage({
-      type: "tray-socket-message",
-      id: command.id,
-      data: typeof event.data === "string" ? event.data : String(event.data)
-    });
+    void sendServiceWorkerMessage({ type: "tray-socket-message", id: command.id, data: typeof event.data === "string" ? event.data : String(event.data) });
   });
   socket.addEventListener("error", () => {
     if (traySockets.get(command.id) === socket) {
       traySockets.delete(command.id);
     }
-    void sendServiceWorkerMessage({
-      type: "tray-socket-error",
-      id: command.id,
-      error: "Tray leader WebSocket failed in extension service worker"
-    });
+    void sendServiceWorkerMessage({ type: "tray-socket-error", id: command.id, error: "Tray leader WebSocket failed in extension service worker" });
   });
   socket.addEventListener("close", () => {
     if (traySockets.get(command.id) === socket) {
@@ -2471,10 +2238,7 @@ function openTraySocket(command) {
   });
 }
 async function sendServiceWorkerMessage(payload) {
-  await chrome.runtime.sendMessage({
-    source: "service-worker",
-    payload
-  });
+  await chrome.runtime.sendMessage({ source: "service-worker", payload });
 }
 async function handleCdpCommand(cmd) {
   const { id, method, params, sessionId } = cmd;
@@ -2502,27 +2266,13 @@ async function handleCdpCommand(cmd) {
     }
     return { type: "cdp-response", id, result };
   } catch (err) {
-    return {
-      type: "cdp-response",
-      id,
-      error: err instanceof Error ? err.message : String(err)
-    };
+    return { type: "cdp-response", id, error: err instanceof Error ? err.message : String(err) };
   }
 }
 async function cdpGetTargets2() {
-  const [tabs, activeTabs] = await Promise.all([
-    chrome.tabs.query({}),
-    chrome.tabs.query({ active: true, currentWindow: true })
-  ]);
+  const [tabs, activeTabs] = await Promise.all([chrome.tabs.query({}), chrome.tabs.query({ active: true, currentWindow: true })]);
   const activeTabIds = new Set(activeTabs.map((t) => t.id));
-  const targetInfos = tabs.filter((tab) => typeof tab.id === "number").map((tab) => ({
-    targetId: String(tab.id),
-    type: "page",
-    title: tab.title ?? "",
-    url: tab.url ?? "",
-    attached: debuggerAttachmentOwners.has(tab.id),
-    active: activeTabIds.has(tab.id)
-  }));
+  const targetInfos = tabs.filter((tab) => typeof tab.id === "number").map((tab) => ({ targetId: String(tab.id), type: "page", title: tab.title ?? "", url: tab.url ?? "", attached: debuggerAttachmentOwners.has(tab.id), active: activeTabIds.has(tab.id) }));
   return { targetInfos };
 }
 async function cdpAttachToTarget2(params) {
@@ -2567,11 +2317,7 @@ async function cdpCloseTarget2(params) {
   await chrome.tabs.remove(tabId);
   return { success: true };
 }
-var CDP_UNMASK_METHODS =  new Set([
-  "Runtime.evaluate",
-  "Runtime.callFunctionOn",
-  "Input.insertText"
-]);
+var CDP_UNMASK_METHODS = /* @__PURE__ */ new Set(["Runtime.evaluate", "Runtime.callFunctionOn", "Input.insertText"]);
 async function maybeUnmaskCdpFrame(tabId, method, params) {
   if (!CDP_UNMASK_METHODS.has(method)) return params;
   if (!params || typeof params !== "object") return params;
@@ -2601,65 +2347,38 @@ async function maybeUnmaskCdpFrame(tabId, method, params) {
 async function cdpSendCommand(method, params, sessionId) {
   const tabId = sessionId ? sessionToTab.get(sessionId) : void 0;
   if (tabId === void 0) {
-    throw new Error(
-      `No tab attached for sessionId: ${sessionId ?? "(none)"}. Attach to a target first.`
-    );
+    throw new Error(`No tab attached for sessionId: ${sessionId ?? "(none)"}. Attach to a target first.`);
   }
   const effectiveParams = await maybeUnmaskCdpFrame(tabId, method, params);
   const result = await chrome.debugger.sendCommand({ tabId }, method, effectiveParams);
   return result ?? {};
 }
-chrome.debugger.onEvent.addListener(
-  (source, method, params) => {
-    if (!debuggerAttachmentOwners.has(source.tabId)) return;
-    let sessionId;
-    for (const [sid, tabId] of sessionToTab) {
-      if (tabId === source.tabId) {
-        sessionId = sid;
-        break;
-      }
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (!debuggerAttachmentOwners.has(source.tabId)) return;
+  let sessionId;
+  for (const [sid, tabId] of sessionToTab) {
+    if (tabId === source.tabId) {
+      sessionId = sid;
+      break;
     }
-    const cdpEvent = {
-      type: "cdp-event",
-      method,
-      params: sessionId ? { ...params, sessionId } : params ?? {}
-    };
-    chrome.runtime.sendMessage({
-      source: "service-worker",
-      payload: cdpEvent
-    }).catch(() => {
-    });
   }
-);
+  const cdpEvent = { type: "cdp-event", method, params: sessionId ? { ...params, sessionId } : params ?? {} };
+  chrome.runtime.sendMessage({ source: "service-worker", payload: cdpEvent }).catch(() => {
+  });
+});
 async function handleOAuthRequest(msg) {
-  const redirectUrl = await chrome.identity.launchWebAuthFlow(
-    buildWebAuthFlowOptions(msg.authorizeUrl, msg.interactive ?? true)
-  );
+  const redirectUrl = await chrome.identity.launchWebAuthFlow(buildWebAuthFlowOptions(msg.authorizeUrl, msg.interactive ?? true));
   if (!redirectUrl) {
-    return {
-      type: "oauth-result",
-      providerId: msg.providerId,
-      error: "OAuth flow was cancelled or returned no URL"
-    };
+    return { type: "oauth-result", providerId: msg.providerId, error: "OAuth flow was cancelled or returned no URL" };
   }
   const parsed = new URL(redirectUrl);
   const params = parsed.searchParams;
   const hashParams = new URLSearchParams(parsed.hash.slice(1));
   const error = params.get("error") || hashParams.get("error");
   if (error) {
-    return {
-      type: "oauth-result",
-      providerId: msg.providerId,
-      error: params.get("error_description") || hashParams.get("error_description") || error
-    };
+    return { type: "oauth-result", providerId: msg.providerId, error: params.get("error_description") || hashParams.get("error_description") || error };
   }
-  return {
-    type: "oauth-result",
-    providerId: msg.providerId,
-    code: params.get("code") ?? void 0,
-    state: params.get("state") ?? void 0,
-    redirectUrl
-  };
+  return { type: "oauth-result", providerId: msg.providerId, code: params.get("code") ?? void 0, state: params.get("state") ?? void 0, redirectUrl };
 }
 chrome.debugger.onDetach.addListener((source, _reason) => {
   debuggerAttachmentOwners.delete(source.tabId);
@@ -2674,37 +2393,25 @@ var sessionSecretStore = new SessionSecretStore();
 var storageLocal = chrome.storage.local;
 async function buildSecretsPipeline() {
   const sessionId = await readOrCreateSwSessionId();
-  const source = {
-    get: async (name) => {
-      const fromSession = sessionSecretStore.get(name);
-      if (fromSession !== void 0) return fromSession;
-      const got = await chrome.storage.local.get(name);
-      return got[name];
-    },
-    listAll: () => listSecretsWithValues(storageLocal)
-  };
+  const source = { get: async (name) => {
+    const fromSession = sessionSecretStore.get(name);
+    if (fromSession !== void 0) return fromSession;
+    const got = await chrome.storage.local.get(name);
+    return got[name];
+  }, listAll: () => listSecretsWithValues(storageLocal) };
   return new SecretsPipeline({ sessionId, source, sessionStore: sessionSecretStore });
 }
-var bridgeSwDeps = buildDefaultBridgeSwDeps({
-
-  writeStoredLeaderTabId: async (tabId) => {
-    try {
-      await writeStoredLeaderTabId(tabId);
-    } catch {
-    }
-  },
-  attachDebugger: (tabId) => acquireDebuggerAttachment(tabId, "bridge"),
-  detachDebugger: (tabId) => releaseDebuggerAttachment(tabId, "bridge"),
-  sendDebuggerCommand: async (tabId, method, params) => {
-    const result = await chrome.debugger.sendCommand({ tabId }, method, params);
-    return result ?? {};
-  },
-  maybeUnmaskCdpFrame,
-  allowedOrigins: false ? [...BRIDGE_ALLOWED_ORIGINS, ...BRIDGE_DEV_ORIGINS] : BRIDGE_ALLOWED_ORIGINS,
-  onLeaderJoinUrl: (joinUrl) => {
-    setCherryPanelJoinUrl(joinUrl);
+var bridgeSwDeps = buildDefaultBridgeSwDeps({ writeStoredLeaderTabId: async (tabId) => {
+  try {
+    await writeStoredLeaderTabId(tabId);
+  } catch {
   }
-});
+}, attachDebugger: (tabId) => acquireDebuggerAttachment(tabId, "bridge"), detachDebugger: (tabId) => releaseDebuggerAttachment(tabId, "bridge"), sendDebuggerCommand: async (tabId, method, params) => {
+  const result = await chrome.debugger.sendCommand({ tabId }, method, params);
+  return result ?? {};
+}, maybeUnmaskCdpFrame, allowedOrigins: false ? [...BRIDGE_ALLOWED_ORIGINS, ...BRIDGE_DEV_ORIGINS] : BRIDGE_ALLOWED_ORIGINS, onLeaderJoinUrl: (joinUrl) => {
+  setCherryPanelJoinUrl(joinUrl);
+} });
 function buildReloadedPipelinePromise() {
   return buildSecretsPipeline().then(async (p) => {
     await p.reload();
@@ -2714,11 +2421,7 @@ function buildReloadedPipelinePromise() {
 chrome.runtime.onConnectExternal.addListener((port) => {
   if (port.name === "fetch-proxy.fetch") {
     const pipelinePromise = (async () => {
-      const pin = await validateBridgePin(port.sender, {
-        readStoredLeaderTabId: bridgeSwDeps.readStoredLeaderTabId,
-        writeStoredLeaderTabId: bridgeSwDeps.writeStoredLeaderTabId,
-        allowedOrigins: bridgeSwDeps.allowedOrigins
-      });
+      const pin = await validateBridgePin(port.sender, { readStoredLeaderTabId: bridgeSwDeps.readStoredLeaderTabId, writeStoredLeaderTabId: bridgeSwDeps.writeStoredLeaderTabId, allowedOrigins: bridgeSwDeps.allowedOrigins });
       if (!pin.ok) throw new Error(`fetch-proxy pin failed: ${pin.reason ?? "pin-failed"}`);
       return buildReloadedPipelinePromise();
     })();
@@ -2729,11 +2432,7 @@ chrome.runtime.onConnectExternal.addListener((port) => {
     return;
   }
   if (port.name === "secrets.crud") {
-    const pinPromise = validateBridgePin(port.sender, {
-      readStoredLeaderTabId: bridgeSwDeps.readStoredLeaderTabId,
-      writeStoredLeaderTabId: bridgeSwDeps.writeStoredLeaderTabId,
-      allowedOrigins: bridgeSwDeps.allowedOrigins
-    });
+    const pinPromise = validateBridgePin(port.sender, { readStoredLeaderTabId: bridgeSwDeps.readStoredLeaderTabId, writeStoredLeaderTabId: bridgeSwDeps.writeStoredLeaderTabId, allowedOrigins: bridgeSwDeps.allowedOrigins });
     pinPromise.catch((err) => {
       console.error("[sw] external secrets.crud pin check failed", err);
     });
@@ -2749,9 +2448,7 @@ chrome.runtime.onConnectExternal.addListener((port) => {
       try {
         pin = await pinPromise;
       } catch (err) {
-        reply({
-          error: `secrets.crud pin failed: ${err instanceof Error ? err.message : String(err)}`
-        });
+        reply({ error: `secrets.crud pin failed: ${err instanceof Error ? err.message : String(err)}` });
         return;
       }
       if (!pin.ok) {
@@ -2771,11 +2468,7 @@ chrome.runtime.onConnectExternal.addListener((port) => {
     return;
   }
   if (port.name === "mount.sign-and-forward") {
-    const pinPromise = validateBridgePin(port.sender, {
-      readStoredLeaderTabId: bridgeSwDeps.readStoredLeaderTabId,
-      writeStoredLeaderTabId: bridgeSwDeps.writeStoredLeaderTabId,
-      allowedOrigins: bridgeSwDeps.allowedOrigins
-    });
+    const pinPromise = validateBridgePin(port.sender, { readStoredLeaderTabId: bridgeSwDeps.readStoredLeaderTabId, writeStoredLeaderTabId: bridgeSwDeps.writeStoredLeaderTabId, allowedOrigins: bridgeSwDeps.allowedOrigins });
     pinPromise.catch((err) => {
       console.error("[sw] external mount.sign-and-forward pin check failed", err);
     });
@@ -2787,9 +2480,7 @@ chrome.runtime.onConnectExternal.addListener((port) => {
       try {
         pin = await pinPromise;
       } catch (err) {
-        replyError(
-          `mount.sign-and-forward pin failed: ${err instanceof Error ? err.message : String(err)}`
-        );
+        replyError(`mount.sign-and-forward pin failed: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
       if (!pin.ok) {
@@ -2816,14 +2507,9 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === CHERRY_PANEL_PORT_NAME) {
     chrome.action.setBadgeText({ text: "" }).catch(() => {
     });
-    handleCherryPanelConnect(port, {
-      ensureLeaderTab,
-      reloadLeaderTabIfExists,
-      focusLeaderTab,
-      openSettingsOnLeader: () => {
-        postOpenSettingsToWelcomedLeaderPorts();
-      }
-    }).catch((err) => console.error("[slicc-sw] handleCherryPanelConnect failed", err));
+    handleCherryPanelConnect(port, { ensureLeaderTab, reloadLeaderTabIfExists, focusLeaderTab, openSettingsOnLeader: () => {
+      postOpenSettingsToWelcomedLeaderPorts();
+    } }).catch((err) => console.error("[slicc-sw] handleCherryPanelConnect failed", err));
     return;
   }
   if (port.name !== "fetch-proxy.fetch") return;
@@ -2968,20 +2654,12 @@ function runSecretsPeek(msg, sendResponse) {
     try {
       const sessionRec = sessionSecretStore.getRecord(name);
       if (sessionRec) {
-        sendResponse({
-          record: {
-            name,
-            preview: previewSecret(sessionRec.value),
-            domains: sessionRec.domains
-          }
-        });
+        sendResponse({ record: { name, preview: previewSecret(sessionRec.value), domains: sessionRec.domains } });
         return;
       }
       const all = await listSecretsWithValues(storageLocal);
       const found = all.find((e) => e.name === name);
-      sendResponse({
-        record: found ? { name, preview: previewSecret(found.value), domains: found.domains } : void 0
-      });
+      sendResponse({ record: found ? { name, preview: previewSecret(found.value), domains: found.domains } : void 0 });
     } catch (err) {
       console.error("[sw] secrets.peek failed", err);
       sendResponse({ record: void 0, error: errMsg(err) });
@@ -3017,10 +2695,7 @@ function runSecretsSetDomains(msg, sendResponse) {
 }
 async function runMaskOauthTokenWrite(providerId, accessToken, domains) {
   if (accessToken && domains) {
-    await chrome.storage.local.set({
-      [`oauth.${providerId}.token`]: accessToken,
-      [`oauth.${providerId}.token_DOMAINS`]: domains
-    });
+    await chrome.storage.local.set({ [`oauth.${providerId}.token`]: accessToken, [`oauth.${providerId}.token_DOMAINS`]: domains });
   }
   const pipeline = await buildSecretsPipeline();
   await pipeline.reload();
@@ -3064,35 +2739,14 @@ function runSecretsRedactExport(msg, sendResponse) {
   })();
   return true;
 }
-var SECRETS_HANDLERS = {
-  "secrets.list-masked-entries": runSecretsListMaskedEntries,
-  "secrets.scrub-tool-result": runSecretsScrubToolResult,
-  "secrets.list-with-values-for-pipeline": runSecretsListWithValuesForPipeline,
-  "secrets.list": runSecretsList,
-  "secrets.set": runSecretsSet,
-  "secrets.delete": runSecretsDelete,
-  "secrets.session.set": runSecretsSessionSet,
-  "secrets.session.list": runSecretsSessionList,
-  "secrets.peek": runSecretsPeek,
-  "secrets.set-domains": runSecretsSetDomains,
-  "secrets.mask-oauth-token": runSecretsMaskOauthToken,
-  "secrets.redact-export": runSecretsRedactExport
-};
+var SECRETS_HANDLERS = { "secrets.list-masked-entries": runSecretsListMaskedEntries, "secrets.scrub-tool-result": runSecretsScrubToolResult, "secrets.list-with-values-for-pipeline": runSecretsListWithValuesForPipeline, "secrets.list": runSecretsList, "secrets.set": runSecretsSet, "secrets.delete": runSecretsDelete, "secrets.session.set": runSecretsSessionSet, "secrets.session.list": runSecretsSessionList, "secrets.peek": runSecretsPeek, "secrets.set-domains": runSecretsSetDomains, "secrets.mask-oauth-token": runSecretsMaskOauthToken, "secrets.redact-export": runSecretsRedactExport };
 function isSecretsMessageType(type) {
   return Object.hasOwn(SECRETS_HANDLERS, type);
 }
-chrome.runtime.onMessage.addListener(
-  (msg, _sender, sendResponse) => {
-    const type = getMsgType(msg);
-    if (type === void 0 || !isSecretsMessageType(type)) return false;
-    const handler = SECRETS_HANDLERS[type];
-    return handler(msg, sendResponse);
-  }
-);
-export {
-  appendLeaderExtIdParam,
-  getLeaderTabOrigin,
-  getLeaderTabUrl,
-  getLeaderTabUrlGlob,
-  leaderUrlHasExtId
-};
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  const type = getMsgType(msg);
+  if (type === void 0 || !isSecretsMessageType(type)) return false;
+  const handler = SECRETS_HANDLERS[type];
+  return handler(msg, sendResponse);
+});
+export { appendLeaderExtIdParam, getLeaderTabOrigin, getLeaderTabUrl, getLeaderTabUrlGlob, leaderUrlHasExtId };

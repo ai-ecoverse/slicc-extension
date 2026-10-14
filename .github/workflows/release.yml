@@ -60,13 +60,10 @@ jobs:
 
       - run: npm ci
 
-      - name: Build extension
-        run: npm run build
-
       - name: Detect release version
         id: version
         run: |
-          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
           if [ -z "$TAG" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -89,62 +86,4 @@ jobs:
           CHROME_WEB_STORE_FORCE_CANCEL_PENDING: ${{ vars.CHROME_WEB_STORE_FORCE_CANCEL_PENDING }}
           CHROME_WEB_STORE_SKIP_REVIEW: ${{ vars.CHROME_WEB_STORE_SKIP_REVIEW }}
           CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON }}
-        run: |
-          set -euo pipefail
-          if [ -z "${CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON:-}" ]; then
-            echo "No service account configured — skipping Chrome Web Store publish"
-            exit 0
-          fi
-          SA_FILE="$(mktemp)"
-          printf '%s' "$CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON" > "$SA_FILE"
-          ACCESS_TOKEN=$(node -e "
-            const sa = require('$SA_FILE');
-            const jwt = require('jsonwebtoken');
-            const now = Math.floor(Date.now()/1000);
-            const token = jwt.sign({
-              iss: sa.client_email,
-              scope: 'https://www.googleapis.com/auth/chromewebstore',
-              aud: 'https://oauth2.googleapis.com/token',
-              iat: now,
-              exp: now + 3600,
-            }, sa.private_key, { algorithm: 'RS256' });
-            fetch('https://oauth2.googleapis.com/token', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-              body: 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=' + token,
-            }).then(r => r.json()).then(d => process.stdout.write(d.access_token));
-          " 2>/dev/null || true)
-          rm -f "$SA_FILE"
-          if [ -z "$ACCESS_TOKEN" ]; then
-            echo "Failed to obtain access token — skipping publish"
-            exit 1
-          fi
-          ITEM_ID="${CHROME_WEB_STORE_ITEM_ID}"
-          echo "Uploading to Chrome Web Store item $ITEM_ID"
-          UPLOAD=$(curl -sf -X PUT \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "x-goog-api-version: 2" \
-            -T artifacts/slicc-extension.zip \
-            "https://www.googleapis.com/upload/chromewebstore/v1.1/items/${ITEM_ID}" || true)
-          echo "$UPLOAD"
-          if echo "$UPLOAD" | grep -q '"uploadState":"FAILURE"'; then
-            echo "Upload failed"
-            exit 1
-          fi
-          PUBLISH_BODY="{}"
-          if [ -n "${CHROME_WEB_STORE_DEPLOY_PERCENTAGE:-}" ]; then
-            PUBLISH_BODY="{\"deployPercentage\": ${CHROME_WEB_STORE_DEPLOY_PERCENTAGE}}"
-          fi
-          echo "Publishing item $ITEM_ID"
-          PUBLISH=$(curl -sf -X POST \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "x-goog-api-version: 2" \
-            -H "Content-Type: application/json" \
-            -d "$PUBLISH_BODY" \
-            "https://www.googleapis.com/chromewebstore/v1.1/items/${ITEM_ID}/publish" || true)
-          echo "$PUBLISH"
-          if echo "$PUBLISH" | grep -q '"status":\["OK"\]'; then
-            echo "Published successfully"
-          else
-            echo "Publish response — review needed or already published"
-          fi
+        run: node scripts/cws-publish.mjs

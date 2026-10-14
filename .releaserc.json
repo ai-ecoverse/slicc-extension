@@ -6,7 +6,7 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "node scripts/build-six.mjs && node scripts/strip-comments.mjs && node scripts/pack.mjs ${nextRelease.version}"
+        "prepareCmd": "node scripts/pack.mjs ${nextRelease.version}"
       }
     ],
     [
