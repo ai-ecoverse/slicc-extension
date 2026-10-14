@@ -1,5 +1,5 @@
 import { listen, trusted } from './cdp.js';
-import './six-sw.js';
+import('./six-sw.js').catch((e) => console.error('six-sw.js failed:', e));
 
 const dnr = chrome.declarativeNetRequest;
 const restored = new Set(['cookie', 'origin', 'referer', 'user-agent']);

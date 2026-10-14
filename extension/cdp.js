@@ -372,7 +372,8 @@ function openCdp(port, api) {
 }
 
 export function listen(port, extensionId, api) {
-  if (port.name !== 'slicc-fetch' || !trusted(port.sender, extensionId)) {
+  if (port.name !== 'slicc-fetch') return null;
+  if (!trusted(port.sender, extensionId)) {
     port.disconnect();
     return null;
   }
