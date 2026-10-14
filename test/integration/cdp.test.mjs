@@ -801,7 +801,7 @@ test('securityOrigin in Page.frameNavigated triggers detach (S7-1)', async () =>
     params: { targetId: '8', flatten: true },
   });
   api.fire(8, 'Page.frameNavigated', {
-    frame: { url: 'https://other.test/', securityOrigin: 'https://vault.sliccy.ai' },
+    frame: { id: 'f1', url: 'https://vault.sliccy.ai/', securityOrigin: 'https://vault.sliccy.ai' },
   });
   await cdp.settled();
   assert.equal(connection.posted.at(-1).method, 'Target.detachedFromTarget');
@@ -816,11 +816,55 @@ test('Runtime.executionContextCreated with protected origin triggers detach (S7-
     method: 'Target.attachToTarget',
     params: { targetId: '8', flatten: true },
   });
+  api.fire(8, 'Page.frameNavigated', {
+    frame: { id: 'main-frame-1', url: 'https://other.test/', securityOrigin: 'https://other.test' },
+  });
+  await cdp.settled();
   api.fire(8, 'Runtime.executionContextCreated', {
-    context: { id: 1, origin: 'https://vault.sliccy.ai', auxData: { isDefault: true } },
+    context: {
+      id: 1,
+      origin: 'https://vault.sliccy.ai',
+      auxData: { isDefault: true, frameId: 'main-frame-1' },
+    },
   });
   await cdp.settled();
   assert.equal(connection.posted.at(-1).method, 'Target.detachedFromTarget');
+  cdp.close();
+});
+
+test('a protected iframe does not detach the tab (Codex P2)', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  api.fire(8, 'Page.frameNavigated', {
+    frame: { id: 'main-frame-1', url: 'https://other.test/', securityOrigin: 'https://other.test' },
+  });
+  await cdp.settled();
+  api.fire(8, 'Runtime.executionContextCreated', {
+    context: {
+      id: 2,
+      origin: 'https://vault.sliccy.ai',
+      auxData: { isDefault: true, frameId: 'iframe-1' },
+    },
+  });
+  await cdp.settled();
+  const last = connection.posted.at(-1);
+  assert.notEqual(
+    last.method,
+    'Target.detachedFromTarget',
+    'iframe context must not detach the tab'
+  );
+  const eval1 = await command(cdp, connection, {
+    id: 2,
+    method: 'Runtime.evaluate',
+    params: { expression: '1' },
+    sessionId: '8',
+  });
+  assert.deepEqual(eval1.result, { value: 2 });
   cdp.close();
 });
 

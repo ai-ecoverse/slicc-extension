@@ -131,6 +131,7 @@ function forget(state, tabId) {
   state.ownedTabs.delete(tabId);
   state.attachRefCounts.delete(tabId);
   state.pageUrl.delete(tabId);
+  state.mainFrameId.delete(tabId);
   for (const [sessionId, attached] of state.sessionToTab) {
     if (attached === tabId) state.sessionToTab.delete(sessionId);
   }
@@ -272,6 +273,7 @@ function openCdp(port, api) {
     attachRefCounts: new Map(),
     ownedTabs: new Set(),
     pageUrl: new Map(),
+    mainFrameId: new Map(),
   };
   let closed = false;
   let chain = Promise.resolve();
@@ -327,6 +329,7 @@ function openCdp(port, api) {
   function onEvent(source, method, params) {
     const tabId = source?.tabId;
     if (method === 'Page.frameNavigated' && !params?.frame?.parentId) {
+      state.mainFrameId.set(tabId, textOf(params?.frame?.id));
       const origin = textOf(params?.frame?.securityOrigin);
       if (protectedOrigin(origin)) {
         release(tabId);
@@ -335,7 +338,15 @@ function openCdp(port, api) {
     }
     if (method === 'Runtime.executionContextCreated') {
       const ctx = params?.context;
-      if (ctx?.auxData?.isDefault && protectedOrigin(textOf(ctx?.origin))) {
+      const frameId = textOf(ctx?.auxData?.frameId);
+      const mainId = state.mainFrameId.get(tabId);
+      if (
+        ctx?.auxData?.isDefault &&
+        frameId &&
+        mainId &&
+        frameId === mainId &&
+        protectedOrigin(textOf(ctx?.origin))
+      ) {
         release(tabId);
         return;
       }

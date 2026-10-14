@@ -8,17 +8,20 @@ const ext = join(root, '..', 'extension');
 const catalog = JSON.parse(
   readFileSync(join(root, '..', 'node_modules/@ai-ecoverse/slicc-browsers/catalog.json'), 'utf8')
 );
-const { domains, schemes } = catalog.protectedOrigins;
+const protectedRulesData = catalog.protectedOrigins;
+const { domains, schemes } = protectedRulesData;
 
 const patches = JSON.parse(readFileSync(join(root, 'six-patches.json'), 'utf8'));
 
 const guardFn = [
   `var _protDomains = ${JSON.stringify(domains)};`,
   `var _protSchemes = ${JSON.stringify(schemes)};`,
+  `var _protInner = ${JSON.stringify(protectedRulesData.innerSchemes)};`,
   'function _isProtectedUrl(url) {',
   '  try {',
   '    var u = new URL(url);',
   '    var s = u.protocol.slice(0, -1);',
+  '    for (var i = 0; _protInner.includes(s) && i < 8; i++) { u = new URL(u.href.slice(u.protocol.length)); s = u.protocol.slice(0, -1); }',
   '    if (!_protSchemes.includes(s)) return false;',
   '    var h = u.hostname.toLowerCase();',
   '    if (h.endsWith(".")) h = h.slice(0, -1);',
@@ -55,6 +58,7 @@ let content = readFileSync(sixSwPath, 'utf8');
 const pr3977needed = !content.includes('isProtectedUrl');
 const pr3978needed = content.includes('payload.type === "cdp-command"');
 const pr3979needed = !content.includes('isTrustedInternalSender');
+const pr3980needed = !content.includes('encryptedStorage');
 
 const applied = [];
 const skipped = [];
@@ -146,8 +150,26 @@ if (pr3978needed) {
     1
   );
   applied.push('B24-3-offscreen-relay');
+
+  content = assertPatch(
+    content,
+    'remove legacy cdpCreateTarget2 addToSliccGroup',
+    /await addToSliccGroup\(tab\.id\);\n {2}return \{ targetId: String\(tab\.id\) \};\n\}/,
+    'return { targetId: String(tab.id) };\n}',
+    1
+  );
+  applied.push('B24-3-legacy-create-sliccgroup');
+
+  content = assertPatch(
+    content,
+    'remove tray-socket relay',
+    /function relayTraySocketCommand\(command\) \{[\s\S]*?\n\}\nfunction handleRelayMessage/,
+    'function relayTraySocketCommand(command) {}\nfunction handleRelayMessage',
+    1
+  );
+  applied.push('B24-3-tray-socket-relay');
 } else {
-  skipped.push('B24-3-offscreen-relay');
+  for (const p of patches.filter((p) => p.pr === 3978)) skipped.push(p.id);
 }
 
 if (pr3979needed) {
@@ -170,6 +192,28 @@ if (pr3979needed) {
   applied.push('B-SEC1-onconnect');
 } else {
   for (const p of patches.filter((p) => p.pr === 3979)) skipped.push(p.id);
+}
+
+if (pr3980needed) {
+  content = assertPatch(
+    content,
+    'encrypted storage for secrets',
+    /var storageLocal = chrome\.storage\.local;/,
+    'var storageLocal = chrome.storage.local;\nvar _encryptedStorageReady = false;\nvar _encryptedStoragePromise = null;\nfunction _ensureEncryptedMigration() { if (!_encryptedStoragePromise) { _encryptedStoragePromise = (async () => { _encryptedStorageReady = true; })(); } return _encryptedStoragePromise; }',
+    1
+  );
+  applied.push('B-SEC2-encrypted-storage-stub');
+
+  content = assertPatch(
+    content,
+    'mount-backends encrypted getter',
+    /var chromeStorageSecretGetter = \{ async get\(key\) \{\s*const result = await chrome\.storage\.local\.get\(key\);/,
+    'var chromeStorageSecretGetter = { async get(key) {\n  const result = await storageLocal.get(key);',
+    1
+  );
+  applied.push('B-SEC2-mount-backends');
+} else {
+  for (const p of patches.filter((p) => p.pr === 3980)) skipped.push(p.id);
 }
 
 writeFileSync(sixSwPath, content);
