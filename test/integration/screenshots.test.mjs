@@ -29,13 +29,14 @@ async function launchWithExtension(extensionDir) {
     executablePath: chromium.executablePath(),
     headless: false,
     args: [
+      '--headless=new',
       `--load-extension=${extensionDir}`,
       `--disable-extensions-except=${extensionDir}`,
       '--no-first-run',
       '--no-default-browser-check',
       '--ignore-certificate-errors',
     ],
-    ignoreDefaultArgs: ['--disable-extensions'],
+    ignoreDefaultArgs: ['--disable-extensions', '--headless'],
   });
   return { browser, dir };
 }
