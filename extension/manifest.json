@@ -2,14 +2,34 @@
   "manifest_version": 3,
   "name": "slicc",
   "version": "0.0.0",
-  "description": "Lifts CORS for SLICC pages on sliccy.ai, so they reach the whole web, and bridges the Chrome debugger to them.",
+  "description": "Bridges your browser to SLICC: lifts CORS for sliccy.ai pages, proxies the Chrome debugger, and connects the hosted leader tab.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuc3ZpsoTSbWemItL7LsKp4O4gcjiWPM641pQyJ1CC3Nqr3qsAd9RM3ekPLUsnjVc4nnuGFq5iiYWeDx+WEpt78L0A+mAJBCdWjLRTo0xZvEJRuDU9ky9zEmy0vK6neyj0tBjRKHbi9m+T2P3NDFbP9IhZ/RsSzE9L/Dx+0t/uHG1la0LejvWfh/cnQKymGtkDJ+aC98zQ8oj4R9X8Q1BxN8qia9dfcuKFyFT9+dYdtf2ZwF7hNrmx25a+VSfMqb0TbGVV5g+/1P8wdPB9YsFihhkcd+8EQN9oiV9EH0+wUUlQFC+PKlqz11hsTzNRtTuPUi+xJXOBavcE7VXiiX0TwIDAQAB",
   "minimum_chrome_version": "140",
-  "permissions": ["declarativeNetRequestWithHostAccess", "identity", "debugger"],
+  "permissions": [
+    "debugger",
+    "tabs",
+    "tabGroups",
+    "identity",
+    "storage",
+    "webRequest",
+    "declarativeNetRequestWithHostAccess",
+    "notifications",
+    "sidePanel"
+  ],
   "host_permissions": ["<all_urls>"],
+  "options_ui": {
+    "page": "secrets.html",
+    "open_in_tab": true
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
+  },
+  "externally_connectable": {
+    "matches": ["https://www.sliccy.ai/*", "http://localhost/*"]
   },
   "content_scripts": [
     {
@@ -27,7 +47,16 @@
   "declarative_net_request": {
     "rule_resources": [{ "id": "cors", "enabled": true, "path": "rules.json" }]
   },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "action": {
     "default_title": "slicc"
+  },
+  "icons": {
+    "16": "logos/sliccy-color-1scoops-16x16.png",
+    "32": "logos/sliccy-color-1scoops-32x32.png",
+    "48": "logos/sliccy-color-1scoops-48x48.png",
+    "128": "logos/sliccy-color-1scoops-128x128.png"
   }
 }
