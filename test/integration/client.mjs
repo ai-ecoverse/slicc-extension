@@ -60,7 +60,22 @@ export function install() {
   async function close(targetId) {
     await attempt('Target.closeTarget', { targetId });
   }
+  const signals = new Set([
+    'Page.frameRequestedNavigation',
+    'Page.frameStartedNavigating',
+    'Page.frameScheduledNavigation',
+    'Target.detachedFromTarget',
+  ]);
+  function content(list) {
+    return list.filter(
+      (event) =>
+        !signals.has(event.method) &&
+        !event.method.startsWith('Target.') &&
+        !(event.method === 'Network.requestWillBeSent' && event.params?.type === 'Document')
+    );
+  }
   globalThis.h = {
+    content,
     cdp,
     events,
     sleep,

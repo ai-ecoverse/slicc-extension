@@ -22,6 +22,9 @@ const guardFn = [
   `var _PROTECTED_REFUSAL = ${JSON.stringify(protectedRulesData.refusal)};`,
   'function _isProtectedUrl(url) { return typeof url === "string" && url !== "" && _protGuard.url(url); }',
   'function _isProtectedTarget(url, previous, opener) { return _protGuard.target({ url: typeof url === "string" ? url : "", previous: previous === true, opener: opener }); }',
+  'async function _openerStateOf(tab, getTab) { if (typeof tab.openerTabId !== "number") return void 0; try { var opener = await getTab(tab.openerTabId); if (!opener) return "unknown"; return _isProtectedTarget(opener.url ?? "", false, "unknown") || _isProtectedUrl(opener.pendingUrl) ? "protected" : "unprotected"; } catch { return "unknown"; } }',
+  'async function _isProtectedTab(tab, getTab) { if (!tab) return false; if (_isProtectedUrl(tab.pendingUrl)) return true; var url = tab.url ?? ""; if (_isProtectedUrl(url)) return true; return _isProtectedTarget(url, false, await _openerStateOf(tab, getTab)); }',
+  'async function _getTabOrUndefined(tabId) { try { return await chrome.tabs.get(tabId); } catch { return void 0; } }',
 ].join('\n');
 
 function patchAndCount(source, pattern, replacement) {
@@ -106,7 +109,7 @@ if (pr3977needed) {
   apply(
     'B24-1-attach-bridge',
     /(async function cdpAttachToTarget\(params, state2, deps\) \{\s*const targetId = readTargetIdParam\(params\);\s*const tabId = parseInt\(targetId, 10\);\s*if \(!Number\.isFinite\(tabId\) \|\| tabId <= 0\) \{\s*throw new Error\(`Invalid targetId: \$\{targetId\}`\);\s*\})(\s*if \(!state2\.ownedTabs\.has\(tabId\)\) \{\s*const attachedByThisPort = await deps\.attachDebugger\(tabId\);\s*if \(attachedByThisPort\) state2\.ownedTabs\.add\(tabId\);\s*\})/,
-    `$1\n  { const _tab = await deps.getTab(tabId); if (_tab && (_isProtectedTarget(_tab.url ?? "", false, "unknown") || _isProtectedUrl(_tab.pendingUrl))) ${refuse} }$2\n  { const _post = await deps.getTab(tabId); if (_post && (_isProtectedTarget(_post.url ?? "", false, "unknown") || _isProtectedUrl(_post.pendingUrl))) { if (state2.ownedTabs.has(tabId)) { state2.ownedTabs.delete(tabId); await deps.detachDebugger(tabId); } ${refuse} } }`
+    `$1\n  if (await _isProtectedTab(await deps.getTab(tabId), deps.getTab)) ${refuse}$2\n  if (await _isProtectedTab(await deps.getTab(tabId), deps.getTab)) { if (state2.ownedTabs.has(tabId)) { state2.ownedTabs.delete(tabId); await deps.detachDebugger(tabId); } ${refuse} }`
   );
 
   apply(
@@ -124,7 +127,7 @@ if (pr3977needed) {
   apply(
     'B24-1-attach-legacy',
     /(async function cdpAttachToTarget2\(params\) \{\s*const targetId = params\["targetId"\];\s*const tabId = tabIdFromTargetId\(targetId\);)(\s*await acquireDebuggerAttachment\(tabId, "legacy"\);)/,
-    `$1\n  try { const _tab = await chrome.tabs.get(tabId); if (_tab && _isProtectedTarget(_tab.url ?? "", false, "unknown")) ${refuse} } catch (_e) { if (_e instanceof Error && _e.message === _PROTECTED_REFUSAL) throw _e; }$2\n  try { const _post = await chrome.tabs.get(tabId); if (_post && _isProtectedTarget(_post.url ?? "", false, "unknown")) { sessionToTab.delete(targetId); await releaseDebuggerAttachment(tabId, "legacy"); ${refuse} } } catch (_e) { if (_e instanceof Error && _e.message === _PROTECTED_REFUSAL) throw _e; }`
+    `$1\n  if (await _isProtectedTab(await _getTabOrUndefined(tabId), _getTabOrUndefined)) ${refuse}$2\n  if (await _isProtectedTab(await _getTabOrUndefined(tabId), _getTabOrUndefined)) { sessionToTab.delete(targetId); await releaseDebuggerAttachment(tabId, "legacy"); ${refuse} }`
   );
 
   apply(

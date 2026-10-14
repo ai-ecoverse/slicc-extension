@@ -183,7 +183,9 @@ function open(url = 'https://seven.sliccy.ai/play') {
 }
 
 function user(api) {
-  return api.sent.filter((sent) => !['Fetch.enable', 'Page.getFrameTree'].includes(sent.method));
+  return api.sent.filter(
+    (sent) => !['Fetch.enable', 'Page.getFrameTree', 'Target.setAutoAttach'].includes(sent.method)
+  );
 }
 
 async function command(cdp, connection, message) {
@@ -349,6 +351,15 @@ test('target commands list, open, activate, and close tabs', async () => {
   const { connection, api, cdp } = open();
   const listed = await command(cdp, connection, { id: 1, method: 'Target.getTargets' });
   assert.deepEqual(listed.result.targetInfos, [
+    {
+      targetId: '7',
+      type: 'page',
+      title: 'fake slicc',
+      url: 'https://seven.sliccy.ai/',
+      attached: false,
+      canAccessOpener: false,
+      active: true,
+    },
     {
       targetId: '8',
       type: 'page',
@@ -587,11 +598,11 @@ test('pending url, opener, and a later navigation stay off protected origins', a
   });
   await cdp.settled();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(api.sent.at(-1), {
-    tabId: 8,
-    method: 'Fetch.failRequest',
-    params: { requestId: 'interception-1', errorReason: 'BlockedByClient' },
-  });
+  assert.equal(
+    api.sent.some((sent) => sent.method === 'Fetch.failRequest'),
+    false,
+    'the backend detaches instead of answering'
+  );
   assert.equal(
     connection.posted.some((message) => message.method === 'Fetch.requestPaused'),
     false
@@ -663,7 +674,7 @@ test('a sliccy.ai page can list and open targets, and flatten is required', asyn
       seven: targetInfos.some((target) => target.url.startsWith('https://seven.sliccy.ai/')),
     };
   });
-  assert.deepEqual(listed, { some: true, seven: false });
+  assert.deepEqual(listed, { some: true, seven: true });
   const seven = await sevenTab(page);
   assert.match(seven, /^\d+$/);
   const rejected = await page.evaluate(async (targetId) => {
@@ -1040,7 +1051,7 @@ function events(connection, method) {
   return connection.posted.filter((message) => message.method === method);
 }
 
-test('S7-3 Target.getTargetInfo reports type, url and openerId, and refuses protected tabs', async () => {
+test('S7-3 Target.getTargetInfo reports type, url and openerId for every tab', async () => {
   const { connection, api, cdp } = open();
   api.locations = new Map([
     [8, { url: 'https://other.test/', title: 'other', openerTabId: 11 }],
@@ -1071,14 +1082,24 @@ test('S7-3 Target.getTargetInfo reports type, url and openerId, and refuses prot
     method: 'Target.getTargetInfo',
     params: { targetId: '7' },
   });
-  assert.equal(seven.error, refused);
+  assert.equal(
+    seven.result.targetInfo.url,
+    'https://seven.sliccy.ai/',
+    'the guard sees the real url'
+  );
   api.locations.set(12, { url: 'about:blank', openerTabId: 7 });
   const inherited = await command(cdp, connection, {
     id: 4,
     method: 'Target.getTargetInfo',
     params: { targetId: '12' },
   });
-  assert.equal(inherited.error, refused);
+  assert.equal(inherited.result.targetInfo.openerId, '7', 'the guard sees the protected opener');
+  const attach = await command(cdp, connection, {
+    id: 7,
+    method: 'Target.attachToTarget',
+    params: { targetId: '12', flatten: true },
+  });
+  assert.equal(attach.error, refused);
   const browser = await command(cdp, connection, { id: 5, method: 'Target.getTargetInfo' });
   assert.equal(browser.result.targetInfo.type, 'browser');
   const version = await command(cdp, connection, { id: 6, method: 'Browser.getVersion' });
@@ -1087,7 +1108,7 @@ test('S7-3 Target.getTargetInfo reports type, url and openerId, and refuses prot
   cdp.close();
 });
 
-test('S7-3 setDiscoverTargets emits created, changed and destroyed, omitting protected tabs', async () => {
+test('S7-3 setDiscoverTargets emits created, changed and destroyed, and detaches tabs that become protected', async () => {
   const { connection, api, cdp } = open();
   api.locations = new Map([[8, { url: 'https://other.test/', title: 'other' }]]);
   const on = await command(cdp, connection, {
@@ -1098,17 +1119,20 @@ test('S7-3 setDiscoverTargets emits created, changed and destroyed, omitting pro
   assert.deepEqual(on.result, {});
   assert.deepEqual(
     events(connection, 'Target.targetCreated').map((e) => e.params.targetInfo.targetId),
-    ['8']
+    ['7', '8']
   );
   api.born({ id: 20, url: '', pendingUrl: 'https://example.test/', openerTabId: 8 });
   api.born({ id: 21, url: '', pendingUrl: 'https://vault.sliccy.ai/' });
   await tick();
-  const created = events(connection, 'Target.targetCreated').map((e) => e.params.targetInfo);
+  const created = events(connection, 'Target.targetCreated')
+    .map((e) => e.params.targetInfo)
+    .sort((a, b) => Number(a.targetId) - Number(b.targetId));
   assert.deepEqual(
     created.map((info) => info.targetId),
-    ['8', '20']
+    ['7', '8', '20', '21']
   );
-  assert.equal(created[1].openerId, '8');
+  assert.equal(created[2].openerId, '8');
+  assert.equal(created[3].url, 'https://vault.sliccy.ai/');
   api.visit(20, { url: 'https://example.test/a', title: 'a' });
   await tick();
   api.visit(20, { url: 'https://example.test/b', title: 'a' });
@@ -1122,29 +1146,28 @@ test('S7-3 setDiscoverTargets emits created, changed and destroyed, omitting pro
     method: 'Target.attachToTarget',
     params: { targetId: '20', flatten: true },
   });
-  api.visit(20, { url: 'https://seven.sliccy.ai/x?k=SECRET' });
+  api.visit(20, { url: 'https://seven.sliccy.ai/x' });
   await tick();
-  assert.deepEqual(
-    events(connection, 'Target.targetDestroyed').map((e) => e.params.targetId),
-    ['20']
+  assert.equal(
+    events(connection, 'Target.targetInfoChanged').at(-1).params.targetInfo.url,
+    'https://seven.sliccy.ai/x'
   );
   assert.deepEqual(
     events(connection, 'Target.detachedFromTarget').map((e) => e.params.sessionId),
     ['20']
   );
-  assert.equal(JSON.stringify(connection.posted).includes('SECRET'), false);
-  api.visit(21, { url: 'https://vault.sliccy.ai/y' });
-  await tick();
-  assert.equal(
-    events(connection, 'Target.targetDestroyed').length,
-    1,
-    'never-seen tabs stay silent'
-  );
+  const after = await command(cdp, connection, {
+    id: 4,
+    method: 'Runtime.evaluate',
+    params: {},
+    sessionId: '20',
+  });
+  assert.match(after.error, /No tab attached/);
   api.gone(8);
   await tick();
   assert.deepEqual(
     events(connection, 'Target.targetDestroyed').map((e) => e.params.targetId),
-    ['20', '8']
+    ['8']
   );
   await command(cdp, connection, {
     id: 3,
@@ -1153,7 +1176,7 @@ test('S7-3 setDiscoverTargets emits created, changed and destroyed, omitting pro
   });
   api.born({ id: 22, url: 'https://example.test/' });
   await tick();
-  assert.equal(events(connection, 'Target.targetCreated').length, 2);
+  assert.equal(events(connection, 'Target.targetCreated').length, 4);
   cdp.close();
 });
 
@@ -1415,47 +1438,80 @@ test('shield owns Fetch: protected requests never reach the client, client patte
     request: { url: 'https://vault.sliccy.ai/api' },
   });
   api.fire(8, 'Fetch.requestPaused', {
-    requestId: 'i3',
-    frameId: 'child',
-    resourceType: 'Document',
-    request: { url: 'https://seven.sliccy.ai/frame' },
-  });
-  api.fire(8, 'Fetch.requestPaused', {
     requestId: 'i4',
     frameId: 'main',
     resourceType: 'Image',
     request: { url: 'https://cdn.test/a.png' },
   });
   await tick();
-  const answered = user(api)
-    .slice(-3)
-    .map((s) => [s.method, s.params]);
-  assert.deepEqual(answered, [
-    ['Fetch.continueRequest', { requestId: 'i2' }],
-    ['Fetch.failRequest', { requestId: 'i3', errorReason: 'BlockedByClient' }],
-    ['Fetch.continueRequest', { requestId: 'i4' }],
-  ]);
-  assert.equal(events(connection, 'Fetch.requestPaused').length, 2);
-  assert.equal(
-    events(connection, 'Target.detachedFromTarget').length,
-    0,
-    'a subframe keeps the tab'
+  assert.deepEqual(
+    user(api)
+      .slice(-2)
+      .map((s) => [s.method, s.params]),
+    [
+      ['Fetch.continueRequest', { requestId: 'i2' }],
+      ['Fetch.continueRequest', { requestId: 'i4' }],
+    ]
   );
+  assert.equal(events(connection, 'Fetch.requestPaused').length, 2);
+  assert.equal(events(connection, 'Target.detachedFromTarget').length, 0);
+  const sentBefore = user(api).length;
   api.fire(8, 'Fetch.requestPaused', {
-    requestId: 'i5',
-    frameId: 'main',
+    requestId: 'i3',
+    frameId: 'child',
     resourceType: 'Document',
-    request: { url: 'https://vault.sliccy.ai/' },
-    redirectedRequestId: 'i1',
+    request: { url: 'https://seven.sliccy.ai/frame' },
   });
   await tick();
-  assert.deepEqual(user(api).at(-1), {
-    tabId: 8,
-    method: 'Fetch.failRequest',
-    params: { requestId: 'i5', errorReason: 'BlockedByClient' },
-  });
-  assert.equal(events(connection, 'Target.detachedFromTarget').length, 2);
+  assert.equal(user(api).length, sentBefore, 'the backend detaches instead of answering');
+  assert.deepEqual(api.detached, [8], 'the debugger detaches before the document commits');
+  assert.deepEqual(
+    events(connection, 'Target.detachedFromTarget').map((e) => e.params.sessionId),
+    ['8', second]
+  );
   assert.equal(events(connection, 'Fetch.requestPaused').length, 2);
+  cdp.close();
+});
+
+test('shield detaches before a redirect hop into a protected origin commits', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  await command(cdp, connection, {
+    id: 2,
+    method: 'Fetch.enable',
+    params: { patterns: [{ urlPattern: '*' }] },
+    sessionId: '8',
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'r1',
+    resourceType: 'Document',
+    request: { url: 'https://other.test/redirect' },
+  });
+  await tick();
+  await command(cdp, connection, {
+    id: 3,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'r1' },
+    sessionId: '8',
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'r2',
+    resourceType: 'Document',
+    redirectedRequestId: 'r1',
+    request: { url: 'https://vault.sliccy.ai/landing?k=SECRET' },
+  });
+  await tick();
+  assert.deepEqual(api.detached, [8]);
+  assert.deepEqual(
+    events(connection, 'Fetch.requestPaused').map((e) => e.params.requestId),
+    ['r1']
+  );
+  assert.equal(JSON.stringify(connection.posted).includes('SECRET'), false);
   cdp.close();
 });
 

@@ -86,7 +86,9 @@ for (const [name, origin] of Object.entries(targets)) {
     const guarded = await initScriptThenNavigate(page, tag, `${origin}/landing?k=SECRET`);
     assert.equal(await settledOff(page, guarded.sessionId), true, 'session released');
     assert.equal(await beaconed(tag, 3000), false, 'no beacon from the protected origin');
-    const leaked = await page.evaluate(() => JSON.stringify(h.events).includes('SECRET'));
+    const leaked = await page.evaluate(() =>
+      JSON.stringify(h.content(h.events)).includes('SECRET')
+    );
     assert.equal(leaked, false);
     await page.evaluate((id) => h.close(id), guarded.targetId);
   });
@@ -149,6 +151,11 @@ for (const [name, origin] of Object.entries(targets)) {
           ? (await h.cdp.send('Target.getTargetInfo', { targetId: plainId })).targetInfo.openerId
           : undefined;
         const guarded = await popup(`${origin}/popup?k=SECRET`);
+        const guardedId = guarded.listed[0]?.targetId;
+        guarded.attach = guardedId
+          ? await h.attempt('Target.attachToTarget', { targetId: guardedId, flatten: true })
+          : { error: 'not listed' };
+        if (guardedId) await h.close(guardedId);
         const attachedTo = h.events
           .filter((event) => event.method === 'Target.attachedToTarget')
           .map((event) => event.params?.targetInfo?.url);
@@ -162,14 +169,12 @@ for (const [name, origin] of Object.entries(targets)) {
     assert.equal(answer.plain.created.length, 1, 'control popup is announced');
     assert.equal(answer.openerId, answer.targetId, 'control popup reports its opener');
     assert.match(answer.attached.result?.sessionId ?? '', /^\d+/, 'control popup attaches');
-    assert.deepEqual(answer.guarded.listed, [], 'protected popup is not listed');
-    assert.equal(answer.guarded.leaked, false, 'no target event shows the protected popup');
-    for (const info of answer.guarded.created) {
-      assert.ok(
-        answer.guarded.destroyed.includes(info.targetId),
-        'a popup announced while blank is destroyed once it becomes protected'
-      );
-    }
+    assert.equal(answer.guarded.listed.length, 1, 'protected popup is listed for the guard');
+    assert.equal(
+      answer.guarded.attach.error,
+      "slicc: refused: target is on seven's origin",
+      'protected popup cannot be attached'
+    );
     assert.deepEqual(answer.attachedTo, [], 'no popup comes up attached');
     assert.equal(beacons('c3-popup').length, 0, 'the init script never runs in a popup');
     const refused = await page.evaluate(async () =>
@@ -230,8 +235,7 @@ for (const [name, origin] of Object.entries(targets)) {
       decodeURIComponent(seen.search ?? '').includes('/inner')
     );
     assert.deepEqual(fromFrame, [], 'no beacon from the protected iframe');
-    assert.equal(guarded.alive, 2, 'the tab stays attached');
-    assert.equal(guarded.detached, false);
+    assert.equal(guarded.detached, true, 'the session is cut before the protected frame loads');
     await page.evaluate((id) => h.close(id), guarded.targetId);
   });
 
@@ -283,8 +287,8 @@ for (const [name, origin] of Object.entries(targets)) {
         );
         const released = await h.until(async () => h.detached(sessionId));
         await h.sleep(500);
-        const leaked = h.events
-          .slice(count)
+        const leaked = h
+          .content(h.events.slice(count))
           .filter(
             (event) =>
               JSON.stringify(event).includes('SECRET') ||
@@ -520,7 +524,10 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
       );
       const destroyed = await h.until(async () =>
         h.events.find(
-          (e) => e.method === 'Target.targetDestroyed' && e.params.targetId === popup.targetId
+          (e) =>
+            e.method === 'Target.targetInfoChanged' &&
+            e.params.targetInfo.targetId === popup.targetId &&
+            e.params.targetInfo.url.startsWith(vault)
         )
       );
       const popupDetached = await h.until(async () => h.detached(popupSession.sessionId));
@@ -538,7 +545,7 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
           (e) => e.method === 'Target.targetDestroyed' && e.params.targetId === targetId
         )
       );
-      const leaked = JSON.stringify(h.events).includes('SECRET');
+      const leaked = JSON.stringify(h.content(h.events)).includes('SECRET');
       await h.cdp.send('Target.setDiscoverTargets', { discover: false });
       return {
         version,
@@ -574,10 +581,13 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
     'targetInfoChanged on pushState'
   );
   assert.equal(answer.popupInfo.openerId, answer.targetId, 'openerId from openerTabId');
-  assert.equal(answer.destroyed, true, 'a tab that becomes protected is destroyed');
+  assert.equal(answer.destroyed, true, 'a tab that becomes protected is announced as protected');
   assert.equal(answer.popupDetached, true, 'and its session detached');
-  assert.equal(answer.refusedInfo.error, "slicc: refused: target is on seven's origin");
-  assert.equal(answer.listed, false);
+  assert.ok(
+    answer.refusedInfo.result.targetInfo.url.startsWith(targets.vault),
+    'getTargetInfo shows the guard the protected url'
+  );
+  assert.equal(answer.listed, true, 'protected tabs stay listed with their real url');
   assert.equal(answer.distinct, true, 'each attach is its own session');
   assert.equal(answer.closedBoth, true, 'detachedFromTarget for every session on close');
   assert.equal(answer.gone, true, 'targetDestroyed on close');

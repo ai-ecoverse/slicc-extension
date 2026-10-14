@@ -306,7 +306,9 @@ class Connection {
       targetId: String(tab.id),
       type: 'page',
       title: tab.title ?? '',
-      url: tab.url || tab.pendingUrl || '',
+      url: urlProtected(guard, textOf(tab.pendingUrl))
+        ? tab.pendingUrl
+        : tab.url || tab.pendingUrl || '',
       attached: this.sessionsOf(tab.id).length > 0,
       canAccessOpener: false,
     };
@@ -332,17 +334,10 @@ class Connection {
       this.post({
         method: 'Target.detachedFromTarget',
         params: { sessionId, targetId: String(tabId) },
+        sessionId,
       });
     }
     if (owned) void this.api.debugger.detach({ tabId }).catch(() => undefined);
-  }
-
-  hide(tabId) {
-    this.release(tabId);
-    if (!this.state.seen.delete(tabId)) return;
-    if (this.state.discover) {
-      this.post({ method: 'Target.targetDestroyed', params: { targetId: String(tabId) } });
-    }
   }
 
   async applyFetch(tabId) {
@@ -369,7 +364,6 @@ class Connection {
     const targetInfos = [];
     for (const tab of tabs) {
       if (typeof tab.id !== 'number') continue;
-      if (await tabBlocked(this.api, tab)) continue;
       this.state.seen.add(tab.id);
       targetInfos.push({ ...this.info(tab), active: tab.id === activeId });
     }
@@ -391,7 +385,6 @@ class Connection {
     }
     const tabId = tabFrom(params.targetId);
     const tab = await readTab(this.api, tabId);
-    await demandTab(this.api, tab);
     this.state.seen.add(tabId);
     return { targetInfo: this.info(tab) };
   }
@@ -404,7 +397,6 @@ class Connection {
     const tabs = await this.api.tabs.query({});
     for (const tab of tabs) {
       if (typeof tab.id !== 'number') continue;
-      if (await tabBlocked(this.api, tab)) continue;
       this.state.seen.add(tab.id);
       this.post({ method: 'Target.targetCreated', params: { targetInfo: this.info(tab) } });
     }
@@ -449,6 +441,7 @@ class Connection {
       this.post({
         method: 'Target.detachedFromTarget',
         params: { sessionId, targetId: String(tabId) },
+        sessionId,
       });
     }
     if (owned) {
@@ -498,6 +491,15 @@ class Connection {
       }
       const main = await this.mainFrameOf(tabId);
       if (main && !tab.mainFrameId) tab.mainFrameId = main;
+      await bounded(
+        this.send(tabId, 'Target.setAutoAttach', {
+          autoAttach: true,
+          waitForDebuggerOnStart: true,
+          flatten: true,
+        }),
+        5000,
+        'children'
+      ).catch(() => undefined);
     }
     tab.pageUrl = seen.url;
     const sessionId = this.state.sessions.has(targetId)
@@ -527,10 +529,6 @@ class Connection {
     const tab = this.tabState(tabId);
     this.state.sessions.delete(sessionId);
     tab?.sessions.delete(sessionId);
-    this.post({
-      method: 'Target.detachedFromTarget',
-      params: { sessionId, targetId: String(tabId) },
-    });
     if (tab && tab.sessions.size > 0) {
       await bounded(this.settlePaused(tabId, sessionId), 5000, 'detach').catch(() => undefined);
       await bounded(this.applyFetch(tabId), 5000, 'detach').catch(() => undefined);
@@ -608,12 +606,7 @@ class Connection {
         return;
       }
       if (params.resourceType === 'Document' && atRequest) {
-        const main = !tab.mainFrameId || !frameId || frameId === tab.mainFrameId;
-        await this.send(tabId, 'Fetch.failRequest', {
-          requestId,
-          errorReason: 'BlockedByClient',
-        }).catch(() => undefined);
-        if (main) this.release(tabId);
+        this.release(tabId);
         return;
       }
       await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
@@ -847,6 +840,37 @@ class Connection {
     }
   }
 
+  watchChild(tabId, method, p) {
+    const url = textOf(p.targetInfo?.url);
+    if (method === 'Target.attachedToTarget') {
+      if (urlProtected(guard, url)) {
+        this.release(tabId);
+        return;
+      }
+      const sessionId = textOf(p.sessionId);
+      if (!sessionId) return;
+      void this.api.debugger
+        .sendCommand({ tabId, sessionId }, 'Runtime.runIfWaitingForDebugger', {})
+        .catch(() => undefined);
+      return;
+    }
+    if (method === 'Target.targetInfoChanged' && urlProtected(guard, url)) this.release(tabId);
+  }
+
+  headsToProtected(method, p) {
+    if (method === 'Network.requestWillBeSent') {
+      return p.type === 'Document' && urlProtected(guard, textOf(p.request?.url));
+    }
+    if (
+      method === 'Page.frameRequestedNavigation' ||
+      method === 'Page.frameStartedNavigating' ||
+      method === 'Page.frameScheduledNavigation'
+    ) {
+      return urlProtected(guard, textOf(p.url));
+    }
+    return false;
+  }
+
   watchFrame(tabId, tab, frame) {
     const url = textOf(frame.url);
     const isProtected =
@@ -874,6 +898,11 @@ class Connection {
   }
 
   watch(tabId, tab, method, p) {
+    if (this.headsToProtected(method, p)) {
+      this.broadcast(tabId, method, p);
+      this.release(tabId);
+      return true;
+    }
     if (method === 'Page.frameNavigated') return this.watchFrame(tabId, tab, p.frame ?? {});
     if (method === 'Runtime.executionContextCreated') {
       return this.watchContext(tabId, tab, p.context ?? {});
@@ -903,7 +932,10 @@ class Connection {
       void this.onPaused(tabId, method, p).catch(() => undefined);
       return;
     }
-    if (method.startsWith('Target.')) return;
+    if (method.startsWith('Target.')) {
+      this.watchChild(tabId, method, p);
+      return;
+    }
     if (this.watch(tabId, tab, method, p)) return;
     if (this.contextProtected(tab, p)) return;
     this.deliver(tabId, tab, method, p);
@@ -911,10 +943,7 @@ class Connection {
 
   async announce(tab, created) {
     if (!this.state.discover || typeof tab?.id !== 'number') return;
-    if (await tabBlocked(this.api, tab)) {
-      this.hide(tab.id);
-      return;
-    }
+    if (await tabBlocked(this.api, tab)) this.release(tab.id);
     const known = this.state.seen.has(tab.id);
     this.state.seen.add(tab.id);
     this.post({
@@ -943,11 +972,10 @@ class Connection {
       const pendingUrl = textOf(change.pendingUrl) || textOf(tab?.pendingUrl);
       const probe = t ?? { pageUrl: '' };
       if (this.leaves(probe, textOf(change.url)) || this.leaves(probe, pendingUrl)) {
-        if (this.state.discover) this.hide(tabId);
-        else this.release(tabId);
-        return;
+        this.release(tabId);
+      } else {
+        void this.recheck(tabId);
       }
-      void this.recheck(tabId);
     }
     if (!this.state.discover) return;
     if (change.url === undefined && change.title === undefined && change.pendingUrl === undefined) {
@@ -970,8 +998,7 @@ class Connection {
       const tab = this.tabState(tabId);
       if (tab) tab.pageUrl = seen.url;
     } catch {
-      if (this.state.discover) this.hide(tabId);
-      else this.release(tabId);
+      this.release(tabId);
     }
   }
 
@@ -984,6 +1011,7 @@ class Connection {
       this.post({
         method: 'Target.detachedFromTarget',
         params: { sessionId, targetId: String(tabId) },
+        sessionId,
       });
     }
   }
