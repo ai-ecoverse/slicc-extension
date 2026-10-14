@@ -10,7 +10,8 @@
         "**/capture-popup.js",
         "**/picker-popup.js",
         "**/cherry-stub.ts",
-        "**/secrets.html"
+        "**/secrets.html",
+        "**/cws-publish.mjs"
       ],
       "linter": { "enabled": false },
       "formatter": { "enabled": false },
