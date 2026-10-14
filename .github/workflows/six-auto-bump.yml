@@ -36,15 +36,15 @@ jobs:
         run: node scripts/six-auto-bump.mjs
 
       - name: Lint
-        if: steps.check.outputs.bump == 'true'
+        if: steps.check.outputs.release == 'true'
         run: npm run lint
 
       - name: Chromium system dependencies
-        if: steps.check.outputs.bump == 'true'
+        if: steps.check.outputs.release == 'true'
         run: npx playwright-core install --with-deps chromium
 
       - name: Integration tests
-        if: steps.check.outputs.bump == 'true'
+        if: steps.check.outputs.release == 'true'
         run: npm test
         env:
           NODE_OPTIONS: "--max-old-space-size=4096"
@@ -55,11 +55,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .six-tag
-          git commit -m "fix: build six ${{ steps.check.outputs.new_tag }}"
+          if [ "${{ steps.check.outputs.release }}" = "true" ]; then
+            git commit -m "fix: build six ${{ steps.check.outputs.new_tag }}"
+          else
+            git commit -m "chore: advance six pin to ${{ steps.check.outputs.new_tag }}"
+          fi
           git push origin HEAD:main
 
       - name: Dispatch release
-        if: steps.check.outputs.bump == 'true'
+        if: steps.check.outputs.bump == 'true' && steps.check.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run release.yml --ref main

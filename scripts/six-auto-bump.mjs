@@ -90,8 +90,21 @@ if (isMain) {
   const changed = bundlesChanged(before, after);
   if (changed.length === 0) {
     process.stdout.write(
-      `${latestTag} is newer than ${currentTag} but built bundles are identical — skipping bump\n`
+      `${latestTag} is newer than ${currentTag} but built bundles are identical — advancing pin without release\n`
     );
+    if (!dryRun) {
+      writeFileSync(resolve(root, '.six-tag'), latestTag);
+      process.stdout.write(`Updated .six-tag to ${latestTag}\n`);
+      const setOutput = process.env.GITHUB_OUTPUT;
+      if (setOutput) {
+        const { appendFileSync } = await import('node:fs');
+        appendFileSync(setOutput, `bump=true\n`);
+        appendFileSync(setOutput, `new_tag=${latestTag}\n`);
+        appendFileSync(setOutput, `release=false\n`);
+      }
+    } else {
+      process.stdout.write('Dry run — would advance pin without release\n');
+    }
     process.exit(0);
   }
 
@@ -110,5 +123,6 @@ if (isMain) {
     const { appendFileSync } = await import('node:fs');
     appendFileSync(setOutput, `bump=true\n`);
     appendFileSync(setOutput, `new_tag=${latestTag}\n`);
+    appendFileSync(setOutput, `release=true\n`);
   }
 }
