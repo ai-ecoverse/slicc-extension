@@ -1,13 +1,4 @@
-/**
- * Unified picker popup: dispatches to the right system chooser based on
- * `?kind=`. Posts the outcome back over `chrome.runtime` messaging as
- * `{ source: 'picker-popup', kind, requestId, ... }` so the page-side
- * launcher in `picker-popup.ts` can correlate.
- *
- * Directory kind also stashes the granted handle in the shared
- * `slicc-pending-mount` IndexedDB store (under `pendingMount:<requestId>`)
- * because `FileSystemDirectoryHandle` is not postMessage-able.
- */
+
 const PENDING_MOUNT_DB = 'slicc-pending-mount';
 const params = new URLSearchParams(location.search);
 const kind = params.get('kind') || 'directory';
@@ -33,7 +24,7 @@ function applyKindLabels() {
   try {
     document.title = t.title;
   } catch (_e) {
-    /* ignore */
+    
   }
   document.getElementById('pickBtn').textContent = t.label;
   document.getElementById('label').textContent = t.working;
@@ -45,12 +36,12 @@ function send(extra) {
       Object.assign({ source: 'picker-popup', kind, requestId }, extra),
       function () {
         if (chrome.runtime.lastError) {
-          /* no receiver */
+          
         }
       }
     );
   } catch (_e) {
-    /* context invalidated */
+    
   }
 }
 

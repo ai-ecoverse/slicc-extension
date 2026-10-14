@@ -1,41 +1,45 @@
 (() => {
- 
+
+  var KNOWN_PREFIXES = [
     "ghp_",
-   
+
     "gho_",
-   
+
     "ghu_",
-   
+
     "ghs_",
-   
+
     "ghr_",
-   
+
     "github_pat_",
-   
+
     "sk-",
-   
+
     "pk-",
-   
+
     "xoxb-",
-   
+
     "xoxp-",
-   
+
     "xoxa-",
-   
+
     "xoxs-",
-   
+
     "AKIA",
-   
+
     "ABIA",
-   
+
     "ACCA",
-   
+
     "ASIA",
-   
+
     "sk-ant-",
-   
+
     "Bearer "
-   
+
+  ];
+  var SORTED_PREFIXES = [...KNOWN_PREFIXES].sort((a, b) => b.length - a.length);
+
   var OAUTH_EXTRA_DOMAINS_KEY = "slicc_oauth_extra_domains";
   function readOAuthExtras(storage2) {
     try {
@@ -96,14 +100,13 @@
     writeOAuthExtras(storage2, store);
   }
 
- 
   var DOMAINS_SUFFIX = "_DOMAINS";
   function parseDomainsCsv(raw) {
     return raw.split(",").map((domain) => domain.trim()).filter((domain) => domain.length > 0);
   }
   function pairEnvEntriesToSecrets(entries) {
-    const values = new Map();
-    const domains = new Map();
+    const values =  new Map();
+    const domains =  new Map();
     const order = [];
     for (const entry of entries) {
       if (entry.key.endsWith(DOMAINS_SUFFIX)) {
@@ -141,7 +144,15 @@
     return { ok: true, resolvedDomains };
   }
 
- 
+  async function listSecrets(storage2) {
+    const all = await storage2.get(null);
+    const entries = pairStorageEntries(all).map(({ name, domains }) => ({ name, domains }));
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    return entries;
+  }
+  async function setSecret(storage2, name, value, domains) {
+    await storage2.set({
+      [name]: value,
       [name + DOMAINS_SUFFIX]: domains.join(",")
     });
   }
@@ -186,7 +197,11 @@
     );
   }
 
- 
+  var $ = (id) => document.getElementById(id);
+  function el(tag, props, ...children) {
+    const node = document.createElement(tag);
+    if (props) {
+      for (const [k, v] of Object.entries(props)) {
         if (k === "class") node.className = v;
         else if (k === "dataset") Object.assign(node.dataset, v);
         else if (k === "text") node.textContent = v;

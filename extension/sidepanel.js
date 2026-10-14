@@ -19,7 +19,7 @@ function mountSliccImpl(options) {
     options.container?.appendChild(iframe);
   }
   let channelId = null;
-  const pendingExports = new Map();
+  const pendingExports =  new Map();
   const cdpHandler = createCdpHandler(options);
   const post = (env) => {
     if (options.__test_post) {
@@ -28,16 +28,24 @@ function mountSliccImpl(options) {
     }
     iframe.contentWindow?.postMessage(env, sliccOrigin);
   };
-  const mismatchTimers = new Map();
+  const mismatchTimers =  new Map();
   const handleMismatch = (env) => {
     if (mismatchTimers.has(env.channelId)) return;
-    post({ cherry: 2, channelId: env.channelId, kind: "handshake.version-mismatch", peerVersion: env.cherry });
-    mismatchTimers.set(env.channelId, setTimeout(() => {
-      mismatchTimers.delete(env.channelId);
-      options.hooks?.onProtocolMismatch?.(env.cherry, 2);
-    }, 250));
+    post({
+      cherry: 2,
+      channelId: env.channelId,
+      kind: "handshake.version-mismatch",
+      peerVersion: env.cherry
+    });
+    mismatchTimers.set(
+      env.channelId,
+      setTimeout(() => {
+        mismatchTimers.delete(env.channelId);
+        options.hooks?.onProtocolMismatch?.(env.cherry, 2);
+      }, 250)
+    );
   };
-  const VALID_KINDS = new Set([
+  const VALID_KINDS =  new Set([
     "handshake.hello",
     "handshake.welcome",
     "handshake.version-mismatch",
@@ -75,20 +83,29 @@ function mountSliccImpl(options) {
       showTimestamps: true,
       ...options.features
     };
-    const env = { cherry: 2, channelId: newChannelId, kind: "handshake.welcome", joinUrl: options.joinToken, features };
-    if (options.theme) try {
-      env.theme = JSON.stringify(options.theme);
-    } catch {
-    }
-    if (options.layout) try {
-      env.layout = JSON.stringify(options.layout);
-    } catch {
-    }
+    const env = {
+      cherry: 2,
+      channelId: newChannelId,
+      kind: "handshake.welcome",
+      joinUrl: options.joinToken,
+      features
+    };
+    if (options.theme)
+      try {
+        env.theme = JSON.stringify(options.theme);
+      } catch {
+      }
+    if (options.layout)
+      try {
+        env.layout = JSON.stringify(options.layout);
+      } catch {
+      }
     if (options.effortLevel) env.effortLevel = options.effortLevel;
-    if (options.flags) try {
-      env.flags = JSON.stringify(options.flags);
-    } catch {
-    }
+    if (options.flags)
+      try {
+        env.flags = JSON.stringify(options.flags);
+      } catch {
+      }
     return env;
   }
   async function handleEnvelope(env) {
@@ -137,7 +154,9 @@ function mountSliccImpl(options) {
   }
   const onMessage = (event) => {
     if (channelId !== null && isFromIframe(event) && isEnvelope(event.data) && event.data.kind === "handshake.hello" && event.data.channelId !== channelId) {
-      handleEnvelope(event.data).catch((e) => console.error("[cherry] envelope handling failed", e));
+      handleEnvelope(event.data).catch(
+        (e) => console.error("[cherry] envelope handling failed", e)
+      );
       return;
     }
     if (event.origin !== sliccOrigin || event.source !== iframe.contentWindow) {
@@ -145,7 +164,8 @@ function mountSliccImpl(options) {
         handleMismatch(event.data);
       return;
     }
-    if (!isEnvelope(event.data) || channelId !== null && event.data.channelId !== channelId) return;
+    if (!isEnvelope(event.data) || channelId !== null && event.data.channelId !== channelId)
+      return;
     handleEnvelope(event.data).catch((e) => console.error("[cherry] envelope handling failed", e));
   };
   window.addEventListener("message", onMessage);
@@ -168,7 +188,13 @@ function mountSliccImpl(options) {
             reject(new Error("transfer-aborted"));
           }
         };
-        pendingExports.set(requestId, { resolve, reject, onProgress: opts?.onProgress, onAbort, signal });
+        pendingExports.set(requestId, {
+          resolve,
+          reject,
+          onProgress: opts?.onProgress,
+          onAbort,
+          signal
+        });
         signal?.addEventListener("abort", onAbort, { once: true });
         const env = { cherry: 2, channelId, kind: "session.export.request", requestId };
         if (opts?.sessionId !== void 0) env.sessionId = opts.sessionId;
@@ -189,8 +215,8 @@ function mountSliccImpl(options) {
   };
 }
 function createCdpHandler(options) {
-  const objectIds = new WeakMap();
-  const idToObj = new Map();
+  const objectIds =  new WeakMap();
+  const idToObj =  new Map();
   let nextId = 1;
   const getObjectId = (obj) => {
     let id = objectIds.get(obj);
@@ -217,11 +243,19 @@ function createCdpHandler(options) {
           if (result instanceof Promise) result = await result;
           return { result: describe(result) };
         } catch (e) {
-          return { result: { type: "object", subtype: "error" }, exceptionDetails: { text: e instanceof Error ? e.message : String(e), exception: { type: "object", description: String(e) } } };
+          return {
+            result: { type: "object", subtype: "error" },
+            exceptionDetails: {
+              text: e instanceof Error ? e.message : String(e),
+              exception: { type: "object", description: String(e) }
+            }
+          };
         }
       }
       case "DOM.getDocument":
-        return { root: { nodeId: getObjectId(document), nodeName: "#document", childNodeCount: 1 } };
+        return {
+          root: { nodeId: getObjectId(document), nodeName: "#document", childNodeCount: 1 }
+        };
       case "DOM.querySelector": {
         const node = idToObj.get(Number(params.nodeId)) ?? document;
         const el = node.querySelector?.(String(params.selector ?? "")) ?? null;
@@ -230,13 +264,30 @@ function createCdpHandler(options) {
       case "DOM.getBoxModel": {
         const rect = idToObj.get(Number(params.nodeId))?.getBoundingClientRect?.();
         if (!rect) throw new Error("DOM.getBoxModel(no-rect)");
-        return { model: { content: [rect.left, rect.top, rect.right, rect.top, rect.right, rect.bottom, rect.left, rect.bottom], width: rect.width, height: rect.height } };
+        return {
+          model: {
+            content: [
+              rect.left,
+              rect.top,
+              rect.right,
+              rect.top,
+              rect.right,
+              rect.bottom,
+              rect.left,
+              rect.bottom
+            ],
+            width: rect.width,
+            height: rect.height
+          }
+        };
       }
       case "Input.dispatchMouseEvent": {
         const x = Number(params.x ?? 0), y = Number(params.y ?? 0);
         const el = document.elementFromPoint(x, y);
         if (el && params.type === "mousePressed")
-          el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+          el.dispatchEvent(
+            new MouseEvent("click", { bubbles: true, cancelable: true, clientX: x, clientY: y })
+          );
         return {};
       }
       case "Input.dispatchKeyEvent": {
@@ -246,7 +297,8 @@ function createCdpHandler(options) {
         return {};
       }
       case "Page.captureScreenshot":
-        if (options.capabilities.screenshot !== "html2canvas") throw new Error("Page.captureScreenshot not supported");
+        if (options.capabilities.screenshot !== "html2canvas")
+          throw new Error("Page.captureScreenshot not supported");
         throw new Error("html2canvas not available in merged extension");
       case "Page.navigate":
         if (!options.capabilities.navigate) throw new Error("Page.navigate not supported");
@@ -265,7 +317,8 @@ async function dispatchCdp(env, handler, onPermissionRequest) {
   const domain = env.method.split(".")[0] ?? env.method;
   try {
     const allowed = onPermissionRequest ? await onPermissionRequest(domain) : true;
-    if (!allowed) return { error: { code: -32601, message: `Cherry: permission denied for ${domain}` } };
+    if (!allowed)
+      return { error: { code: -32601, message: `Cherry: permission denied for ${domain}` } };
     return { result: await handler(env.method, env.params ?? {}) };
   } catch (e) {
     return { error: { code: -32e3, message: e instanceof Error ? e.message : String(e) } };
@@ -287,7 +340,15 @@ function rejectExport(map, env) {
   if (!entry) return;
   entry.signal?.removeEventListener("abort", entry.onAbort);
   map.delete(env.requestId);
-  const CODES = new Set(["permission-denied", "redaction-unavailable", "session-not-found", "transfer-aborted", "transfer-corrupt", "schema-invalid", "attachment-unreadable"]);
+  const CODES =  new Set([
+    "permission-denied",
+    "redaction-unavailable",
+    "session-not-found",
+    "transfer-aborted",
+    "transfer-corrupt",
+    "schema-invalid",
+    "attachment-unreadable"
+  ]);
   entry.reject(new Error(CODES.has(env.code) ? env.code : "transfer-corrupt"));
 }
 
@@ -295,41 +356,67 @@ var SLICC_HOSTED_ORIGIN = "https://www.sliccy.ai";
 
 var KNOWN_PREFIXES = [
   "ghp_",
- 
+
   "gho_",
- 
+
   "ghu_",
- 
+
   "ghs_",
- 
+
   "ghr_",
- 
+
   "github_pat_",
- 
+
   "sk-",
- 
+
   "pk-",
- 
+
   "xoxb-",
- 
+
   "xoxp-",
- 
+
   "xoxa-",
- 
+
   "xoxs-",
- 
+
   "AKIA",
- 
+
   "ABIA",
- 
+
   "ACCA",
- 
+
   "ASIA",
- 
+
   "sk-ant-",
- 
+
   "Bearer "
- 
+
+];
+var SORTED_PREFIXES = [...KNOWN_PREFIXES].sort((a, b) => b.length - a.length);
+
+var nudgeInFlight =  new WeakSet();
+function nudgeIframeRepaint(iframe, onDone) {
+  if (nudgeInFlight.has(iframe)) {
+    onDone?.();
+    return;
+  }
+  let rafRestored = false;
+  performNudge(iframe, onDone, () => {
+    rafRestored = true;
+  });
+  setTimeout(() => {
+    if (rafRestored) return;
+    if (!iframe.isConnected) return;
+    performNudge(iframe);
+  }, 500);
+}
+function performNudge(iframe, onDone, onRafRestore) {
+  if (nudgeInFlight.has(iframe)) {
+    onDone?.();
+    return;
+  }
+  nudgeInFlight.add(iframe);
+  const previousDisplay = iframe.style.display;
   iframe.style.display = "none";
   let restored = false;
   const restore = (viaRaf) => {
@@ -457,10 +544,7 @@ function createSidePanelController(deps) {
       capabilities: { navigate: false, screenshot: "none", openUrl: false },
       features: SIDE_PANEL_FEATURES,
       hooks: {
-        // The follower asks to sign in — provider login can't complete in the
-       
-        // `slicc.focus-leader-tab` is the follower avatar menu's "Bring leader
-        // to front" — a plain focus, with nothing to sign in to.
+
         onSliccEvent: (name) => {
           if (name === "slicc.open-leader-tab") requestLeaderFocus(true);
           if (name === "slicc.focus-leader-tab") requestLeaderFocus(false);
@@ -519,7 +603,6 @@ if (typeof chrome !== "undefined" && chrome?.runtime?.id) {
     sliccOrigin: sliccOriginDefault
   });
 }
-
 export {
   createSidePanelController
 };

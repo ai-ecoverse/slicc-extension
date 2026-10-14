@@ -28,7 +28,7 @@ function send(msg) {
       void chrome.runtime.lastError;
     });
   } catch {
-    /* context invalidated */
+    
   }
 }
 

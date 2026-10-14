@@ -1,4 +1,13 @@
 (() => {
+  const _six = ['www.sliccy.ai'];
+  const _exL = ['www', 'vault', 'vault-preview', 'get', 'mcpcat'];
+  const _exP = ['vault-'];
+  const _d = '.sliccy.ai';
+  const h = location.hostname;
+  if (!h.endsWith(_d) || h === _d.slice(1)) return;
+  const l = h.slice(0, -_d.length);
+  if (!l || (!_six.includes(h) && (_exL.includes(l) || _exP.some((p) => l.startsWith(p))))) return;
+
   const { port1, port2 } = new MessageChannel();
   const open = new Map();
   const pending = new Map();

@@ -1,3 +1,15 @@
+var _protDomains = ["sliccy.ai"];
+var _protSchemes = ["https","http"];
+function _isProtectedUrl(url) {
+  try {
+    var u = new URL(url);
+    var s = u.protocol.slice(0, -1);
+    if (!_protSchemes.includes(s)) return false;
+    var h = u.hostname.toLowerCase();
+    if (h.endsWith(".")) h = h.slice(0, -1);
+    return _protDomains.some(function(d) { return h === d || h.endsWith("." + d); });
+  } catch { return false; }
+}
 
 var SLICC_HOSTED_ORIGIN = "https://www.sliccy.ai";
 
@@ -55,41 +67,47 @@ function unmaskCdpFrame(frame, hostname, pipeline) {
 
 var KNOWN_PREFIXES = [
   "ghp_",
- 
+
   "gho_",
- 
+
   "ghu_",
- 
+
   "ghs_",
- 
+
   "ghr_",
- 
+
   "github_pat_",
- 
+
   "sk-",
- 
+
   "pk-",
- 
+
   "xoxb-",
- 
+
   "xoxp-",
- 
+
   "xoxa-",
- 
+
   "xoxs-",
- 
+
   "AKIA",
- 
+
   "ABIA",
- 
+
   "ACCA",
- 
+
   "ASIA",
- 
+
   "sk-ant-",
- 
+
   "Bearer "
- 
+
+];
+var SORTED_PREFIXES = [...KNOWN_PREFIXES].sort((a, b) => b.length - a.length);
+function detectPrefix(value) {
+  for (const p of SORTED_PREFIXES) {
+    if (value.startsWith(p)) return p;
+  }
   return "";
 }
 async function hmacSha256(key, message) {
@@ -189,20 +207,31 @@ var SecretsPipeline = class {
   sessionId;
   source;
   sessionStore;
-  maskedToSecret = new Map();
+  maskedToSecret =  new Map();
   
   exportPairs = [];
   
   exportShortPairs = [];
- 
-  // here — env injection and `secret get` still see them — but they are
-  // deliberately absent from `maskedToSecret`, so the scrubber and every
-  // unmask/domain-match loop ignores them. Their "masked" value is the
- 
-  // the actual secret, while the scrubber's masking-pattern set stays
- 
-  // only `signHmac`, which needs the real value of a *named* secret to
- 
+
+  consumableShortSecrets =  new Map();
+
+  byName =  new Map();
+  scrubber = (t) => t;
+  constructor(opts) {
+    this.sessionId = opts.sessionId;
+    this.source = opts.source;
+    this.sessionStore = opts.sessionStore;
+  }
+  async reload() {
+    const all = await this.source.listAll();
+    const persistedNames = new Set(all.map((s) => s.name));
+    const session = (this.sessionStore?.listAll() ?? []).filter((s) => !persistedNames.has(s.name));
+    const merged = [...all, ...session];
+    const next =  new Map();
+    const nextShort =  new Map();
+    for (const s of merged) {
+      if (s.value.length < MIN_MASKABLE_SECRET_LENGTH) {
+        console.warn(
           `[slicc:secrets] secret "${s.name}" not masked: value shorter than ${MIN_MASKABLE_SECRET_LENGTH} chars`
         );
         nextShort.set(s.name, {
@@ -225,7 +254,7 @@ var SecretsPipeline = class {
     this.exportPairs = Array.from(next.values());
     this.exportShortPairs = Array.from(nextShort.values());
     this.consumableShortSecrets = nextShort;
-    const nextByName = new Map();
+    const nextByName =  new Map();
     for (const ms of next.values()) nextByName.set(ms.name, ms);
     for (const ms of nextShort.values()) {
       if (nextByName.has(ms.name)) {
@@ -447,7 +476,7 @@ var SecretsPipeline = class {
 };
 
 var SessionSecretStore = class {
-  entries = new Map();
+  entries =  new Map();
   
   set(name, value, domains = []) {
     this.entries.set(name, { name, value, domains: [...domains] });
@@ -599,7 +628,7 @@ function canonicalHeaders(headers) {
   const signed = entries.map(([k]) => k).join(";");
   return { canonical, signed };
 }
-async function signSigV4(req, creds, region, service = "s3", now = new Date()) {
+async function signSigV4(req, creds, region, service = "s3", now =  new Date()) {
   const date = ymd(now);
   const dateTime = iso8601(now);
   const bodyBytes = req.body ?? new Uint8Array(0);
@@ -649,7 +678,7 @@ async function signSigV4(req, creds, region, service = "s3", now = new Date()) {
 
 var ALLOWED_METHODS = ["GET", "PUT", "POST", "DELETE", "HEAD"];
 var PROFILE_NAME_REGEX = /^[a-zA-Z0-9._-]+$/;
-var HOP_BY_HOP = new Set([
+var HOP_BY_HOP =  new Set([
   "connection",
   "keep-alive",
   "proxy-authenticate",
@@ -660,7 +689,7 @@ var HOP_BY_HOP = new Set([
   "upgrade"
 ]);
 var DA_ORIGIN = "https://admin.da.live";
-var DA_ALLOWED_ORIGINS = new Set([DA_ORIGIN, "https://api.aem.live"]);
+var DA_ALLOWED_ORIGINS =  new Set([DA_ORIGIN, "https://api.aem.live"]);
 function isAllowedMethod(m) {
   return typeof m === "string" && ALLOWED_METHODS.includes(m);
 }
@@ -867,8 +896,8 @@ function parseDomainsCsv(raw) {
   return raw.split(",").map((domain) => domain.trim()).filter((domain) => domain.length > 0);
 }
 function pairEnvEntriesToSecrets(entries) {
-  const values = new Map();
-  const domains = new Map();
+  const values =  new Map();
+  const domains =  new Map();
   const order = [];
   for (const entry of entries) {
     if (entry.key.endsWith(DOMAINS_SUFFIX)) {
@@ -1009,13 +1038,42 @@ function isTokenChar(code) {
   if (code >= 97 && code <= 122) return true;
   switch (code) {
     case 33:
-   
-    // '
+
+    case 35:
+
+    case 36:
+
+    case 37:
+
+    case 38:
+
+    case 39:
+
     case 42:
-   
-    // `
+
+    case 43:
+
+    case 45:
+
+    case 46:
+
+    case 94:
+
+    case 95:
+
+    case 96:
+
     case 124:
-   
+
+    case 126:
+      return true;
+  }
+  return false;
+}
+function buildLink(rawUri, rawParams, baseUrl) {
+  const params = {};
+  const extOverrides = {};
+  for (const [name, value] of rawParams) {
     if (name.endsWith("*")) {
       const decoded = decodeExtValue(value);
       if (decoded != null) extOverrides[name.slice(0, -1)] = decoded;
@@ -1140,7 +1198,7 @@ function extractHandoffFromWebRequest(headers, baseUrl) {
 
 var EXTENSION_BRIDGE_PROTOCOL_VERSION = 1;
 var EXTENSION_BRIDGE_PORT_NAME = "slicc.cdp-bridge";
-var KINDS = new Set([
+var KINDS =  new Set([
   "handshake.hello",
   "handshake.welcome",
   "handshake.rejected",
@@ -1199,8 +1257,8 @@ async function validateBridgePin(sender, deps) {
   }
   return { ok: true };
 }
-var welcomedLeaderPorts = new Map();
-var liveBridgePortStates = new Map();
+var welcomedLeaderPorts =  new Map();
+var liveBridgePortStates =  new Map();
 function invalidatePortDebuggerAttachment(state2, tabId) {
   state2.ownedTabs.delete(tabId);
   state2.attachRefCounts.delete(tabId);
@@ -1346,9 +1404,9 @@ async function handleBridgePortConnect(port, deps) {
   if (port.name !== EXTENSION_BRIDGE_PORT_NAME) return;
   const state2 = {
     channelId: null,
-    sessionToTab: new Map(),
-    attachRefCounts: new Map(),
-    ownedTabs: new Set(),
+    sessionToTab:  new Map(),
+    attachRefCounts:  new Map(),
+    ownedTabs:  new Set(),
     unsubscribeEvents: null
   };
   let pinned = false;
@@ -1588,7 +1646,7 @@ async function cdpCloseTarget(params, state2, deps) {
 
 var CHERRY_PANEL_PORT_NAME = "cherry-panel";
 
-var panelPorts = new Set();
+var panelPorts =  new Set();
 var state = { kind: "join-url", state: "booting" };
 var hasSeenReady = false;
 var lastLeaderReloadAt = 0;
@@ -1767,8 +1825,8 @@ function contentTypeOk(raw, kind) {
 }
 
 function createDiscoveryObserver(deps) {
-  const seenFingerprints = new Set();
-  const probedOrigins = new Set();
+  const seenFingerprints =  new Set();
+  const probedOrigins =  new Set();
   const forward = (origin, kind, artifactUrl, pageUrl) => {
     const fingerprint = discoveryFingerprint({ origin, kind, url: artifactUrl });
     if (seenFingerprints.has(fingerprint)) return;
@@ -2098,331 +2156,7 @@ async function readOrCreateSwSessionId() {
 
 var LEADER_TAB_ID_KEY2 = "slicc_leader_tab_id";
 var PROD_LEADER_TAB_URL = `${SLICC_HOSTED_ORIGIN}/?slicc=leader`;
-var PROD_LEADER_TAB_URL_GLOB = `${SLICC_HOSTED_ORIGIN}/*`;
-var PROD_LEADER_TAB_ORIGIN = SLICC_HOSTED_ORIGIN;
-var DEV_LEADER_TAB_URL = "http://localhost:8787/?slicc=leader";
-var DEV_LEADER_TAB_URL_GLOB = "http://localhost:8787/*";
-var DEV_LEADER_TAB_ORIGIN = "http://localhost:8787";
-function getLeaderTabUrl(isExtDev) {
-  return isExtDev ? DEV_LEADER_TAB_URL : PROD_LEADER_TAB_URL;
-}
-function getLeaderTabUrlGlob(isExtDev) {
-  return isExtDev ? DEV_LEADER_TAB_URL_GLOB : PROD_LEADER_TAB_URL_GLOB;
-}
-function getLeaderTabOrigin(isExtDev) {
-  return isExtDev ? DEV_LEADER_TAB_ORIGIN : PROD_LEADER_TAB_ORIGIN;
-}
-function appendLeaderExtIdParam(leaderUrl, extensionId) {
-  if (!extensionId) return leaderUrl;
-  try {
-    const u = new URL(leaderUrl);
-    u.searchParams.set(LEADER_EXT_ID_QUERY_NAME, extensionId);
-    return u.toString();
-  } catch {
-    return leaderUrl;
-  }
-}
-function leaderUrlHasExtId(rawUrl, extensionId) {
-  if (!rawUrl || !extensionId) return false;
-  try {
-    return new URL(rawUrl).searchParams.get(LEADER_EXT_ID_QUERY_NAME) === extensionId;
-  } catch {
-    return false;
-  }
-}
-var LEADER_TAB_URL = getLeaderTabUrl(false);
-var LEADER_TAB_URL_GLOB = getLeaderTabUrlGlob(false);
-var LEADER_TAB_ORIGIN = getLeaderTabOrigin(false);
-async function readStoredLeaderTabId() {
-  try {
-    const result = await chrome.storage.session.get(LEADER_TAB_ID_KEY2);
-    const raw = result[LEADER_TAB_ID_KEY2];
-    return typeof raw === "number" ? raw : void 0;
-  } catch (err) {
-    console.error("[slicc-sw] storage.session.get leader tab id failed", err);
-    return void 0;
-  }
-}
-async function writeStoredLeaderTabId(tabId) {
-  await chrome.storage.session.set({ [LEADER_TAB_ID_KEY2]: tabId });
-  await markLeaderTabNotDiscardable(tabId);
-}
-async function markLeaderTabNotDiscardable(tabId) {
-  try {
-    await chrome.tabs.update(tabId, { autoDiscardable: false });
-  } catch (err) {
-    console.warn("[slicc-sw] failed to exempt leader tab from discard/freeze", err);
-  }
-}
-async function clearStoredLeaderTabId() {
-  await chrome.storage.session.remove(LEADER_TAB_ID_KEY2);
-}
-function isLeaderTabUrl(rawUrl) {
-  if (!rawUrl) return false;
-  let u;
-  try {
-    u = new URL(rawUrl);
-  } catch {
-    return false;
-  }
-  if (u.origin !== LEADER_TAB_ORIGIN) return false;
-  return u.searchParams.get("slicc") === "leader";
-}
-async function reconcileLeaderTabOnBoot() {
-  const storedId = await readStoredLeaderTabId();
-  if (storedId === void 0) return;
-  let tab;
-  try {
-    tab = await chrome.tabs.get(storedId);
-  } catch {
-  }
-  if (tab !== void 0 && isLeaderTabUrl(tab.url)) return;
-  await clearStoredLeaderTabId();
-}
-var leaderTabLock = null;
-async function queryLeaderTabs() {
-  try {
-    const matches = await chrome.tabs.query({ url: LEADER_TAB_URL_GLOB });
-    return matches.filter((t) => isLeaderTabUrl(t.url) && t.id !== void 0);
-  } catch (err) {
-    console.error("[slicc-sw] tabs.query for leader tab failed", err);
-    return [];
-  }
-}
-async function createLeaderTab() {
-  const created = await chrome.tabs.create({
-    url: appendLeaderExtIdParam(LEADER_TAB_URL, chrome.runtime.id),
-    active: false,
-    pinned: true
-  });
-  if (created.id !== void 0) await writeStoredLeaderTabId(created.id);
-}
-function isUnloadedTab(tab) {
-  return tab.discarded === true || tab.status === "unloaded";
-}
-async function adoptSingleLeaderTab(matches) {
-  const keep = matches.find((t) => !isUnloadedTab(t)) ?? matches[0];
-  const extras = matches.filter((t) => t !== keep);
-  if (keep.id === void 0) return;
-  for (const extra of extras) {
-    if (extra.id === void 0 || extra.id === keep.id) continue;
-    try {
-      await chrome.tabs.remove(extra.id);
-    } catch (err) {
-      console.error("[slicc-sw] failed to close duplicate leader tab", err);
-    }
-  }
-  const extIdUrl = keep.url !== void 0 && chrome.runtime.id !== void 0 && !leaderUrlHasExtId(keep.url, chrome.runtime.id) ? appendLeaderExtIdParam(keep.url, chrome.runtime.id) : void 0;
-  if (extIdUrl !== void 0 || keep.pinned !== true) {
-    const props = { pinned: true };
-    if (extIdUrl !== void 0) props.url = extIdUrl;
-    await chrome.tabs.update(keep.id, props);
-  }
-  if (extIdUrl === void 0 && isUnloadedTab(keep)) {
-    try {
-      await chrome.tabs.reload(keep.id);
-    } catch (err) {
-      console.error("[slicc-sw] failed to reload unloaded leader tab", err);
-    }
-  }
-  await writeStoredLeaderTabId(keep.id);
-}
-async function ensureLeaderTab() {
-  if (leaderTabLock !== null) return leaderTabLock;
-  leaderTabLock = (async () => {
-    try {
-      const matches = await queryLeaderTabs();
-      if (matches.length === 0) await createLeaderTab();
-      else await adoptSingleLeaderTab(matches);
-    } finally {
-      leaderTabLock = null;
-    }
-  })();
-  return leaderTabLock;
-}
-async function reloadLeaderTabIfExists() {
-  const id = await readStoredLeaderTabId();
-  if (typeof id !== "number") return false;
-  try {
-    await chrome.tabs.reload(id);
-    return true;
-  } catch {
-    return false;
-  }
-}
-reconcileLeaderTabOnBoot().catch((err) => {
-  console.error("[slicc-sw] reconcile leader tab failed", err);
-});
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => console.error("[slicc-sw] setPanelBehavior failed", err));
-setCherryPanelRecoveryDeps({ reloadLeaderTabIfExists });
-var UPDATE_RELOAD_GUARD_KEY = "slicc_update_reload_at";
-var UPDATE_RELOAD_GUARD_MS = 6e4;
-async function isWithinUpdateReloadGuard() {
-  const result = await chrome.storage.session.get(UPDATE_RELOAD_GUARD_KEY);
-  const stamp = result[UPDATE_RELOAD_GUARD_KEY];
-  if (typeof stamp !== "number") return false;
-  return Date.now() - stamp < UPDATE_RELOAD_GUARD_MS;
-}
-async function stampUpdateReloadGuard() {
-  await chrome.storage.session.set({ [UPDATE_RELOAD_GUARD_KEY]: Date.now() });
-}
-chrome.runtime.onUpdateAvailable.addListener((details) => {
-  console.log("[slicc-sw] Extension update available", details.version);
-  (async () => {
-    if (!await isWithinUpdateReloadGuard()) {
-      const reloaded = await reloadLeaderTabIfExists();
-      if (reloaded) {
-        await stampUpdateReloadGuard();
-      }
-    }
-    chrome.runtime.reload();
-  })().catch((err) => {
-    console.error("[slicc-sw] onUpdateAvailable handler failed", err);
-    chrome.runtime.reload();
-  });
-});
-async function handleLeaderTabRemoved(tabId) {
-  const storedId = await readStoredLeaderTabId();
-  if (storedId !== tabId) return;
-  await clearStoredLeaderTabId();
-  broadcastLeaderGone();
-}
-chrome.tabs.onRemoved.addListener((tabId) => {
-  handleLeaderTabRemoved(tabId).catch((err) => {
-    console.error("[slicc-sw] handleLeaderTabRemoved failed", err);
-  });
-});
-async function focusLeaderTab() {
-  const storedId = await readStoredLeaderTabId();
-  if (storedId !== void 0) {
-    let leaderTab;
-    try {
-      leaderTab = await chrome.tabs.get(storedId);
-    } catch {
-      leaderTab = void 0;
-    }
-    if (leaderTab !== void 0 && isLeaderTabUrl(leaderTab.url)) {
-      await chrome.tabs.update(storedId, { active: true });
-      if (leaderTab.windowId !== void 0) {
-        await chrome.windows.update(leaderTab.windowId, { focused: true });
-      }
-      return;
-    }
-    await clearStoredLeaderTabId();
-  }
-  await ensureLeaderTab();
-  const newId = await readStoredLeaderTabId();
-  if (newId === void 0) return;
-  const tab = await chrome.tabs.get(newId).catch(() => void 0);
-  if (tab === void 0) return;
-  await chrome.tabs.update(newId, { active: true });
-  if (tab.windowId !== void 0) {
-    await chrome.windows.update(tab.windowId, { focused: true });
-  }
-}
-function isCaptureOpenWindowMsg(msg) {
-  return typeof msg === "object" && msg !== null && "type" in msg && msg.type === "capture-open-window" && typeof msg.url === "string";
-}
-chrome.runtime.onMessage.addListener((message) => {
-  if (!isCaptureOpenWindowMsg(message)) return false;
-  const requestId = message.requestId;
-  chrome.windows.create({ url: message.url, type: "popup", width: 360, height: 220, focused: true }).catch((err) => {
-    console.error("[slicc-sw] Failed to open capture popup window:", err);
-    if (requestId) {
-      chrome.runtime.sendMessage({
-        source: "capture-popup",
-        requestId,
-        ok: false,
-        error: `failed to open capture window: ${err?.message || String(err)}`
-      }).catch(() => {
-      });
-    }
-  });
-  return false;
-});
-var sliccGroupId = null;
-async function addToSliccGroup(tabId) {
-  try {
-    if (sliccGroupId !== null) {
-      try {
-        await chrome.tabs.group({ tabIds: tabId, groupId: sliccGroupId });
-        return;
-      } catch (err) {
-        console.info("[slicc-tab-group] Tab group removed by user, recreating", {
-          tabId,
-          previousGroupId: sliccGroupId,
-          error: err instanceof Error ? err.message : String(err)
-        });
-        sliccGroupId = null;
-      }
-    }
-    sliccGroupId = await chrome.tabs.group({ tabIds: tabId });
-    await chrome.tabGroups.update(sliccGroupId, {
-      title: "slicc",
-      color: "pink",
-      collapsed: false
-    });
-  } catch (err) {
-    console.warn("[slicc-tab-group] Tab grouping failed (best-effort, continuing without group)", {
-      tabId,
-      error: err instanceof Error ? err.message : String(err)
-    });
-  }
-}
-var HANDOFF_NOTIFICATION_ID_PREFIX = "slicc-handoff-";
-var HANDOFF_INSTRUCTION_SNIPPET_MAX = 150;
-var handoffNotificationSeq = 0;
-function truncateInstruction(text) {
-  if (text.length <= HANDOFF_INSTRUCTION_SNIPPET_MAX) return text;
-  return `${text.slice(0, HANDOFF_INSTRUCTION_SNIPPET_MAX - 1)}\u2026`;
-}
-var CONTROL_CHARS_RE = new RegExp(
-  `[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]+`,
-  "g"
-);
-function sanitizeInstruction(text) {
-  return text.replace(CONTROL_CHARS_RE, " ");
-}
-function handoffSourceLabel(sourceUrl) {
-  try {
-    const origin = new URL(sourceUrl).origin;
-    return origin === "null" ? "A page" : origin;
-  } catch {
-    return "A page";
-  }
-}
-function handoffNotificationContent(match, sourceUrl) {
-  const source = handoffSourceLabel(sourceUrl);
-  if (match.verb === "upskill") {
-    const repo = match.target.replace(/^https?:\/\//, "");
-    const skill = match.path ? `${repo} (${match.path})` : repo;
-    return {
-      title: "Slicc skill available",
-      message: `${source} offers a skill: ${skill}. Click to open the Slicc leader tab.`
-    };
-  }
-  return {
-    title: "Slicc handoff received",
-    message: match.instruction ? `${source} asks: ${truncateInstruction(sanitizeInstruction(match.instruction))} \u2014 click to open the Slicc leader tab.` : `${source} sent a handoff. Click to open the Slicc leader tab.`
-  };
-}
-function showHandoffNotification(match, sourceUrl) {
-  const notificationId = `${HANDOFF_NOTIFICATION_ID_PREFIX}${Date.now()}-${handoffNotificationSeq++}`;
-  chrome.action.setBadgeText({ text: "!" });
-  chrome.action.setBadgeBackgroundColor({ color: "#ff5f72" });
-  chrome.notifications.create(notificationId, {
-    type: "basic",
-    iconUrl: "logos/sliccy-color-1scoops-128x128.png",
-    ...handoffNotificationContent(match, sourceUrl)
-  });
-}
-chrome.notifications.onClicked.addListener((notificationId) => {
-  if (!notificationId.startsWith(HANDOFF_NOTIFICATION_ID_PREFIX)) return;
-  chrome.action.setBadgeText({ text: "" });
-  focusLeaderTab().catch(() => {
-  });
-});
-var notifiedHandoffFingerprints = new Set();
+var PROD_LEADER_TAB_URL_GLOB = `${SLICC_HOSTED_ORIGIN} new Set();
 var HANDOFF_NOTIFIED_FINGERPRINTS_KEY = "slicc_handoff_notified_fingerprints";
 var HANDOFF_NOTIFIED_FINGERPRINTS_MAX = 100;
 var handoffNotifyChain = Promise.resolve();
@@ -2453,6 +2187,7 @@ async function notifyHandoffOncePerSession(fingerprint, match, url) {
 }
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
+    if (_isProtectedUrl(details.url)) return;
     const { match } = extractHandoffFromWebRequest(details.responseHeaders, details.url);
     if (!match) return;
     const fingerprint = handoffFingerprint(match);
@@ -2538,6 +2273,7 @@ var discoveryObserver = createDiscoveryObserver({
 });
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
+    if (_isProtectedUrl(details.url)) return;
     discoveryObserver.onHeaders({
       url: details.url,
       responseHeaders: details.responseHeaders
@@ -2546,9 +2282,9 @@ chrome.webRequest.onHeadersReceived.addListener(
   { urls: ["<all_urls>"], types: ["main_frame"] },
   ["responseHeaders"]
 );
-var sessionToTab = new Map();
-var debuggerAttachmentOwners = new Map();
-var traySockets = new Map();
+var sessionToTab =  new Map();
+var debuggerAttachmentOwners =  new Map();
+var traySockets =  new Map();
 async function acquireDebuggerAttachment(tabId, owner) {
   if (debuggerAttachmentOwners.has(tabId)) return false;
   await chrome.debugger.attach({ tabId }, "1.3");
@@ -2831,7 +2567,7 @@ async function cdpCloseTarget2(params) {
   await chrome.tabs.remove(tabId);
   return { success: true };
 }
-var CDP_UNMASK_METHODS = new Set([
+var CDP_UNMASK_METHODS =  new Set([
   "Runtime.evaluate",
   "Runtime.callFunctionOn",
   "Input.insertText"
@@ -2950,9 +2686,13 @@ async function buildSecretsPipeline() {
   return new SecretsPipeline({ sessionId, source, sessionStore: sessionSecretStore });
 }
 var bridgeSwDeps = buildDefaultBridgeSwDeps({
- 
-  // SW's writeStoredLeaderTabId so a Chrome-restored leader also regains its
- 
+
+  writeStoredLeaderTabId: async (tabId) => {
+    try {
+      await writeStoredLeaderTabId(tabId);
+    } catch {
+    }
+  },
   attachDebugger: (tabId) => acquireDebuggerAttachment(tabId, "bridge"),
   detachDebugger: (tabId) => releaseDebuggerAttachment(tabId, "bridge"),
   sendDebuggerCommand: async (tabId, method, params) => {
@@ -3349,7 +3089,6 @@ chrome.runtime.onMessage.addListener(
     return handler(msg, sendResponse);
   }
 );
-
 export {
   appendLeaderExtIdParam,
   getLeaderTabOrigin,

@@ -34,11 +34,25 @@
   "content_scripts": [
     {
       "matches": ["https://*.sliccy.ai/*"],
+      "exclude_matches": [
+        "https://sliccy.ai/*",
+        "https://vault.sliccy.ai/*",
+        "https://vault-preview.sliccy.ai/*",
+        "https://get.sliccy.ai/*",
+        "https://mcpcat.sliccy.ai/*"
+      ],
       "js": ["relay.js"],
       "run_at": "document_start"
     },
     {
       "matches": ["https://*.sliccy.ai/*"],
+      "exclude_matches": [
+        "https://sliccy.ai/*",
+        "https://vault.sliccy.ai/*",
+        "https://vault-preview.sliccy.ai/*",
+        "https://get.sliccy.ai/*",
+        "https://mcpcat.sliccy.ai/*"
+      ],
       "js": ["page.js"],
       "run_at": "document_start",
       "world": "MAIN"

@@ -189,6 +189,12 @@ test('an untrusted sender is disconnected before a CDP command can run', () => {
     ['slicc-fetch', 'https://seven.sliccy.ai.evil.test/', extensionId],
     ['slicc-fetch', 'https://seven.sliccy.ai/', 'someone-else'],
     ['slicc-fetch', 'not a url', extensionId],
+    ['slicc-fetch', 'https://vault.sliccy.ai/', extensionId],
+    ['slicc-fetch', 'https://vault-preview.sliccy.ai/', extensionId],
+    ['slicc-fetch', 'https://vault-x.sliccy.ai/', extensionId],
+    ['slicc-fetch', 'https://get.sliccy.ai/', extensionId],
+    ['slicc-fetch', 'https://mcpcat.sliccy.ai/', extensionId],
+    ['slicc-fetch', 'https://sliccy.ai/', extensionId],
   ];
   for (const [name, url, id] of rejected) {
     const connection = port(name, url, id);
