@@ -1,0 +1,66 @@
+name: Six Auto-Bump
+
+on:
+  schedule:
+    - cron: "15 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: six-auto-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LEFTHOOK: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Check for six update
+        id: check
+        run: node scripts/six-auto-bump.mjs
+
+      - name: Update .six-tag
+        if: steps.check.outputs.bump == 'true'
+        run: printf '%s' "${{ steps.check.outputs.new_tag }}" > .six-tag
+
+      - name: Build at new tag
+        if: steps.check.outputs.bump == 'true'
+        run: npm run build
+
+      - name: Lint
+        if: steps.check.outputs.bump == 'true'
+        run: npm run lint
+
+      - name: Chromium system dependencies
+        if: steps.check.outputs.bump == 'true'
+        run: npx playwright-core install --with-deps chromium
+
+      - name: Integration tests
+        if: steps.check.outputs.bump == 'true'
+        run: npm test
+        env:
+          NODE_OPTIONS: "--max-old-space-size=4096"
+
+      - name: Commit and push
+        if: steps.check.outputs.bump == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .six-tag
+          git commit -m "fix: build six ${{ steps.check.outputs.new_tag }}"
+          git push origin HEAD:main
