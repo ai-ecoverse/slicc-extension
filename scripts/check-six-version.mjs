@@ -56,17 +56,31 @@ export function extractManifestFromCrx(crxBuffer) {
 
 export function extractManifestFromZip(zipBuf) {
   const buf = Buffer.from(zipBuf);
-  let offset = 0;
-  while (offset + 30 <= buf.length) {
-    const sig = buf.readUInt32LE(offset);
-    if (sig !== 0x04034b50) break;
-    const compression = buf.readUInt16LE(offset + 8);
-    const compressedSize = buf.readUInt32LE(offset + 18);
-    const nameLen = buf.readUInt16LE(offset + 26);
-    const extraLen = buf.readUInt16LE(offset + 28);
-    const name = buf.slice(offset + 30, offset + 30 + nameLen).toString();
-    const dataStart = offset + 30 + nameLen + extraLen;
+  let eocdOffset = -1;
+  for (let i = buf.length - 22; i >= 0; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset < 0) throw new Error('ZIP end-of-central-directory not found');
+  const cdOffset = buf.readUInt32LE(eocdOffset + 16);
+  const cdSize = buf.readUInt32LE(eocdOffset + 12);
+  let pos = cdOffset;
+  const cdEnd = cdOffset + cdSize;
+  while (pos + 46 <= cdEnd) {
+    if (buf.readUInt32LE(pos) !== 0x02014b50) break;
+    const compression = buf.readUInt16LE(pos + 10);
+    const compressedSize = buf.readUInt32LE(pos + 20);
+    const nameLen = buf.readUInt16LE(pos + 28);
+    const extraLen = buf.readUInt16LE(pos + 30);
+    const commentLen = buf.readUInt16LE(pos + 32);
+    const localHeaderOffset = buf.readUInt32LE(pos + 42);
+    const name = buf.slice(pos + 46, pos + 46 + nameLen).toString();
     if (name === 'manifest.json') {
+      const lNameLen = buf.readUInt16LE(localHeaderOffset + 26);
+      const lExtraLen = buf.readUInt16LE(localHeaderOffset + 28);
+      const dataStart = localHeaderOffset + 30 + lNameLen + lExtraLen;
       const raw = buf.slice(dataStart, dataStart + compressedSize);
       if (compression === 0) return JSON.parse(raw.toString());
       return new Promise((res, rej) => {
@@ -84,7 +98,7 @@ export function extractManifestFromZip(zipBuf) {
         inflate.end(raw);
       });
     }
-    offset = dataStart + compressedSize;
+    pos += 46 + nameLen + extraLen + commentLen;
   }
   throw new Error('manifest.json not found in CRX/ZIP');
 }

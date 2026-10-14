@@ -49,7 +49,6 @@ jobs:
       - run: npx semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SIX_REF: ${{ inputs.six_ref || '' }}
 
   publish:
     needs: release
@@ -98,11 +97,15 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Pack extension
+      - name: Download release asset
         if: steps.version.outputs.skip == 'false'
         env:
-          SIX_REF: ${{ inputs.six_ref || '' }}
-        run: node scripts/build-six.mjs && node scripts/strip-comments.mjs && node scripts/pack.mjs "${{ steps.version.outputs.version }}"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          gh release download "v${{ steps.version.outputs.version }}" \
+            --pattern 'slicc-extension.zip' \
+            --dir artifacts
 
       - name: Publish to Chrome Web Store
         if: steps.version.outputs.skip == 'false'
