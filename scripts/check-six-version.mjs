@@ -123,6 +123,49 @@ export async function fetchCrxManifest(codebaseUrl, opts = {}) {
   return extractManifestFromCrx(buf);
 }
 
+export function resolveLatestV6Tag(tagLines) {
+  const tags = tagLines
+    .split('\n')
+    .map((line) => line.replace(/.*refs\/tags\//, '').replace(/\^{}$/, ''))
+    .filter((t) => /^v6\.\d+/.test(t));
+  const unique = [...new Set(tags)];
+  unique.sort((a, b) => compareVersions(a.replace(/^v/, ''), b.replace(/^v/, '')));
+  return unique.at(-1) ?? null;
+}
+
+export async function checkSixFreshness(sixTag, opts = {}) {
+  const sixVersion = parseSixVersion(sixTag);
+  if (!sixVersion) return { ok: false, error: `Invalid six tag: ${sixTag}` };
+
+  let latestTag;
+  if (opts.resolveLatest) {
+    latestTag = await opts.resolveLatest();
+  } else {
+    const { execFileSync } = await import('node:child_process');
+    const raw = execFileSync(
+      'git',
+      ['ls-remote', '--tags', 'https://github.com/ai-ecoverse/slicc.git', 'refs/tags/v6.*'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    latestTag = resolveLatestV6Tag(raw);
+  }
+
+  if (!latestTag) return { ok: false, error: 'Could not resolve latest v6.* tag' };
+
+  const latestVersion = parseSixVersion(latestTag);
+  if (!latestVersion) return { ok: false, error: `Invalid latest tag: ${latestTag}` };
+
+  if (compareVersions(sixVersion, latestVersion) < 0) {
+    return {
+      ok: false,
+      error: `Pinned six ${sixVersion} is older than the latest v6 tag ${latestTag}`,
+      latestTag,
+    };
+  }
+
+  return { ok: true, sixVersion, latestTag };
+}
+
 export async function checkSixVersion(sixTag, opts = {}) {
   const sixVersion = parseSixVersion(sixTag);
   if (!sixVersion) {
@@ -195,20 +238,28 @@ function readSixRef() {
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   const sixTag = readSixRef();
+  const isExplicitOverride = !!process.env.SIX_REF;
 
-  checkSixVersion(sixTag).then(
-    (result) => {
-      if (!result.ok) {
-        process.stderr.write(`GUARD FAILED: ${result.error}\n`);
-        process.exit(1);
-      }
-      process.stdout.write(
-        `Six version guard passed: pinned=${result.sixVersion} live=${result.liveVersion}\n`
-      );
-    },
-    (err) => {
-      process.stderr.write(`${err.message}\n`);
+  const freshness = await checkSixFreshness(sixTag);
+  if (!freshness.ok) {
+    if (isExplicitOverride) {
+      process.stderr.write(`WARNING: ${freshness.error} — allowed because SIX_REF is set\n`);
+    } else {
+      process.stderr.write(`GUARD FAILED: ${freshness.error}\n`);
       process.exit(1);
     }
+  } else {
+    process.stdout.write(
+      `Six freshness passed: pinned=${freshness.sixVersion} latest=${freshness.latestTag}\n`
+    );
+  }
+
+  const result = await checkSixVersion(sixTag);
+  if (!result.ok) {
+    process.stderr.write(`GUARD FAILED: ${result.error}\n`);
+    process.exit(1);
+  }
+  process.stdout.write(
+    `Six version guard passed: pinned=${result.sixVersion} live=${result.liveVersion}\n`
   );
 }
