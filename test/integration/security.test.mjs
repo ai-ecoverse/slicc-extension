@@ -418,31 +418,17 @@ test('six bridge navigation to vault triggers detach (B24-1-tabs-onupdated)', as
     });
     await new Promise((r) => setTimeout(r, 300));
 
-    const targets = await send('Target.getTargets');
-    const ordinary = targets.result?.targetInfos?.find(
-      (ti) =>
-        !ti.url.startsWith('https://www.sliccy.ai') &&
-        !ti.url.startsWith('chrome') &&
-        ti.type === 'page'
-    );
-    if (!ordinary) {
-      const created = await send('Target.createTarget', { url: 'https://other.test/' });
-      if (created.error) {
-        port.disconnect();
-        return { error: 'create failed', created };
-      }
-      await new Promise((r) => setTimeout(r, 1000));
-      const newTargets = await send('Target.getTargets');
-      const newTab = newTargets.result?.targetInfos?.find((ti) =>
-        ti.url.startsWith('https://other.test')
-      );
-      if (!newTab) {
-        port.disconnect();
-        return { error: 'no other.test tab', newTargets };
-      }
-      var tabId = newTab.targetId;
-    } else {
-      tabId = ordinary.targetId;
+    const created = await send('Target.createTarget', { url: 'https://other.test/' });
+    if (created.error) {
+      port.disconnect();
+      return { error: 'create failed', created };
+    }
+    const tabId = created.result.targetId;
+    for (let i = 0; i < 50; i++) {
+      const listed = await send('Target.getTargets');
+      const found = listed.result?.targetInfos?.find((ti) => ti.targetId === tabId);
+      if (found?.url.startsWith('https://other.test')) break;
+      await new Promise((r) => setTimeout(r, 100));
     }
 
     const attached = await send('Target.attachToTarget', {

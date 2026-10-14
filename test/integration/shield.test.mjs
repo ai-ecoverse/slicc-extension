@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { launch } from './chrome.mjs';
+import { install } from './client.mjs';
 
 let chrome;
 before(async () => {
@@ -11,84 +12,6 @@ after(() => chrome?.close());
 const slicc = 'https://seven.sliccy.ai/';
 const ordinary = 'https://other.test';
 const targets = { seven: 'https://seven.sliccy.ai', vault: 'https://vault.sliccy.ai' };
-
-function install() {
-  const cdp = globalThis.sliccExtension.cdp;
-  const events = [];
-  cdp.on((event) => events.push(event));
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const attempt = (method, params, sessionId) =>
-    cdp.send(method, params, sessionId).then(
-      (result) => ({ result }),
-      (error) => ({ error: String(error?.message ?? error) })
-    );
-  async function evaluate(sessionId, expression) {
-    let last;
-    for (let i = 0; i < 80; i++) {
-      last = await attempt(
-        'Runtime.evaluate',
-        { expression, returnByValue: true, awaitPromise: true, userGesture: true },
-        sessionId
-      );
-      if (last.result && !last.result.exceptionDetails) return last.result.result?.value;
-      if (last.error && !last.error.includes('context')) return { error: last.error };
-      await sleep(100);
-    }
-    return { error: JSON.stringify(last) };
-  }
-  async function until(fn, ms = 10000) {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-      const value = await fn();
-      if (value) return value;
-      await sleep(100);
-    }
-    return undefined;
-  }
-  async function open(url) {
-    const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-    await cdp.send('Page.enable', {}, sessionId);
-    if (url) await land(sessionId, url);
-    return { targetId, sessionId };
-  }
-  async function land(sessionId, url) {
-    await cdp.send('Page.navigate', { url }, sessionId);
-    return until(async () => {
-      const href = await evaluate(
-        sessionId,
-        'document.readyState === "complete" ? location.href : ""'
-      );
-      return typeof href === 'string' && href.startsWith(url) ? href : undefined;
-    });
-  }
-  function detached(sessionId) {
-    return events.some(
-      (event) =>
-        event.method === 'Target.detachedFromTarget' && event.params?.sessionId === sessionId
-    );
-  }
-  function beaconSource(tag) {
-    return `fetch("https://upstream.test/beacon/" + ${JSON.stringify(tag)} + "?at=" + encodeURIComponent(location.href), { mode: "no-cors" }).catch(() => undefined); window.__slicc = ${JSON.stringify(tag)};`;
-  }
-  async function close(targetId) {
-    await attempt('Target.closeTarget', { targetId });
-  }
-  globalThis.h = {
-    cdp,
-    events,
-    sleep,
-    attempt,
-    evaluate,
-    until,
-    open,
-    land,
-    detached,
-    beaconSource,
-    close,
-  };
-  return true;
-}
 
 async function client(t) {
   const page = await chrome.visit(t, slicc);
@@ -205,11 +128,17 @@ for (const [name, origin] of Object.entries(targets)) {
           const listed = (await h.cdp.send('Target.getTargets')).targetInfos.filter(
             (info) => !before.has(info.targetId)
           );
-          const created = h.events
-            .slice(count)
+          const later = h.events.slice(count);
+          const created = later
             .filter((event) => event.method === 'Target.targetCreated')
             .map((event) => event.params.targetInfo);
-          return { listed, created };
+          const destroyed = later
+            .filter((event) => event.method === 'Target.targetDestroyed')
+            .map((event) => event.params.targetId);
+          const leaked = later.some((event) =>
+            /sliccy\.ai|SECRET/.test(JSON.stringify(event.params?.targetInfo ?? {}))
+          );
+          return { listed, created, destroyed, leaked };
         };
         const plain = await popup(`${ordinary}/popup`);
         const plainId = plain.listed[0]?.targetId;
@@ -234,7 +163,13 @@ for (const [name, origin] of Object.entries(targets)) {
     assert.equal(answer.openerId, answer.targetId, 'control popup reports its opener');
     assert.match(answer.attached.result?.sessionId ?? '', /^\d+/, 'control popup attaches');
     assert.deepEqual(answer.guarded.listed, [], 'protected popup is not listed');
-    assert.deepEqual(answer.guarded.created, [], 'protected popup is not announced');
+    assert.equal(answer.guarded.leaked, false, 'no target event shows the protected popup');
+    for (const info of answer.guarded.created) {
+      assert.ok(
+        answer.guarded.destroyed.includes(info.targetId),
+        'a popup announced while blank is destroyed once it becomes protected'
+      );
+    }
     assert.deepEqual(answer.attachedTo, [], 'no popup comes up attached');
     assert.equal(beacons('c3-popup').length, 0, 'the init script never runs in a popup');
     const refused = await page.evaluate(async () =>
@@ -567,7 +502,9 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
       const popup = await h.until(
         async () =>
           h.events.find(
-            (e) => e.method === 'Target.targetCreated' && e.params.targetInfo.openerId === targetId
+            (e) =>
+              (e.method === 'Target.targetCreated' || e.method === 'Target.targetInfoChanged') &&
+              e.params.targetInfo.openerId === targetId
           )?.params.targetInfo
       );
       const popupInfo = (await h.cdp.send('Target.getTargetInfo', { targetId: popup.targetId }))

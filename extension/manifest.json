@@ -12,6 +12,7 @@
     "identity",
     "storage",
     "webRequest",
+    "webNavigation",
     "declarativeNetRequestWithHostAccess",
     "notifications",
     "sidePanel"

@@ -60,6 +60,7 @@ const pr3978needed = content.includes('payload.type === "cdp-command"');
 const pr3979needed = !content.includes('isTrustedInternalSender');
 const pr3980needed = !content.includes('encryptedStorage');
 const pr3980pageNeeded = !secretsJs.includes('listSecretsIncludingUnreadable');
+const pr3980htmlNeeded = !secretsHtml.includes('secret-row-unreadable');
 
 const applied = [];
 const skipped = [];
@@ -297,7 +298,11 @@ if (pr3980pageNeeded) {
     /return el\("div", \{ class: "secret-row", dataset: \{ name: entry\.name \} \}, el\("div", \{ class: "secret-meta" \}, el\("div", \{ class: "secret-name", text: entry\.name \}\), el\("div", \{ class: "secret-domains", text: entry\.domains\.join\(", "\) \}\)\)/,
     'return el("div", { class: entry.unreadable ? "secret-row secret-row-unreadable" : "secret-row", dataset: { name: entry.name } }, el("div", { class: "secret-meta" }, el("div", { class: "secret-name", text: entry.name }), el("div", { class: "secret-domains", text: entry.domains.join(", ") }), ...(entry.unreadable ? [el("div", { class: "secret-unreadable", text: "\\u26a0\\ufe0f Unreadable \\u2014 encryption key lost. Please re-enter this secret." })] : []))'
   );
+} else {
+  skip(3980, 'secrets.js');
+}
 
+if (pr3980htmlNeeded) {
   applyHtml(
     'B-SEC2-page-css',
     /(\n {4}\.empty \{)/,
@@ -310,7 +315,6 @@ if (pr3980pageNeeded) {
     'Encrypted\n        at rest (AES-GCM); the agent sees only masked placeholders, and content scripts\n        cannot read the plaintext values.'
   );
 } else {
-  skip(3980, 'secrets.js');
   skip(3980, 'secrets.html');
 }
 
@@ -327,7 +331,7 @@ if (applied.length > 0) {
 }
 if (skipped.length > 0) {
   process.stdout.write(
-    `Skipped ${skipped.length} patches (already fixed upstream): ${skipped.join(', ')}\n`
+    `Skipped ${skipped.length} patches (sentinel present): ${skipped.join(', ')}\n`
   );
 }
 

@@ -64,11 +64,30 @@ async function readTab(api, tabId) {
   refusal();
 }
 
-async function openerOf(api, tab) {
-  if (typeof tab?.openerTabId !== 'number') return 'unprotected';
+const sources = new Map();
+const tracked = new WeakSet();
+
+function trackSources(api) {
+  if (tracked.has(api)) return;
+  tracked.add(api);
+  api.webNavigation?.onCreatedNavigationTarget?.addListener((details) => {
+    if (typeof details?.tabId === 'number' && typeof details?.sourceTabId === 'number') {
+      sources.set(details.tabId, details.sourceTabId);
+    }
+  });
+  api.tabs.onRemoved?.addListener((tabId) => sources.delete(tabId));
+}
+
+function openerIdOf(tab) {
+  const source = sources.get(tab?.id);
+  if (typeof source === 'number') return source;
+  return typeof tab?.openerTabId === 'number' ? tab.openerTabId : undefined;
+}
+
+async function classifyOpener(api, openerId) {
   let opener;
   try {
-    opener = await api.tabs.get(tab.openerTabId);
+    opener = await api.tabs.get(openerId);
   } catch {
     return 'unknown';
   }
@@ -81,6 +100,20 @@ async function openerOf(api, tab) {
   if (blocked(url, 'unknown')) return 'unknown';
   if (pending && pending !== url && blocked(pending, 'unknown', guard.url(url))) return 'unknown';
   return 'unprotected';
+}
+
+async function openerOf(api, tab) {
+  const ids = new Set();
+  if (typeof tab?.openerTabId === 'number') ids.add(tab.openerTabId);
+  const source = sources.get(tab?.id);
+  if (typeof source === 'number') ids.add(source);
+  let worst = 'unprotected';
+  for (const id of ids) {
+    const found = await classifyOpener(api, id);
+    if (found === 'protected') return found;
+    if (found === 'unknown') worst = found;
+  }
+  return worst;
 }
 
 async function demandTab(api, tab) {
@@ -176,6 +209,14 @@ async function activate(api, tabId) {
   }
 }
 
+function bounded(promise, ms, label) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}: no answer in ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
 function plainContinue(params) {
   return Object.keys(params).every((key) => key === 'requestId');
 }
@@ -184,6 +225,7 @@ class Connection {
   constructor(port, api) {
     this.port = port;
     this.api = api;
+    trackSources(api);
     this.state = {
       sessions: new Map(),
       tabs: new Map(),
@@ -202,12 +244,14 @@ class Connection {
     this.onUpdated = this.onUpdated.bind(this);
     this.onCreated = this.onCreated.bind(this);
     this.onRemoved = this.onRemoved.bind(this);
+    this.onSource = this.onSource.bind(this);
     this.shutdown = this.shutdown.bind(this);
     api.debugger.onEvent.addListener(this.onEvent);
     api.debugger.onDetach.addListener(this.onDetach);
     api.tabs.onUpdated?.addListener(this.onUpdated);
     api.tabs.onCreated?.addListener(this.onCreated);
     api.tabs.onRemoved?.addListener(this.onRemoved);
+    api.webNavigation?.onCreatedNavigationTarget?.addListener(this.onSource);
     port.onDisconnect.addListener(this.shutdown);
   }
 
@@ -262,11 +306,12 @@ class Connection {
       targetId: String(tab.id),
       type: 'page',
       title: tab.title ?? '',
-      url: tab.url ?? '',
+      url: tab.url || tab.pendingUrl || '',
       attached: this.sessionsOf(tab.id).length > 0,
       canAccessOpener: false,
     };
-    if (typeof tab.openerTabId === 'number') out.openerId = String(tab.openerTabId);
+    const openerId = openerIdOf(tab);
+    if (openerId !== undefined) out.openerId = String(openerId);
     return out;
   }
 
@@ -380,7 +425,11 @@ class Connection {
         throw new Error('chrome.windows.create did not return a tab id');
       return { targetId: String(tabId) };
     }
-    const tab = await this.api.tabs.create({ url: url || 'about:blank', active: false });
+    const tab = await bounded(
+      this.api.tabs.create({ url: url || 'about:blank', active: false }),
+      10000,
+      'Target.createTarget'
+    );
     if (typeof tab?.id !== 'number') throw new Error('chrome.tabs.create did not return a tab id');
     return { targetId: String(tab.id) };
   }
@@ -402,14 +451,16 @@ class Connection {
         params: { sessionId, targetId: String(tabId) },
       });
     }
-    if (owned) await this.api.debugger.detach({ tabId }).catch(() => undefined);
-    await this.api.tabs.remove(tabId);
+    if (owned) {
+      await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+    }
+    await bounded(this.api.tabs.remove(tabId), 10000, 'Target.closeTarget');
     return { success: true };
   }
 
   async mainFrameOf(tabId) {
     try {
-      const tree = await this.send(tabId, 'Page.getFrameTree', {});
+      const tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
       return textOf(tree?.frameTree?.frame?.id);
     } catch {
       return '';
@@ -424,7 +475,7 @@ class Connection {
     let tab = this.tabState(tabId);
     if (!tab) {
       if (!this.state.ownedTabs.has(tabId)) {
-        await this.api.debugger.attach({ tabId }, '1.3');
+        await bounded(this.api.debugger.attach({ tabId }, '1.3'), 10000, 'Target.attachToTarget');
         this.state.ownedTabs.add(tabId);
       }
       tab = {
@@ -439,10 +490,10 @@ class Connection {
       };
       this.state.tabs.set(tabId, tab);
       try {
-        await this.applyFetch(tabId);
+        await bounded(this.applyFetch(tabId), 10000, 'Target.attachToTarget');
       } catch (error) {
         this.forget(tabId);
-        await this.api.debugger.detach({ tabId }).catch(() => undefined);
+        await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
         throw error;
       }
       const main = await this.mainFrameOf(tabId);
@@ -481,13 +532,15 @@ class Connection {
       params: { sessionId, targetId: String(tabId) },
     });
     if (tab && tab.sessions.size > 0) {
-      await this.settlePaused(tabId, sessionId).catch(() => undefined);
-      await this.applyFetch(tabId).catch(() => undefined);
+      await bounded(this.settlePaused(tabId, sessionId), 5000, 'detach').catch(() => undefined);
+      await bounded(this.applyFetch(tabId), 5000, 'detach').catch(() => undefined);
       return {};
     }
     const owned = this.state.ownedTabs.has(tabId);
     this.forget(tabId);
-    if (owned) await this.api.debugger.detach({ tabId }).catch(() => undefined);
+    if (owned) {
+      await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+    }
     return {};
   }
 
@@ -550,7 +603,7 @@ class Connection {
       if (method === 'Fetch.authRequired') {
         await this.send(tabId, 'Fetch.continueWithAuth', {
           requestId,
-          authChallengeResponse: { response: 'CancelAuth' },
+          authChallengeResponse: { response: 'Default' },
         }).catch(() => undefined);
         return;
       }
@@ -870,6 +923,14 @@ class Connection {
     });
   }
 
+  onSource(details) {
+    if (!this.state.discover || !this.state.seen.has(details?.tabId)) return;
+    void this.api.tabs
+      .get(details.tabId)
+      .then((tab) => this.announce(tab, false))
+      .catch(() => undefined);
+  }
+
   onCreated(tab) {
     void this.announce(tab, true).catch(() => undefined);
   }
@@ -943,6 +1004,7 @@ class Connection {
     this.api.tabs.onUpdated?.removeListener(this.onUpdated);
     this.api.tabs.onCreated?.removeListener(this.onCreated);
     this.api.tabs.onRemoved?.removeListener(this.onRemoved);
+    this.api.webNavigation?.onCreatedNavigationTarget?.removeListener(this.onSource);
     const owned = [...this.state.ownedTabs];
     for (const tabId of [...this.state.inflight.keys()]) this.drop(tabId);
     this.state.ownedTabs.clear();
