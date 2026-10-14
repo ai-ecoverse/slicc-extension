@@ -67,161 +67,129 @@ function extClose(page, targetId) {
     .catch(() => undefined);
 }
 
-test('plaintext canary: migration encrypts 6.248.11 plaintext, content-script world sees no canary, secrets page lists it, fetch proxy injects it (B-SEC2)', async (t) => {
+async function relayWorld(page) {
+  const probe =
+    'typeof serve === "function" && typeof chrome?.storage?.local?.get === "function" && location.hostname === "seven.sliccy.ai" ? chrome.runtime.id : null';
+  for (let round = 0; round < 20; round++) {
+    for (let contextId = 1; contextId <= 400; contextId++) {
+      const answer = await page
+        .send('Runtime.evaluate', { expression: probe, returnByValue: true, contextId }, 5000)
+        .catch(() => null);
+      if (answer?.result?.value === extId) return contextId;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error('relay.js isolated world not found');
+}
+
+function secretsCall(page, sid, message) {
+  return extEval(
+    page,
+    sid,
+    `new Promise((resolve, reject) => { chrome.runtime.sendMessage(${JSON.stringify(message)}, (r) => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : resolve(r)); })`
+  ).then((r) => r.result.value);
+}
+
+test('plaintext canary: migration encrypts 6.248.11 plaintext, relay.js world sees no canary, secrets.list lists it, fetch proxy delivers it upstream (B-SEC2)', async (t) => {
   const page = await chrome.visit(t, slicc);
   const canaryName = `B8_CANARY_${Date.now()}`;
   const canaryPlaintext = 'super-secret-canary-value-12345';
   const { targetId: secTid } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
   const secSid = await extSession(page, secTid);
 
-  await extEval(
+  const planted = await extEval(
     page,
     secSid,
-    `new Promise((resolve, reject) => { chrome.storage.local.set({ "${canaryName}": "${canaryPlaintext}", "${canaryName}_DOMAINS": "upstream.test" }, () => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : resolve("planted")); })`
+    `new Promise((resolve, reject) => { chrome.storage.local.set({ ${JSON.stringify(canaryName)}: ${JSON.stringify(canaryPlaintext)}, ${JSON.stringify(`${canaryName}_DOMAINS`)}: "upstream.test" }, () => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : chrome.storage.local.get(${JSON.stringify(canaryName)}, (r) => resolve(r[${JSON.stringify(canaryName)}]))); })`
   );
+  assert.equal(planted.result.value, canaryPlaintext, 'canary must be planted as plaintext');
 
-  const beforeMigration = await extEval(
-    page,
-    secSid,
-    `new Promise((resolve) => { chrome.storage.local.get("${canaryName}", (r) => { const v = r["${canaryName}"]; resolve({ type: typeof v, isString: typeof v === "string" }); }); })`
-  );
-  assert.equal(
-    beforeMigration.result.value.isString,
-    true,
-    'canary must be plaintext string before migration'
-  );
+  const triggered = await secretsCall(page, secSid, { type: 'secrets.list' });
+  assert.ok(Array.isArray(triggered?.entries), 'secrets.list must answer');
 
-  await extEval(
-    page,
-    secSid,
-    `new Promise((resolve, reject) => { chrome.runtime.sendMessage({ type: "secrets.list" }, (r) => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : resolve(r)); })`
-  );
-  await new Promise((r) => setTimeout(r, 1000));
-
-  const afterMigration = await extEval(
-    page,
-    secSid,
-    `new Promise((resolve) => { chrome.storage.local.get("${canaryName}", (r) => { const v = r["${canaryName}"]; resolve({ type: typeof v, isEncrypted: typeof v === "object" && v !== null && typeof v.ct === "string" && typeof v.iv === "string", isPlaintext: typeof v === "string" }); }); })`
-  );
-  assert.equal(
-    afterMigration.result.value.isPlaintext,
-    false,
-    'canary must not be plaintext after migration'
-  );
-  assert.equal(
-    afterMigration.result.value.isEncrypted,
-    true,
-    'canary must be encrypted {ct, iv} after migration'
-  );
-
-  const sliccPage = await chrome.visit(t, slicc);
-  const { targetId: sliccTid } = await sliccPage.evaluate(async () => {
-    const { targetInfos } = await globalThis.sliccExtension.cdp.send('Target.getTargets');
-    const tab = targetInfos.find((ti) => ti.url.startsWith('https://seven.sliccy.ai'));
-    return { targetId: tab?.targetId };
+  const world = await relayWorld(page);
+  const dump = await page.send('Runtime.evaluate', {
+    expression:
+      'new Promise((resolve) => chrome.storage.local.get(null, (items) => resolve(JSON.stringify(items))))',
+    awaitPromise: true,
+    returnByValue: true,
+    contextId: world,
   });
-  assert.ok(sliccTid, 'must find the seven.sliccy.ai tab');
-  const sliccSid = await extSession(sliccPage, sliccTid);
-
-  await sliccPage.evaluate(
-    async (sid) => globalThis.sliccExtension.cdp.send('Runtime.enable', {}, sid),
-    sliccSid
-  );
-  await new Promise((r) => setTimeout(r, 500));
-
-  const contexts = await sliccPage.evaluate(
-    async (opts) => {
-      const result = await globalThis.sliccExtension.cdp.send(
-        'Runtime.evaluate',
-        {
-          expression: '1',
-          returnByValue: true,
-          includeCommandLineAPI: false,
-        },
-        opts.sid
-      );
-      return result;
-    },
-    { sid: sliccSid }
-  );
-
-  const csCheck = await sliccPage.evaluate(
-    async (opts) => {
-      const contexts = [];
-      const off = globalThis.sliccExtension.cdp.on((event) => {
-        if (
-          event.method === 'Runtime.executionContextCreated' &&
-          event.params?.context?.auxData?.type === 'isolated' &&
-          event.params?.context?.name?.startsWith('chrome-extension://')
-        ) {
-          contexts.push(event.params.context);
-        }
-      });
-      await globalThis.sliccExtension.cdp.send('Runtime.disable', {}, opts.sid);
-      await globalThis.sliccExtension.cdp.send('Runtime.enable', {}, opts.sid);
-      await new Promise((r) => setTimeout(r, 500));
-      off();
-      if (contexts.length === 0) return { error: 'no isolated context found' };
-      const ctx = contexts[0];
-      const storageResult = await globalThis.sliccExtension.cdp.send(
-        'Runtime.evaluate',
-        {
-          expression: `new Promise((resolve) => { chrome.storage.local.get(null, (items) => resolve(JSON.stringify(items))); })`,
-          awaitPromise: true,
-          returnByValue: true,
-          contextId: ctx.id,
-        },
-        opts.sid
-      );
-      return {
-        contextId: ctx.id,
-        contextName: ctx.name,
-        storage: storageResult.result?.value,
-      };
-    },
-    { sid: sliccSid, canaryName, canaryPlaintext, extId }
-  );
-  assert.ok(!csCheck.error, `content-script check failed: ${csCheck.error}`);
-  assert.ok(csCheck.storage, 'must read storage from content-script world');
-  const storageItems = JSON.parse(csCheck.storage);
-  const allValues = JSON.stringify(Object.values(storageItems));
-  assert.equal(
-    allValues.includes(canaryPlaintext),
-    false,
-    `canary plaintext "${canaryPlaintext}" must not appear in any storage value from content-script world`
-  );
-
-  const listed = await extEval(
-    page,
-    secSid,
-    `new Promise((resolve, reject) => { chrome.runtime.sendMessage({ type: "secrets.list" }, (r) => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : resolve(r)); })`
-  );
-  const entries = listed.result.value?.entries ?? [];
+  assert.equal(dump.exceptionDetails, undefined, 'relay.js world must read chrome.storage.local');
+  const items = JSON.parse(dump.result.value);
+  const stored = items[canaryName];
   assert.ok(
-    entries.some((e) => e.name === canaryName),
+    stored && typeof stored.ct === 'string' && typeof stored.iv === 'string',
+    `canary must be stored as {ct, iv}: got ${JSON.stringify(stored)}`
+  );
+  for (const [key, value] of Object.entries(items)) {
+    assert.equal(
+      JSON.stringify(value).includes(canaryPlaintext),
+      false,
+      `relay.js world sees the canary in ${key}`
+    );
+  }
+
+  const listed = await secretsCall(page, secSid, { type: 'secrets.list' });
+  assert.ok(
+    (listed?.entries ?? []).some((e) => e.name === canaryName),
     `secrets.list must include ${canaryName}`
   );
 
-  const remote = `https://upstream.test`;
-  const fetched = await sliccPage.evaluate(
+  const masked = await secretsCall(page, secSid, { type: 'secrets.list-masked-entries' });
+  const entry = (masked?.entries ?? []).find((e) => e.name === canaryName);
+  assert.ok(entry, `masked entries must include ${canaryName}`);
+  assert.notEqual(entry.maskedValue, canaryPlaintext, 'masked value must differ from plaintext');
+
+  const www = await chrome.visit(t, 'https://www.sliccy.ai/?slicc=leader');
+  const answer = await www.evaluate(
     async (opts) => {
-      const response = await globalThis.sliccExtension.fetch(`${opts.remote}/probe-canary`, {
-        headers: { 'x-secret': `${opts.canaryPlaintext}` },
+      const port = chrome.runtime.connect(opts.extId, { name: 'fetch-proxy.fetch' });
+      const done = new Promise((resolve) => {
+        const chunks = [];
+        let head;
+        port.onMessage.addListener((msg) => {
+          if (msg.type === 'response-head') head = msg;
+          if (msg.type === 'response-chunk') chunks.push(msg.dataBase64);
+          if (msg.type === 'response-error') resolve({ error: msg.error });
+          if (msg.type === 'response-end') {
+            const text = chunks.map((c) => atob(c)).join('');
+            resolve({ status: head?.status, text });
+          }
+        });
+        port.onDisconnect.addListener(() => resolve({ error: 'disconnected' }));
       });
-      return response.json();
+      port.postMessage({
+        type: 'request',
+        url: `https://upstream.test/probe-canary/${opts.canaryName}`,
+        method: 'GET',
+        headers: { 'x-secret': opts.masked },
+      });
+      const result = await done;
+      port.disconnect();
+      return result;
     },
-    { remote, canaryPlaintext }
+    { extId, canaryName, masked: entry.maskedValue }
+  );
+  assert.ok(!answer.error, `fetch proxy failed: ${answer.error}`);
+  assert.equal(answer.status, 200);
+  const seen = chrome.upstream.seen.filter((s) => s.path === `/probe-canary/${canaryName}`);
+  assert.equal(seen.length, 1, 'upstream must receive the proxied request');
+  assert.equal(
+    seen[0].headers['x-secret'],
+    canaryPlaintext,
+    'upstream must receive the unmasked plaintext'
   );
   assert.equal(
-    fetched.headers?.['x-secret'],
-    canaryPlaintext,
-    'fetch proxy must deliver the plaintext value to upstream'
+    answer.text.includes(canaryPlaintext),
+    false,
+    'the proxied response must not hand the plaintext back to the page'
   );
 
   await extEval(
     page,
     secSid,
-    `new Promise((resolve) => { chrome.storage.local.remove(["${canaryName}", "${canaryName}_DOMAINS"], resolve); })`
+    `new Promise((resolve) => { chrome.storage.local.remove([${JSON.stringify(canaryName)}, ${JSON.stringify(`${canaryName}_DOMAINS`)}], resolve); })`
   );
   await extClose(page, secTid);
 });

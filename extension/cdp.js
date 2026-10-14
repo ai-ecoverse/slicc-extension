@@ -127,7 +127,32 @@ function sessionFor(state, tabId) {
   return undefined;
 }
 
+function inflight(state, tabId, command) {
+  let entry;
+  const dropped = new Promise((_, reject) => {
+    entry = reject;
+  });
+  let set = state.inflight.get(tabId);
+  if (!set) {
+    set = new Set();
+    state.inflight.set(tabId, set);
+  }
+  set.add(entry);
+  return Promise.race([command, dropped]).finally(() => {
+    set.delete(entry);
+    if (set.size === 0 && state.inflight.get(tabId) === set) state.inflight.delete(tabId);
+  });
+}
+
+function drop(state, tabId) {
+  const set = state.inflight.get(tabId);
+  if (!set) return;
+  state.inflight.delete(tabId);
+  for (const reject of set) reject(new Error('Target detached'));
+}
+
 function forget(state, tabId) {
+  drop(state, tabId);
   state.ownedTabs.delete(tabId);
   state.attachRefCounts.delete(tabId);
   state.pageUrl.delete(tabId);
@@ -242,7 +267,7 @@ async function pass(message, state, api) {
     demand(params?.url, { opener: 'unprotected', previous: guard.url(seen.url) });
   }
   if (method === 'Page.bringToFront') await activate(api, tabId);
-  const result = await api.debugger.sendCommand({ tabId }, method, params);
+  const result = await inflight(state, tabId, api.debugger.sendCommand({ tabId }, method, params));
   return result ?? {};
 }
 
@@ -274,6 +299,7 @@ function openCdp(port, api) {
     ownedTabs: new Set(),
     pageUrl: new Map(),
     mainFrameId: new Map(),
+    inflight: new Map(),
   };
   let closed = false;
   let chain = Promise.resolve();
@@ -410,6 +436,7 @@ function openCdp(port, api) {
     api.debugger.onDetach.removeListener(onDetach);
     api.tabs.onUpdated?.removeListener(onUpdated);
     const owned = [...state.ownedTabs];
+    for (const tabId of [...state.inflight.keys()]) drop(state, tabId);
     state.ownedTabs.clear();
     state.sessionToTab.clear();
     state.attachRefCounts.clear();
