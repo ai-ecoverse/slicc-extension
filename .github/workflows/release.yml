@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      six_ref:
+        description: "Six release tag to build (default: from .six-tag)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -34,6 +39,10 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      - run: npm run build
+        env:
+          SIX_REF: ${{ inputs.six_ref || '' }}
 
       - run: npm run lint
 
@@ -88,9 +97,15 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Pack extension
+      - name: Download release asset
         if: steps.version.outputs.skip == 'false'
-        run: node scripts/pack.mjs "${{ steps.version.outputs.version }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          gh release download "v${{ steps.version.outputs.version }}" \
+            --pattern 'slicc-extension.zip' \
+            --dir artifacts
 
       - name: Publish to Chrome Web Store
         if: steps.version.outputs.skip == 'false'

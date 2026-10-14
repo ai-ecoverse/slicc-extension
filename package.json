@@ -17,7 +17,6 @@
     "lint": "slicc-lint",
     "format": "biome check --write .",
     "build": "node scripts/build-six.mjs && node scripts/strip-comments.mjs",
-    "prebuild": "node scripts/strip-comments.mjs",
     "pack": "node scripts/build-six.mjs && node scripts/strip-comments.mjs && node scripts/pack.mjs",
     "pretest": "playwright-core install --no-shell chromium",
     "test": "node --test --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs test/integration/*.test.mjs",
