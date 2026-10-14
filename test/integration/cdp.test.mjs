@@ -374,9 +374,8 @@ test('open, attach and navigate refuse seven and the vault', async () => {
     'https://vault.sliccy.ai/oauth/callback',
     'http://a.b.sliccy.ai:8443/x',
     'devtools://devtools/bundled/inspector.html',
-    'about:blank',
-    'about:srcdoc',
-    '',
+    'blob:https://vault.sliccy.ai/abc',
+    'view-source:https://vault.sliccy.ai/',
   ];
   for (const [index, url] of blocked.entries()) {
     const opened = await command(cdp, connection, {
@@ -676,9 +675,15 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
     ).targetId;
     const attached = await fail('Target.attachToTarget', { targetId, flatten: true });
     const vault = await fail('Target.createTarget', { url: 'https://vault.sliccy.ai/' });
-    const blank = await fail('Target.createTarget', { url: 'about:blank' });
+    const blank = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
+      url: 'about:blank',
+    });
+    const blankOk = typeof blank.targetId === 'string';
+    await globalThis.sliccExtension.cdp
+      .send('Target.closeTarget', { targetId: blank.targetId })
+      .catch(() => undefined);
     const created = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
-      url: 'https://example.test/',
+      url: 'https://other.test/',
     });
     const session = await globalThis.sliccExtension.cdp.send('Target.attachToTarget', {
       targetId: created.targetId,
@@ -746,7 +751,7 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
     return {
       attached,
       vault,
-      blank,
+      blankOk,
       navigated,
       gone,
       leaked: seen.some((event) => JSON.stringify(event).includes('seven.sliccy.ai')),
@@ -754,8 +759,131 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
   }, refused);
   assert.equal(answer.attached, refused);
   assert.equal(answer.vault, refused);
-  assert.equal(answer.blank, refused);
+  assert.equal(answer.blankOk, true);
   assert.equal(answer.navigated, refused);
   assert.equal(answer.leaked, false);
   assert.equal(answer.gone === refused || answer.gone.includes('No tab attached'), true);
+});
+
+test('vault-feature-x gets no extension scripts (B24-4)', async (t) => {
+  const page = await chrome.visit(t, 'https://vault-feature-x.sliccy.ai/');
+  assert.equal(
+    await page.evaluate(() => 'sliccExtension' in globalThis),
+    false,
+    'vault-feature-x must not have sliccExtension'
+  );
+});
+
+test('createTarget about:blank succeeds and creates a real tab (S7-1)', async () => {
+  const { connection, api, cdp } = open();
+  const blank = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.createTarget',
+    params: { url: 'about:blank' },
+  });
+  assert.ok(blank.result?.targetId);
+  assert.deepEqual(api.created, [{ url: 'about:blank', active: false }]);
+  const empty = await command(cdp, connection, {
+    id: 2,
+    method: 'Target.createTarget',
+    params: {},
+  });
+  assert.ok(empty.result?.targetId);
+  cdp.close();
+});
+
+test('securityOrigin in Page.frameNavigated triggers detach (S7-1)', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  api.fire(8, 'Page.frameNavigated', {
+    frame: { url: 'https://other.test/', securityOrigin: 'https://vault.sliccy.ai' },
+  });
+  await cdp.settled();
+  assert.equal(connection.posted.at(-1).method, 'Target.detachedFromTarget');
+  cdp.close();
+});
+
+test('Runtime.executionContextCreated with protected origin triggers detach (S7-1)', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  api.fire(8, 'Runtime.executionContextCreated', {
+    context: { id: 1, origin: 'https://vault.sliccy.ai', auxData: { isDefault: true } },
+  });
+  await cdp.settled();
+  assert.equal(connection.posted.at(-1).method, 'Target.detachedFromTarget');
+  cdp.close();
+});
+
+test('concurrent dispatch: awaitPromise evaluate does not deadlock with Fetch.continueRequest (S7-2)', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  let evalResolved = false;
+  let fetchResolved = false;
+  const evalPromise = new Promise((resolve) => {
+    api.debugger.sendCommand = (target, method, params) => {
+      api.sent.push({ tabId: target.tabId, method, params });
+      if (method === 'Runtime.evaluate') {
+        return new Promise((r) => {
+          setTimeout(() => {
+            evalResolved = true;
+            r({ result: { value: 'done' } });
+          }, 50);
+        });
+      }
+      if (method === 'Fetch.continueRequest') {
+        fetchResolved = true;
+        return Promise.resolve({});
+      }
+      return Promise.resolve({ value: 2 });
+    };
+  });
+  cdp.handle({
+    id: 10,
+    method: 'Runtime.evaluate',
+    params: { expression: 'await fetch("/x")', awaitPromise: true },
+    sessionId: '8',
+  });
+  cdp.handle({
+    id: 11,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'r1' },
+    sessionId: '8',
+  });
+  await cdp.settled();
+  assert.equal(evalResolved, true);
+  assert.equal(fetchResolved, true);
+  cdp.close();
+});
+
+test('blob: and view-source: URLs over protected origins are refused in createTarget', async () => {
+  const { connection, api, cdp } = open();
+  for (const url of [
+    'blob:https://vault.sliccy.ai/abc',
+    'view-source:https://vault.sliccy.ai/',
+    'blob:https://seven.sliccy.ai/xyz',
+    'view-source:https://seven.sliccy.ai/page',
+  ]) {
+    const result = await command(cdp, connection, {
+      id: 1,
+      method: 'Target.createTarget',
+      params: { url },
+    });
+    assert.equal(result.error, refused, `${url} should be refused`);
+  }
+  cdp.close();
 });

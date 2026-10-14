@@ -41,6 +41,7 @@
         "https://get.sliccy.ai/*",
         "https://mcpcat.sliccy.ai/*"
       ],
+      "exclude_globs": ["https://vault-*.sliccy.ai/*"],
       "js": ["relay.js"],
       "run_at": "document_start"
     },
@@ -53,6 +54,7 @@
         "https://get.sliccy.ai/*",
         "https://mcpcat.sliccy.ai/*"
       ],
+      "exclude_globs": ["https://vault-*.sliccy.ai/*"],
       "js": ["page.js"],
       "run_at": "document_start",
       "world": "MAIN"

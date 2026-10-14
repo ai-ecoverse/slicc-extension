@@ -87,6 +87,12 @@ export function trusted(sender, extensionId) {
   return protocol === 'https:' && allowedHost(hostname);
 }
 
+export function internal(sender, extensionId) {
+  if (!sender || sender.id !== extensionId) return false;
+  const prefix = 'chrome-extension://' + extensionId;
+  return typeof sender.url === 'string' && sender.url.startsWith(prefix);
+}
+
 function isCdp(message) {
   return (
     message !== null &&
@@ -162,12 +168,12 @@ async function targets(api) {
   };
 }
 
-async function create(params, api) {
+async function create(params, state, api) {
   const url = typeof params.url === 'string' ? params.url : '';
-  demand(url, { opener: 'protected' });
+  if (guard.target({ url })) refusal();
   if (params.newWindow === true) {
     const created = await api.windows.create({
-      url,
+      url: url || 'about:blank',
       type: params.decorated === false ? 'popup' : 'normal',
       focused: params.background !== true,
     });
@@ -175,7 +181,7 @@ async function create(params, api) {
     if (typeof tabId !== 'number') throw new Error('chrome.windows.create did not return a tab id');
     return { targetId: String(tabId) };
   }
-  const tab = await api.tabs.create({ url, active: false });
+  const tab = await api.tabs.create({ url: url || 'about:blank', active: false });
   if (typeof tab?.id !== 'number') throw new Error('chrome.tabs.create did not return a tab id');
   return { targetId: String(tab.id) };
 }
@@ -245,7 +251,7 @@ async function dispatch(message, state, api) {
     case 'Target.getTargets':
       return targets(api);
     case 'Target.createTarget':
-      return create(params, api);
+      return create(params, state, api);
     case 'Target.closeTarget':
       return close(params, state, api);
     case 'Target.activateTarget':
@@ -269,6 +275,7 @@ function openCdp(port, api) {
   };
   let closed = false;
   let chain = Promise.resolve();
+  let pending = Promise.resolve();
 
   function post(message) {
     if (closed) return;
@@ -312,8 +319,27 @@ function openCdp(port, api) {
     return blocked(next, 'unprotected', guard.url(state.pageUrl.get(tabId) ?? ''));
   }
 
+  function protectedOrigin(origin) {
+    if (!origin || origin === 'null' || origin === '://') return false;
+    return guard.url(origin);
+  }
+
   function onEvent(source, method, params) {
     const tabId = source?.tabId;
+    if (method === 'Page.frameNavigated' && !params?.frame?.parentId) {
+      const origin = textOf(params?.frame?.securityOrigin);
+      if (protectedOrigin(origin)) {
+        release(tabId);
+        return;
+      }
+    }
+    if (method === 'Runtime.executionContextCreated') {
+      const ctx = params?.context;
+      if (ctx?.auxData?.isDefault && protectedOrigin(textOf(ctx?.origin))) {
+        release(tabId);
+        return;
+      }
+    }
     const sessionId = sessionFor(state, tabId);
     if (sessionId === undefined) return;
     const next = destination(method, params);
@@ -387,11 +413,21 @@ function openCdp(port, api) {
   return {
     handle(message) {
       if (!isCdp(message)) return false;
-      if (!closed) chain = chain.then(() => run(message)).catch(() => undefined);
+      if (!closed) {
+        const serial =
+          message.method === 'Target.attachToTarget' ||
+          message.method === 'Target.detachFromTarget' ||
+          message.method === 'Target.closeTarget' ||
+          message.method === 'Target.createTarget';
+        const task = serial
+          ? (chain = chain.then(() => run(message)).catch(() => undefined))
+          : run(message).catch(() => undefined);
+        pending = Promise.all([pending, task]).then(() => undefined);
+      }
       return true;
     },
     close,
-    settled: () => chain,
+    settled: () => pending,
   };
 }
 

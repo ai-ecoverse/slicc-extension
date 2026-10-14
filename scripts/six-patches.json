@@ -1,0 +1,79 @@
+[
+  {
+    "id": "B24-1-navigate-bridge",
+    "pr": 3977,
+    "sentinel": "isProtectedUrl",
+    "label": "bridge Page.navigate refusal",
+    "match": 1
+  },
+  {
+    "id": "B24-1-navigate-legacy",
+    "pr": 3977,
+    "sentinel": "isProtectedUrl",
+    "label": "legacy Page.navigate refusal",
+    "match": 1
+  },
+  {
+    "id": "B24-1-attach-bridge",
+    "pr": 3977,
+    "sentinel": "isProtectedUrl",
+    "label": "bridge cdpAttachToTarget guard",
+    "match": 1
+  },
+  {
+    "id": "B24-1-create-bridge",
+    "pr": 3977,
+    "sentinel": "isProtectedUrl",
+    "label": "bridge cdpCreateTarget guard",
+    "match": 1
+  },
+  {
+    "id": "B24-1-attach-legacy",
+    "pr": 3977,
+    "sentinel": "isProtectedUrl",
+    "label": "legacy cdpAttachToTarget2 guard",
+    "match": 1
+  },
+  {
+    "id": "B24-1-create-legacy",
+    "pr": 3977,
+    "sentinel": "isProtectedUrl",
+    "label": "legacy cdpCreateTarget2 guard",
+    "match": 1
+  },
+  {
+    "id": "B24-1-headers-discovery",
+    "pr": 3977,
+    "sentinel": "isProtectedUrl",
+    "label": "discovery onHeadersReceived guard",
+    "match": 1
+  },
+  {
+    "id": "B24-1-headers-handoff",
+    "pr": 3977,
+    "sentinel": "isProtectedUrl",
+    "label": "handoff onHeadersReceived guard",
+    "match": 1
+  },
+  {
+    "id": "B24-3-offscreen-relay",
+    "pr": 3978,
+    "sentinel": "handleRelayMessage_patched",
+    "label": "remove offscreen cdp-command relay",
+    "match": 1
+  },
+  {
+    "id": "B-SEC1-message-router",
+    "pr": 3979,
+    "sentinel": "isTrustedInternalSender",
+    "label": "sender gating in routeSwMessage",
+    "match": 1
+  },
+  {
+    "id": "B-SEC1-onconnect",
+    "pr": 3979,
+    "sentinel": "isTrustedInternalSender",
+    "label": "sender gating in onConnect",
+    "match": 1
+  }
+]
