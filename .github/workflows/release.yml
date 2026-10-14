@@ -102,4 +102,5 @@ jobs:
           CHROME_WEB_STORE_FORCE_CANCEL_PENDING: ${{ vars.CHROME_WEB_STORE_FORCE_CANCEL_PENDING }}
           CHROME_WEB_STORE_SKIP_REVIEW: ${{ vars.CHROME_WEB_STORE_SKIP_REVIEW }}
           CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON }}
+          EXTENSION_VERSION: ${{ steps.version.outputs.version }}
         run: node scripts/cws-publish.mjs

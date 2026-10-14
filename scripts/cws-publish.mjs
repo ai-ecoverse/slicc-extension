@@ -48,12 +48,16 @@ export function readConfig(envObj) {
     throw new Error(
       `Chrome Web Store publishing is partially configured. Missing: ${missing.join(', ')}.`
     );
+  const version = getEnv(envObj, 'EXTENSION_VERSION');
+  if (!version || !/^\d+(\.\d+){0,3}$/.test(version))
+    throw new Error(`EXTENSION_VERSION must be a Chrome extension version, got ${version || 'nothing'}.`);
   const sa = JSON.parse(saJson);
   if (!sa.client_email || !sa.private_key)
     throw new Error('Service account must include client_email and private_key.');
   return {
     publisherId,
     itemId,
+    version,
     publishType: parsePublishType(getEnv(envObj, 'CHROME_WEB_STORE_PUBLISH_TYPE')),
     deployPercentage: parsePercentage(getEnv(envObj, 'CHROME_WEB_STORE_DEPLOY_PERCENTAGE')),
     forceCancelPending: parseBool(
@@ -99,6 +103,28 @@ async function expectJson(response, context) {
     throw new Error(`${context} failed with ${response.status} ${response.statusText}.${detail}`);
   }
   return data;
+}
+
+export function compareVersions(a, b) {
+  const x = String(a).split('.').map(Number);
+  const y = String(b).split('.').map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+export function liveVersions(status) {
+  const submitted =
+    status.submittedItemRevisionStatus?.state === 'PENDING_REVIEW'
+      ? undefined
+      : status.submittedItemRevisionStatus;
+  const versions = [status.publishedItemRevisionStatus, submitted]
+    .flatMap((revision) => revision?.distributionChannels ?? [])
+    .map((channel) => channel?.crxVersion)
+    .filter((version) => typeof version === 'string' && version.length > 0);
+  return versions.length > 0 ? versions : null;
 }
 
 export async function publishRelease(opts = {}) {
@@ -169,6 +195,19 @@ export async function publishRelease(opts = {}) {
     }
   }
 
+  const live = liveVersions(preflight);
+  if (live === null) {
+    throw new Error(
+      `Chrome Web Store status for ${config.itemId} has no crxVersion, so the live version is unknown. Refusing to publish. Status keys: ${Object.keys(preflight).join(', ')}`
+    );
+  }
+  const highest = live.reduce((a, b) => (compareVersions(a, b) >= 0 ? a : b), '0');
+  if (compareVersions(config.version, highest) <= 0) {
+    throw new Error(
+      `Version ${config.version} is not greater than the live Chrome Web Store version ${highest}. Refusing to publish.`
+    );
+  }
+  log.log(`Live version ${highest}, publishing ${config.version}`);
   const zipBytes = readZip();
   log.log(`Uploading ${zipBytes.length} bytes to ${name}`);
   const uploadRes = await expectJson(
@@ -183,6 +222,10 @@ export async function publishRelease(opts = {}) {
     'upload'
   );
 
+  if (uploadRes.crxVersion && uploadRes.crxVersion !== config.version)
+    throw new Error(
+      `Chrome Web Store accepted version ${uploadRes.crxVersion}, but the release is ${config.version}.`
+    );
   if (uploadRes.uploadState === 'FAILED' || uploadRes.uploadState === 'NOT_FOUND')
     throw new Error(`Upload finished immediately in state ${uploadRes.uploadState}.`);
   if (uploadRes.uploadState !== 'SUCCEEDED' && uploadRes.uploadState !== 'IN_PROGRESS')
