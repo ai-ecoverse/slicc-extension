@@ -1,51 +1,76 @@
 # slicc-extension
 
-Chrome MV3 extension that gives SLICC pages on `*.sliccy.ai` the whole web by lifting CORS for them. It has no UI.
+Chrome MV3 extension that serves both six (the hosted leader tab on `www.sliccy.ai`) and seven (SLICC pages on `*.sliccy.ai`). It lifts CORS, relays fetch requests, proxies the Chrome debugger, manages secrets, and provides the side panel UI.
 
-## How it lifts CORS
+## Seven — CORS lifting and relay
 
-1. **Rules.** A static `declarativeNetRequest` rule ([`extension/rules.json`](extension/rules.json)) adds `Access-Control-Allow-Origin: *`, `-Methods: *`, `-Headers: *, authorization` and `-Expose-Headers: *` to every `fetch`/XHR response, preflights included, of requests that a page on `sliccy.ai` or a subdomain starts. `initiatorDomains` matches that document and its subdomains, so a top-level `vault.sliccy.ai` popup and a `vault.sliccy.ai` iframe inside a seven page are both covered. The iframe's fetch is the vault document's own request: it goes through the browser network stack, not through seven's page. A plain `fetch(url, { credentials: 'omit' })` then reads any upstream, and so does the kernel's `fetchTransport()`.
-2. **The relay.** Rules can't help with everything else, so `globalThis.sliccExtension.fetch` sends the request from the extension's service worker, which CORS doesn't apply to. That covers:
-   - preflights the upstream answers with a non-2xx status (GitHub's git endpoints, `example.com` and most servers answer `OPTIONS` with `405`);
-   - the request headers a page can't send: `User-Agent`, `Cookie`, `Referer` and `Origin` go out as the program set them (through a one-off session rule per request), and no `Origin` goes out when it set none.
+1. **Rules.** A static `declarativeNetRequest` rule ([`extension/rules.json`](extension/rules.json)) adds `Access-Control-Allow-Origin: *`, `-Methods: *`, `-Headers: *, authorization` and `-Expose-Headers: *` to every `fetch`/XHR response, preflights included, of requests that a page on `sliccy.ai` or a subdomain starts.
+2. **The relay.** `globalThis.sliccExtension.fetch` sends the request from the extension's service worker, which CORS doesn't apply to. That covers preflights the upstream answers with a non-2xx status and the request headers a page can't send.
 
-What neither does:
-- **Requests with credentials:** the browser's cookie jar is never sent; the rules answer `*`, and the relay fetches with `credentials: 'omit'`.
-- **`Set-Cookie`:** responses never show it, because Chrome hides it from pages and from extension service workers alike.
+## Seven — Chrome debugger
 
-## Handshake
+`sliccExtension.cdp` is a CDP command surface on the `slicc-fetch` port. The service worker accepts the port only when `trusted()` passes. Opening, attaching and navigating refuse protected origins (from `@ai-ecoverse/slicc-browsers` 1.5.0). Protected origins include all `*.sliccy.ai` hosts and `vault.sliccy.ai` specifically.
 
-At `document_start` on `https://*.sliccy.ai/*` the extension defines a frozen `globalThis.sliccExtension` in the page's own world, so the page knows synchronously, before any of its scripts run, whether the extension is there:
+## Six — hosted leader tab
 
-```js
-import { fetchTransport } from '@ai-ecoverse/slicc-kernel';
+The extension manages a pinned leader tab at `https://www.sliccy.ai/?slicc=leader`. The leader tab connects via `externally_connectable` and gets:
 
-const transport = globalThis.sliccExtension
-  ? fetchTransport({ fetch: globalThis.sliccExtension.fetch })
-  : fetchTransport();
-```
+- **CDP bridge** (`slicc.cdp-bridge` port): full `chrome.debugger` pass-through with three-factor pin (origin allowlist + tab id + top frame).
+- **Fetch proxy** (`fetch-proxy.fetch` port): secret-injected fetch with S3 SigV4 and DA sign-and-forward, forbidden header restoration via session DNR rules.
+- **Secrets CRUD** (`secrets.crud` port): chrome.storage-backed secret management.
+- **Sign-and-forward** (`mount.sign-and-forward`): S3/DA mount signing.
 
-`sliccExtension.fetch(input, init)` takes a URL and the `method`, `headers`, `body` and `signal` of `init`, and answers a streaming `Response`. It rejects with a `TypeError` when the upstream is unreachable and with the signal's reason when aborted. When `sliccExtension` is there, the rules above are active too.
+## Six — side panel
 
-The relay runs page → content script (a `MessagePort`) → service worker (a `chrome.runtime` port per request) → upstream. The body is pulled, one chunk per read, so a slow reader slows the download instead of filling memory. A body such as `FormData` keeps the `Content-Type` it brings unless the caller sets one. The service worker only accepts ports from content scripts in `https://` frames on `sliccy.ai`.
+The side panel (`sidepanel.html`) mounts a cherry follower iframe that connects to the leader tab's tray. The controller manages boot, ready, and disconnected states with automatic reconnection.
+
+## Six — secrets
+
+The secrets options page (`secrets.html`) manages named secrets with per-domain scoping, S3 profiles, and OAuth extra domains. Secrets are stored in `chrome.storage.local`.
 
 ## Adobe sign-in
 
-`sliccExtension.signIn({ clientId, scopes, imsEnvironment })` signs in to Adobe IMS with `chrome.identity.launchWebAuthFlow` and answers the access token. The service worker builds the authorize URL itself, for `ims-na1.adobelogin.com` (or `ims-na1-stg1` when `imsEnvironment` is `stg1`), with the extension's redirect `https://akjjllgokmbgpbdbmafpiefnhidlmbgf.chromiumapp.org/adobe` and a fresh `state`, and rejects any answer that comes back elsewhere or carries another `state`. It takes requests only from content scripts in `https://` frames on `sliccy.ai`, the same as the relay, so the token never goes to another origin. It rejects with IMS's `error_description` (or `error`) when the user refuses.
+`sliccExtension.signIn({ clientId, scopes, imsEnvironment })` signs in to Adobe IMS with `chrome.identity.launchWebAuthFlow`.
 
-## Chrome debugger
+## Handshake
 
-`sliccExtension.cdp` is a CDP command surface on that same port. `cdp.send(method, params, sessionId)` answers the command result, and `cdp.on(listener)` receives events as `{ method, params, sessionId }`. The service worker accepts the port only when `trusted()` passes: the sender is this extension, and the frame is `https://sliccy.ai` or `https://*.sliccy.ai`.
+At `document_start` on `https://*.sliccy.ai/*` the extension defines a frozen `globalThis.sliccExtension` in the page's own world.
 
-Opening, attaching and navigating still refuse a protected origin. The check is `protectedOrigins` from `@ai-ecoverse/slicc-browsers` 1.4.0 (`extension/protected.mjs` is that package's matcher, and `extension/protected-rules.js` is the catalog section). The list is every `sliccy.ai` host at any depth, including the apex and `www`, on any port, over http and https. `vault.sliccy.ai` is named on its own as well. `devtools` is always protected. `about:blank`, `about:srcdoc` and an empty URL inherit protection from the previous URL or the opener, so a new tab with one of those URLs is refused: the caller is on a protected origin. An existing tab is refused when its committed URL or its pending URL is protected, and an `about:blank` tab is classified with its opener tab. A matching `Target.createTarget`, `Target.attachToTarget`, `Page.navigate`, or later command on that tab returns `slicc: refused: target is on seven's origin` and does not call Chrome. If an attached tab then navigates onto a protected origin, the debugger detaches and that event is not forwarded. The extension does not attach to its own service worker.
+## PRE-1 origin protection
 
-`Target.getTargets` lists tabs. `targetId` is the tab id. `Target.createTarget` opens a background tab, or a new window when `newWindow` is true. `Target.closeTarget` closes that tab. `Target.activateTarget` selects it and focuses its window. `Target.attachToTarget` must be `{ targetId, flatten: true }`. Any other `flatten` value returns `only flatten: true is supported` and does not attach. The returned `sessionId` is that `targetId`. Later commands pass it as a top-level `sessionId`, and only the port that attached it may use it. `chrome.debugger` events for the tab are posted back on that port with the same `sessionId`. `Page.bringToFront` also selects the tab, because `chrome.debugger` alone does not. `Target.detachFromTarget`, `Target.closeTarget`, and a port disconnect release the debugger when this port's last attach to that tab is gone.
+Protected origins (from slicc-browsers 1.5.0):
+
+| Origin | Content scripts | Relay fetch | CDP (content script) | CDP (bridge) | Side panel | Secrets |
+|--------|:-:|:-:|:-:|:-:|:-:|:-:|
+| www.sliccy.ai | ✓ | ✓ | ✓ (protected targets blocked) | ✓ (three-factor pin) | ✓ | ✓ |
+| seven.sliccy.ai | ✓ | ✓ | ✓ (protected targets blocked) | — | — | — |
+| vault.sliccy.ai | ✓ | ✓ | ✓ (protected targets blocked) | — | — | — |
+| Branch hosts (*.sliccy.ai) | ✓ | ✓ | ✓ (protected targets blocked) | — | — | — |
+| External sites | — | — | — | — | — | — |
+
+Both six's bridge CDP and seven's content-script CDP refuse to target protected origins. Six's pages cannot get CDP or relay access to seven's or the vault's tabs. Seven's relay keeps refusing protected targets.
 
 ## Development
 
 ```bash
+npm run build
 npm test
 npm run pack
 ```
 
-`npm test` runs the integration tests in [`test/integration/`](test/integration/) through the [harness from slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web#integration-test-harness): Chromium with the unpacked extension, `--host-resolver-rules` mapping `seven.sliccy.ai`, `vault.sliccy.ai` and a CORS-less `upstream.test` to local HTTPS servers. It writes coverage of `extension/` to `coverage/` and CPU profiles, screenshots, console logs and `hotspots.md` to `artifacts/`, which `npm test` clears, so run `npm run pack` after it. `npm run pack [version]` writes `artifacts/slicc-extension.zip`, with `version` stamped into its `manifest.json`. Each release runs it with the semantic-release version and attaches the zip to its GitHub release. The manifest carries the production `key`, so the unpacked extension has the Chrome Web Store ID `akjjllgokmbgpbdbmafpiefnhidlmbgf`. `npm run lint` runs `slicc-lint`. To try it, load `extension/` unpacked in `chrome://extensions`. There is no npm package and no Chrome Web Store listing yet.
+`npm run build` compiles six's TypeScript source from `six-import/` into `extension/six-sw.js`, `sidepanel.js`, and `secrets.js`. `npm test` runs integration tests. `npm run pack [version]` writes `artifacts/slicc-extension.zip`. The manifest carries the production `key`, so the unpacked extension has Chrome Web Store ID `akjjllgokmbgpbdbmafpiefnhidlmbgf`.
+
+## Permissions
+
+| Permission | Used by | Justification |
+|-----------|---------|---------------|
+| `debugger` | Both | CDP proxy for seven pages and six bridge |
+| `tabs` | Six | Leader tab management, tab queries for bridge CDP |
+| `tabGroups` | Six | Tab group management for leader tab |
+| `identity` | Both | Adobe IMS sign-in via launchWebAuthFlow |
+| `storage` | Six | Secrets storage in chrome.storage.local |
+| `webRequest` | Six | Handoff Link header observation, discovery |
+| `declarativeNetRequestWithHostAccess` | Both | Static CORS rules + session rules for forbidden headers |
+| `notifications` | Six | Handoff notification toasts |
+| `sidePanel` | Six | Cherry follower side panel |
+| `<all_urls>` (host) | Both | Relay fetch to any URL, DNR rules for any upstream |

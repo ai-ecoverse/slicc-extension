@@ -57,10 +57,23 @@ async function demandTab(api, tab) {
   return { opener, url };
 }
 
+const _sixHosts = ['www.sliccy.ai'];
+const _exL = ['www', 'vault', 'vault-preview', 'get', 'mcpcat'];
+const _exP = ['vault-'];
+
+function allowedHost(hostname) {
+  if (!hostname.endsWith('.sliccy.ai') || hostname === 'sliccy.ai') return false;
+  const label = hostname.slice(0, -'.sliccy.ai'.length);
+  if (!label) return false;
+  if (_sixHosts.includes(hostname)) return true;
+  if (_exL.includes(label) || _exP.some((p) => label.startsWith(p))) return false;
+  return true;
+}
+
 export function trusted(sender, extensionId) {
   if (!sender || sender.id !== extensionId || !URL.canParse(sender.url)) return false;
   const { protocol, hostname } = new URL(sender.url);
-  return protocol === 'https:' && (hostname === 'sliccy.ai' || hostname.endsWith('.sliccy.ai'));
+  return protocol === 'https:' && allowedHost(hostname);
 }
 
 function isCdp(message) {
@@ -372,7 +385,8 @@ function openCdp(port, api) {
 }
 
 export function listen(port, extensionId, api) {
-  if (port.name !== 'slicc-fetch' || !trusted(port.sender, extensionId)) {
+  if (port.name !== 'slicc-fetch') return null;
+  if (!trusted(port.sender, extensionId)) {
     port.disconnect();
     return null;
   }

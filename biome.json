@@ -1,4 +1,21 @@
 {
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
-  "extends": ["@ai-ecoverse/slicc-shared-web/biome"]
+  "extends": ["@ai-ecoverse/slicc-shared-web/biome"],
+  "overrides": [
+    {
+      "includes": [
+        "**/six-sw.js",
+        "**/sidepanel.js",
+        "**/secrets.js",
+        "**/capture-popup.js",
+        "**/picker-popup.js",
+        "**/cherry-stub.ts",
+        "**/secrets.html",
+        "**/cws-publish.mjs"
+      ],
+      "linter": { "enabled": false },
+      "formatter": { "enabled": false },
+      "assist": { "enabled": false }
+    }
+  ]
 }

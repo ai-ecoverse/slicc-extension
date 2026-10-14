@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      LEFTHOOK: '0'
+      LEFTHOOK: "0"
     permissions:
       contents: write
       issues: write
@@ -40,3 +40,66 @@ jobs:
       - run: npx semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: chrome-web-store
+    permissions:
+      contents: read
+    steps:
+      - name: Verify environment has required reviewers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          ENV_NAME="chrome-web-store"
+          RULES=$(gh api "repos/${REPO}/environments/${ENV_NAME}" \
+            --jq '.protection_rules // [] | map(select(.type == "required_reviewers")) | length' \
+            2>/dev/null || echo "0")
+          if [ "$RULES" = "0" ]; then
+            echo "::error::The ${ENV_NAME} environment has no required reviewers. Refusing to publish."
+            exit 1
+          fi
+          echo "Environment ${ENV_NAME} has required reviewers — proceeding."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Detect release version
+        id: version
+        run: |
+          TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
+          if [ -z "$TAG" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            VERSION="${TAG#v}"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pack extension
+        if: steps.version.outputs.skip == 'false'
+        run: node scripts/pack.mjs "${{ steps.version.outputs.version }}"
+
+      - name: Publish to Chrome Web Store
+        if: steps.version.outputs.skip == 'false'
+        env:
+          CHROME_WEB_STORE_PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
+          CHROME_WEB_STORE_ITEM_ID: ${{ vars.CHROME_WEB_STORE_ITEM_ID }}
+          CHROME_WEB_STORE_PUBLISH_TYPE: ${{ vars.CHROME_WEB_STORE_PUBLISH_TYPE }}
+          CHROME_WEB_STORE_DEPLOY_PERCENTAGE: ${{ vars.CHROME_WEB_STORE_DEPLOY_PERCENTAGE }}
+          CHROME_WEB_STORE_FORCE_CANCEL_PENDING: ${{ vars.CHROME_WEB_STORE_FORCE_CANCEL_PENDING }}
+          CHROME_WEB_STORE_SKIP_REVIEW: ${{ vars.CHROME_WEB_STORE_SKIP_REVIEW }}
+          CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON }}
+        run: node scripts/cws-publish.mjs

@@ -4,3 +4,6 @@ coverage/
 artifacts/
 test/unit/
 extension/_metadata/
+six-import/
+screenshots/
+six-import/

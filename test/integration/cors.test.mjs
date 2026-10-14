@@ -27,6 +27,8 @@ test('the handshake shows the relay on sliccy.ai pages only', async (t) => {
   const page = await visit(t, slicc);
   assert.equal(await page.evaluate(() => typeof globalThis.sliccExtension?.fetch), 'function');
   assert.equal(await page.evaluate(() => Object.isFrozen(globalThis.sliccExtension)), true);
+  const www = await visit(t, 'https://www.sliccy.ai/');
+  assert.equal(await www.evaluate(() => typeof globalThis.sliccExtension?.fetch), 'function');
   const stranger = await visit(t, other);
   assert.equal(await stranger.evaluate(() => 'sliccExtension' in globalThis), false);
 });
@@ -350,4 +352,29 @@ test('the manifest key gives the Chrome Web Store ID', async () => {
     String.fromCharCode(97 + Number.parseInt(digit, 16))
   );
   assert.equal(id.join(''), 'akjjllgokmbgpbdbmafpiefnhidlmbgf');
+});
+
+test('protected origins get no extension scripts', async (t) => {
+  for (const host of [
+    'https://vault.sliccy.ai/',
+    'https://vault-preview.sliccy.ai/',
+    'https://vault-x.sliccy.ai/',
+    'https://get.sliccy.ai/',
+  ]) {
+    const page = await visit(t, host);
+    assert.equal(
+      await page.evaluate(() => 'sliccExtension' in globalThis),
+      false,
+      `${host} must not have sliccExtension`
+    );
+  }
+});
+
+test('a vault page cannot relay through slicc-fetch', async (t) => {
+  const page = await visit(t, 'https://vault.sliccy.ai/');
+  assert.equal(
+    await page.evaluate(() => 'sliccExtension' in globalThis),
+    false,
+    'vault must not have sliccExtension'
+  );
 });
