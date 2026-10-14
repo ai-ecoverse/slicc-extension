@@ -11,8 +11,36 @@ if (typeof URL.canParse !== 'function') {
 
 import { protectedOrigins } from './protected.mjs';
 import { protectedRules } from './protected-rules.js';
+import {
+  bodyMethod,
+  COOKIES,
+  cookieReader,
+  cookieRefused,
+  cookieSetter,
+  dropProtectedCookies,
+  initScriptPrefix,
+  namesProtectedStorage,
+  patternMatches,
+  patternProtected,
+  refusedOutright,
+  requestKey,
+  requestUrl,
+  stripProtectedCookies,
+  UNSEEN,
+  urlProtected,
+} from './shield.js';
 
 const guard = protectedOrigins(protectedRules);
+const prefix = initScriptPrefix(protectedRules);
+const BACKEND = { urlPattern: '*', resourceType: 'Document', requestStage: 'Request' };
+const FETCH_ANSWERS = new Set([
+  'Fetch.continueRequest',
+  'Fetch.fulfillRequest',
+  'Fetch.failRequest',
+  'Fetch.continueResponse',
+  'Fetch.continueWithAuth',
+]);
+const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
 
 function textOf(value) {
   return typeof value === 'string' ? value : '';
@@ -24,10 +52,6 @@ function refusal() {
 
 function blocked(url, opener, previous = false) {
   return guard.target({ url: textOf(url), opener, previous });
-}
-
-function demand(url, source = {}) {
-  if (blocked(url, source.opener, source.previous === true)) refusal();
 }
 
 async function readTab(api, tabId) {
@@ -66,6 +90,15 @@ async function demandTab(api, tab) {
   if (blocked(url, opener)) refusal();
   if (pending && pending !== url && blocked(pending, opener, guard.url(url))) refusal();
   return { opener, url };
+}
+
+async function tabBlocked(api, tab) {
+  try {
+    await demandTab(api, tab);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 const _sixHosts = ['www.sliccy.ai'];
@@ -120,46 +153,16 @@ function tabFrom(targetId) {
   return tabId;
 }
 
-function sessionFor(state, tabId) {
-  for (const [sessionId, attached] of state.sessionToTab) {
-    if (attached === tabId) return sessionId;
-  }
-  return undefined;
-}
-
-function inflight(state, tabId, command) {
-  let entry;
-  const dropped = new Promise((_, reject) => {
-    entry = reject;
-  });
-  let set = state.inflight.get(tabId);
-  if (!set) {
-    set = new Set();
-    state.inflight.set(tabId, set);
-  }
-  set.add(entry);
-  return Promise.race([command, dropped]).finally(() => {
-    set.delete(entry);
-    if (set.size === 0 && state.inflight.get(tabId) === set) state.inflight.delete(tabId);
-  });
-}
-
-function drop(state, tabId) {
-  const set = state.inflight.get(tabId);
-  if (!set) return;
-  state.inflight.delete(tabId);
-  for (const reject of set) reject(new Error('Target detached'));
-}
-
-function forget(state, tabId) {
-  drop(state, tabId);
-  state.ownedTabs.delete(tabId);
-  state.attachRefCounts.delete(tabId);
-  state.pageUrl.delete(tabId);
-  state.mainFrameId.delete(tabId);
-  for (const [sessionId, attached] of state.sessionToTab) {
-    if (attached === tabId) state.sessionToTab.delete(sessionId);
-  }
+function version() {
+  const userAgent = textOf(globalThis.navigator?.userAgent);
+  const found = /(?:Chrome|Chromium)\/([\d.]+)/.exec(userAgent);
+  return {
+    protocolVersion: '1.3',
+    product: `Chrome/${found ? found[1] : '0.0.0.0'}`,
+    revision: '',
+    userAgent,
+    jsVersion: '',
+  };
 }
 
 async function activate(api, tabId) {
@@ -173,300 +176,804 @@ async function activate(api, tabId) {
   }
 }
 
-async function targets(api) {
-  const listed = api.tabs.query({});
-  const active = api.tabs
-    .query({ active: true, lastFocusedWindow: true })
-    .then((found) => (typeof found[0]?.id === 'number' ? found[0].id : undefined))
-    .catch(() => undefined);
-  const [tabs, activeId] = await Promise.all([listed, active]);
-  return {
-    targetInfos: tabs
-      .filter((tab) => typeof tab.id === 'number')
-      .map((tab) => ({
-        targetId: String(tab.id),
-        type: 'page',
-        title: tab.title ?? '',
-        url: tab.url ?? '',
-        attached: false,
-        active: tab.id === activeId,
-      })),
-  };
+function plainContinue(params) {
+  return Object.keys(params).every((key) => key === 'requestId');
 }
 
-async function create(params, state, api) {
-  const url = typeof params.url === 'string' ? params.url : '';
-  if (guard.target({ url })) refusal();
-  if (params.newWindow === true) {
-    const created = await api.windows.create({
-      url: url || 'about:blank',
-      type: params.decorated === false ? 'popup' : 'normal',
-      focused: params.background !== true,
-    });
-    const tabId = created?.tabs?.[0]?.id;
-    if (typeof tabId !== 'number') throw new Error('chrome.windows.create did not return a tab id');
-    return { targetId: String(tabId) };
+class Connection {
+  constructor(port, api) {
+    this.port = port;
+    this.api = api;
+    this.state = {
+      sessions: new Map(),
+      tabs: new Map(),
+      ownedTabs: new Set(),
+      inflight: new Map(),
+      seen: new Set(),
+      streams: new Set(),
+      discover: false,
+      counter: 0,
+    };
+    this.closed = false;
+    this.chain = Promise.resolve();
+    this.pending = Promise.resolve();
+    this.onEvent = this.onEvent.bind(this);
+    this.onDetach = this.onDetach.bind(this);
+    this.onUpdated = this.onUpdated.bind(this);
+    this.onCreated = this.onCreated.bind(this);
+    this.onRemoved = this.onRemoved.bind(this);
+    this.shutdown = this.shutdown.bind(this);
+    api.debugger.onEvent.addListener(this.onEvent);
+    api.debugger.onDetach.addListener(this.onDetach);
+    api.tabs.onUpdated?.addListener(this.onUpdated);
+    api.tabs.onCreated?.addListener(this.onCreated);
+    api.tabs.onRemoved?.addListener(this.onRemoved);
+    port.onDisconnect.addListener(this.shutdown);
   }
-  const tab = await api.tabs.create({ url: url || 'about:blank', active: false });
-  if (typeof tab?.id !== 'number') throw new Error('chrome.tabs.create did not return a tab id');
-  return { targetId: String(tab.id) };
-}
 
-async function close(params, state, api) {
-  const tabId = tabFrom(readTargetId(params));
-  const owned = state.ownedTabs.has(tabId);
-  forget(state, tabId);
-  if (owned) await api.debugger.detach({ tabId }).catch(() => undefined);
-  await api.tabs.remove(tabId);
-  return { success: true };
-}
-
-async function attach(params, state, api) {
-  if (params.flatten !== true) throw new Error('only flatten: true is supported');
-  const targetId = readTargetId(params);
-  const tabId = tabFrom(targetId);
-  const tab = await readTab(api, tabId);
-  const seen = await demandTab(api, tab);
-  state.pageUrl.set(tabId, seen.url);
-  if (!state.ownedTabs.has(tabId)) {
-    await api.debugger.attach({ tabId }, '1.3');
-    state.ownedTabs.add(tabId);
-  }
-  state.sessionToTab.set(targetId, tabId);
-  state.attachRefCounts.set(tabId, (state.attachRefCounts.get(tabId) ?? 0) + 1);
-  return { sessionId: targetId };
-}
-
-async function detach(params, state, api) {
-  const sessionId = params.sessionId;
-  if (typeof sessionId !== 'string') return {};
-  const tabId = state.sessionToTab.get(sessionId);
-  if (tabId === undefined) return {};
-  const next = (state.attachRefCounts.get(tabId) ?? 1) - 1;
-  if (next > 0) {
-    state.attachRefCounts.set(tabId, next);
-    return {};
-  }
-  const owned = state.ownedTabs.has(tabId);
-  forget(state, tabId);
-  if (owned) await api.debugger.detach({ tabId }).catch(() => undefined);
-  return {};
-}
-
-async function pass(message, state, api) {
-  const { method, params, sessionId } = message;
-  const tabId = typeof sessionId === 'string' ? state.sessionToTab.get(sessionId) : undefined;
-  if (tabId === undefined) {
-    throw new Error(
-      `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
-    );
-  }
-  const seen = await demandTab(api, await readTab(api, tabId));
-  state.pageUrl.set(tabId, seen.url);
-  if (method === 'Page.navigate') {
-    demand(params?.url, { opener: 'unprotected', previous: guard.url(seen.url) });
-  }
-  if (method === 'Page.bringToFront') await activate(api, tabId);
-  const result = await inflight(state, tabId, api.debugger.sendCommand({ tabId }, method, params));
-  return result ?? {};
-}
-
-async function dispatch(message, state, api) {
-  const params = bag(message.params);
-  switch (message.method) {
-    case 'Target.getTargets':
-      return targets(api);
-    case 'Target.createTarget':
-      return create(params, state, api);
-    case 'Target.closeTarget':
-      return close(params, state, api);
-    case 'Target.activateTarget':
-      await activate(api, tabFrom(readTargetId(params)));
-      return {};
-    case 'Target.attachToTarget':
-      return attach(params, state, api);
-    case 'Target.detachFromTarget':
-      return detach(params, state, api);
-    default:
-      return pass(message, state, api);
-  }
-}
-
-function openCdp(port, api) {
-  const state = {
-    sessionToTab: new Map(),
-    attachRefCounts: new Map(),
-    ownedTabs: new Set(),
-    pageUrl: new Map(),
-    mainFrameId: new Map(),
-    inflight: new Map(),
-  };
-  let closed = false;
-  let chain = Promise.resolve();
-  let pending = Promise.resolve();
-
-  function post(message) {
-    if (closed) return;
+  post(message) {
+    if (this.closed) return;
     try {
-      port.postMessage(message);
+      this.port.postMessage(message);
     } catch {
       return undefined;
     }
   }
 
-  function destination(method, params) {
-    if (params === null || typeof params !== 'object') return '';
-    if (method === 'Page.frameNavigated') return textOf(params.frame?.url);
-    if (method === 'Page.navigatedWithinDocument' || method === 'Page.frameRequestedNavigation') {
-      return textOf(params.url);
-    }
-    if (method === 'Network.requestWillBeSent' && params.type === 'Document') {
-      return textOf(params.request?.url);
-    }
-    if (method === 'Target.targetInfoChanged') return textOf(params.targetInfo?.url);
-    return '';
+  tabState(tabId) {
+    return this.state.tabs.get(tabId);
   }
 
-  function release(tabId) {
-    const sessionId = sessionFor(state, tabId);
-    const owned = state.ownedTabs.has(tabId);
-    if (sessionId === undefined && !owned) return;
-    if (sessionId !== undefined) {
-      post({
+  sessionsOf(tabId) {
+    return [...(this.tabState(tabId)?.sessions ?? [])];
+  }
+
+  inflight(tabId, command) {
+    let entry;
+    const dropped = new Promise((_, reject) => {
+      entry = reject;
+    });
+    let set = this.state.inflight.get(tabId);
+    if (!set) {
+      set = new Set();
+      this.state.inflight.set(tabId, set);
+    }
+    set.add(entry);
+    return Promise.race([command, dropped]).finally(() => {
+      set.delete(entry);
+      if (set.size === 0 && this.state.inflight.get(tabId) === set)
+        this.state.inflight.delete(tabId);
+    });
+  }
+
+  drop(tabId) {
+    const set = this.state.inflight.get(tabId);
+    if (!set) return;
+    this.state.inflight.delete(tabId);
+    for (const reject of set) reject(new Error('Target detached'));
+  }
+
+  send(tabId, method, params) {
+    return this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, method, params));
+  }
+
+  info(tab) {
+    const out = {
+      targetId: String(tab.id),
+      type: 'page',
+      title: tab.title ?? '',
+      url: tab.url ?? '',
+      attached: this.sessionsOf(tab.id).length > 0,
+      canAccessOpener: false,
+    };
+    if (typeof tab.openerTabId === 'number') out.openerId = String(tab.openerTabId);
+    return out;
+  }
+
+  forget(tabId) {
+    this.drop(tabId);
+    const tab = this.tabState(tabId);
+    if (tab) for (const sessionId of tab.sessions) this.state.sessions.delete(sessionId);
+    this.state.tabs.delete(tabId);
+    this.state.ownedTabs.delete(tabId);
+  }
+
+  release(tabId) {
+    const sessions = this.sessionsOf(tabId);
+    const owned = this.state.ownedTabs.has(tabId);
+    if (sessions.length === 0 && !owned) return;
+    this.forget(tabId);
+    for (const sessionId of sessions) {
+      this.post({
         method: 'Target.detachedFromTarget',
         params: { sessionId, targetId: String(tabId) },
-        sessionId,
       });
     }
-    forget(state, tabId);
-    if (owned) void api.debugger.detach({ tabId }).catch(() => undefined);
+    if (owned) void this.api.debugger.detach({ tabId }).catch(() => undefined);
   }
 
-  function leaves(tabId, next) {
+  hide(tabId) {
+    this.release(tabId);
+    if (!this.state.seen.delete(tabId)) return;
+    if (this.state.discover) {
+      this.post({ method: 'Target.targetDestroyed', params: { targetId: String(tabId) } });
+    }
+  }
+
+  async applyFetch(tabId) {
+    const tab = this.tabState(tabId);
+    if (!tab) return;
+    const patterns = [BACKEND];
+    let handleAuthRequests = false;
+    for (const sessionId of tab.sessions) {
+      const session = this.state.sessions.get(sessionId);
+      if (!session?.patterns) continue;
+      patterns.push(...session.patterns);
+      handleAuthRequests ||= session.auth;
+    }
+    await this.send(tabId, 'Fetch.enable', { patterns, handleAuthRequests });
+  }
+
+  async targets() {
+    const listed = this.api.tabs.query({});
+    const active = this.api.tabs
+      .query({ active: true, lastFocusedWindow: true })
+      .then((found) => (typeof found[0]?.id === 'number' ? found[0].id : undefined))
+      .catch(() => undefined);
+    const [tabs, activeId] = await Promise.all([listed, active]);
+    const targetInfos = [];
+    for (const tab of tabs) {
+      if (typeof tab.id !== 'number') continue;
+      if (await tabBlocked(this.api, tab)) continue;
+      this.state.seen.add(tab.id);
+      targetInfos.push({ ...this.info(tab), active: tab.id === activeId });
+    }
+    return { targetInfos };
+  }
+
+  async targetInfo(params) {
+    if (typeof params.targetId !== 'string') {
+      return {
+        targetInfo: {
+          targetId: 'browser',
+          type: 'browser',
+          title: '',
+          url: '',
+          attached: true,
+          canAccessOpener: false,
+        },
+      };
+    }
+    const tabId = tabFrom(params.targetId);
+    const tab = await readTab(this.api, tabId);
+    await demandTab(this.api, tab);
+    this.state.seen.add(tabId);
+    return { targetInfo: this.info(tab) };
+  }
+
+  async discover(params) {
+    const on = params.discover === true;
+    const was = this.state.discover;
+    this.state.discover = on;
+    if (!on || was) return {};
+    const tabs = await this.api.tabs.query({});
+    for (const tab of tabs) {
+      if (typeof tab.id !== 'number') continue;
+      if (await tabBlocked(this.api, tab)) continue;
+      this.state.seen.add(tab.id);
+      this.post({ method: 'Target.targetCreated', params: { targetInfo: this.info(tab) } });
+    }
+    return {};
+  }
+
+  async create(params) {
+    const url = typeof params.url === 'string' ? params.url : '';
+    if (guard.target({ url })) refusal();
+    if (params.newWindow === true) {
+      const created = await this.api.windows.create({
+        url: url || 'about:blank',
+        type: params.decorated === false ? 'popup' : 'normal',
+        focused: params.background !== true,
+      });
+      const tabId = created?.tabs?.[0]?.id;
+      if (typeof tabId !== 'number')
+        throw new Error('chrome.windows.create did not return a tab id');
+      return { targetId: String(tabId) };
+    }
+    const tab = await this.api.tabs.create({ url: url || 'about:blank', active: false });
+    if (typeof tab?.id !== 'number') throw new Error('chrome.tabs.create did not return a tab id');
+    return { targetId: String(tab.id) };
+  }
+
+  async guarded(params) {
+    const tabId = tabFrom(readTargetId(params));
+    await demandTab(this.api, await readTab(this.api, tabId));
+    return tabId;
+  }
+
+  async closeTarget(params) {
+    const tabId = await this.guarded(params);
+    const owned = this.state.ownedTabs.has(tabId);
+    const sessions = this.sessionsOf(tabId);
+    this.forget(tabId);
+    for (const sessionId of sessions) {
+      this.post({
+        method: 'Target.detachedFromTarget',
+        params: { sessionId, targetId: String(tabId) },
+      });
+    }
+    if (owned) await this.api.debugger.detach({ tabId }).catch(() => undefined);
+    await this.api.tabs.remove(tabId);
+    return { success: true };
+  }
+
+  async mainFrameOf(tabId) {
+    try {
+      const tree = await this.send(tabId, 'Page.getFrameTree', {});
+      return textOf(tree?.frameTree?.frame?.id);
+    } catch {
+      return '';
+    }
+  }
+
+  async attach(params) {
+    if (params.flatten !== true) throw new Error('only flatten: true is supported');
+    const targetId = readTargetId(params);
+    const tabId = tabFrom(targetId);
+    const seen = await demandTab(this.api, await readTab(this.api, tabId));
+    let tab = this.tabState(tabId);
+    if (!tab) {
+      if (!this.state.ownedTabs.has(tabId)) {
+        await this.api.debugger.attach({ tabId }, '1.3');
+        this.state.ownedTabs.add(tabId);
+      }
+      tab = {
+        sessions: new Set(),
+        mainFrameId: '',
+        pageUrl: seen.url,
+        frames: new Map(),
+        contexts: new Map(),
+        requests: new Map(),
+        held: new Map(),
+        paused: new Map(),
+      };
+      this.state.tabs.set(tabId, tab);
+      try {
+        await this.applyFetch(tabId);
+      } catch (error) {
+        this.forget(tabId);
+        await this.api.debugger.detach({ tabId }).catch(() => undefined);
+        throw error;
+      }
+      const main = await this.mainFrameOf(tabId);
+      if (main && !tab.mainFrameId) tab.mainFrameId = main;
+    }
+    tab.pageUrl = seen.url;
+    const sessionId = this.state.sessions.has(targetId)
+      ? `${targetId}.${++this.state.counter}`
+      : targetId;
+    this.state.sessions.set(sessionId, { tabId, patterns: null, auth: false });
+    tab.sessions.add(sessionId);
+    this.state.seen.add(tabId);
+    return { sessionId };
+  }
+
+  async settlePaused(tabId, sessionId) {
+    const tab = this.tabState(tabId);
+    if (!tab) return;
+    for (const [requestId, entry] of tab.paused) {
+      if (entry.owner !== sessionId) continue;
+      await this.advance(tabId, requestId, entry);
+    }
+  }
+
+  async detach(params) {
+    const sessionId = params.sessionId;
+    if (typeof sessionId !== 'string') return {};
+    const session = this.state.sessions.get(sessionId);
+    if (!session) return {};
+    const { tabId } = session;
+    const tab = this.tabState(tabId);
+    this.state.sessions.delete(sessionId);
+    tab?.sessions.delete(sessionId);
+    this.post({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId, targetId: String(tabId) },
+    });
+    if (tab && tab.sessions.size > 0) {
+      await this.settlePaused(tabId, sessionId).catch(() => undefined);
+      await this.applyFetch(tabId).catch(() => undefined);
+      return {};
+    }
+    const owned = this.state.ownedTabs.has(tabId);
+    this.forget(tabId);
+    if (owned) await this.api.debugger.detach({ tabId }).catch(() => undefined);
+    return {};
+  }
+
+  candidates(tabId, paused, after) {
+    const out = [];
+    let passed = after === undefined;
+    for (const sessionId of this.sessionsOf(tabId)) {
+      if (!passed) {
+        if (sessionId === after) passed = true;
+        continue;
+      }
+      const session = this.state.sessions.get(sessionId);
+      if (!session?.patterns) continue;
+      if (paused.authChallenge !== undefined) {
+        const matched = session.patterns.some((p) =>
+          patternMatches({ ...p, requestStage: 'Request' }, paused)
+        );
+        if (session.auth && matched) out.push(sessionId);
+        continue;
+      }
+      if (session.patterns.some((p) => patternMatches(p, paused))) out.push(sessionId);
+    }
+    return out;
+  }
+
+  async advance(tabId, requestId, entry) {
+    const tab = this.tabState(tabId);
+    if (!tab) return;
+    const [next] = this.candidates(tabId, entry.params, entry.owner);
+    if (next !== undefined) {
+      entry.owner = next;
+      this.post({ method: entry.method, params: entry.params, sessionId: next });
+      return;
+    }
+    tab.paused.delete(requestId);
+    if (entry.method === 'Fetch.authRequired') {
+      await this.send(tabId, 'Fetch.continueWithAuth', {
+        requestId,
+        authChallengeResponse: { response: 'Default' },
+      });
+      return;
+    }
+    await this.send(tabId, 'Fetch.continueRequest', { requestId });
+  }
+
+  async onPaused(tabId, method, params) {
+    const tab = this.tabState(tabId);
+    if (!tab) return;
+    const requestId = textOf(params?.requestId);
+    const url = requestUrl(params);
+    const frameId = textOf(params?.frameId);
+    const isProtected = urlProtected(guard, url) || tab.frames.get(frameId) === true;
+    if (typeof params?.networkId === 'string') {
+      const before = tab.requests.get(params.networkId) === true;
+      tab.requests.set(params.networkId, before || isProtected);
+    }
+    if (isProtected) {
+      const atRequest =
+        params.responseStatusCode === undefined && params.responseErrorReason === undefined;
+      if (method === 'Fetch.authRequired') {
+        await this.send(tabId, 'Fetch.continueWithAuth', {
+          requestId,
+          authChallengeResponse: { response: 'CancelAuth' },
+        }).catch(() => undefined);
+        return;
+      }
+      if (params.resourceType === 'Document' && atRequest) {
+        const main = !tab.mainFrameId || !frameId || frameId === tab.mainFrameId;
+        await this.send(tabId, 'Fetch.failRequest', {
+          requestId,
+          errorReason: 'BlockedByClient',
+        }).catch(() => undefined);
+        if (main) this.release(tabId);
+        return;
+      }
+      await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
+      return;
+    }
+    const [first] = this.candidates(tabId, params);
+    if (first === undefined) {
+      if (method === 'Fetch.authRequired') {
+        await this.send(tabId, 'Fetch.continueWithAuth', {
+          requestId,
+          authChallengeResponse: { response: 'Default' },
+        }).catch(() => undefined);
+        return;
+      }
+      await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
+      return;
+    }
+    tab.paused.set(requestId, { owner: first, params, method });
+    this.post({ method, params, sessionId: first });
+  }
+
+  frameProtected(tab, frameId) {
+    return typeof frameId === 'string' && tab.frames.get(frameId) === true;
+  }
+
+  contextProtected(tab, params) {
+    for (const key of ['contextId', 'executionContextId']) {
+      if (typeof params[key] === 'number' && tab.contexts.get(params[key]) === true) return true;
+    }
+    if (typeof params.uniqueContextId === 'string') {
+      for (const [id, value] of tab.contexts) {
+        if (value === true && params.uniqueContextId.endsWith(`.${id}`)) return true;
+      }
+    }
+    return false;
+  }
+
+  checkParams(method, params, tab) {
+    if (cookieSetter(method)) {
+      if (cookieRefused(guard, params)) throw new Error(COOKIES);
+    } else if (urlProtected(guard, textOf(params.url))) {
+      refusal();
+    }
+    if (method === 'Network.getCookies' && cookieRefused(guard, { urls: params.urls })) {
+      throw new Error(COOKIES);
+    }
+    if (namesProtectedStorage(guard, params)) refusal();
+    if (this.frameProtected(tab, params.frameId)) refusal();
+    if (this.contextProtected(tab, params)) refusal();
+    if (method === 'Fetch.enable') {
+      const patterns = Array.isArray(params.patterns) ? params.patterns : [];
+      if (patterns.some((p) => patternProtected(guard, protectedRules.domains, p))) refusal();
+    }
+  }
+
+  async check(method, params, tabId, sessionId) {
+    const tab = this.tabState(tabId);
+    this.checkParams(method, params, tab);
+    if (method === 'Page.navigateToHistoryEntry') {
+      const history = await this.send(tabId, 'Page.getNavigationHistory', {});
+      const entry = (history?.entries ?? []).find((item) => item.id === params.entryId);
+      if (urlProtected(guard, textOf(entry?.url))) refusal();
+    }
+    if (FETCH_ANSWERS.has(method) || FETCH_READS.has(method)) {
+      const entry = tab.paused.get(textOf(params.requestId));
+      if (!entry || entry.owner !== sessionId) throw new Error(UNSEEN);
+    } else if (bodyMethod(method)) {
+      const known = tab.requests.get(textOf(requestKey(params)));
+      if (known === true) refusal();
+      if (known !== false) throw new Error(UNSEEN);
+    }
+    if (
+      (method === 'IO.read' || method === 'IO.close') &&
+      !this.state.streams.has(textOf(params.handle))
+    ) {
+      throw new Error(UNSEEN);
+    }
+  }
+
+  async sessionCommand(message, params) {
+    const { method, sessionId } = message;
+    const session = typeof sessionId === 'string' ? this.state.sessions.get(sessionId) : undefined;
+    if (!session) {
+      throw new Error(
+        `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
+      );
+    }
+    const { tabId } = session;
+    const tab = this.tabState(tabId);
+    const seen = await demandTab(this.api, await readTab(this.api, tabId));
+    tab.pageUrl = seen.url;
+    if (method.startsWith('Target.')) {
+      throw new Error(`slicc: refused: ${method} is not supported on a page session`);
+    }
+    await this.check(method, params, tabId, sessionId);
+    if (method === 'Fetch.enable') {
+      session.patterns = Array.isArray(params.patterns) ? params.patterns : [{ urlPattern: '*' }];
+      session.auth = params.handleAuthRequests === true;
+      await this.applyFetch(tabId);
+      return {};
+    }
+    if (method === 'Fetch.disable') {
+      session.patterns = null;
+      session.auth = false;
+      await this.settlePaused(tabId, sessionId);
+      await this.applyFetch(tabId);
+      return {};
+    }
+    if (FETCH_ANSWERS.has(method)) {
+      const requestId = textOf(params.requestId);
+      const entry = tab.paused.get(requestId);
+      if (method === 'Fetch.continueRequest' && plainContinue(params)) {
+        await this.advance(tabId, requestId, entry);
+        return {};
+      }
+      tab.paused.delete(requestId);
+      return (await this.send(tabId, method, params)) ?? {};
+    }
+    let forwarded = params;
+    if (method === 'Page.addScriptToEvaluateOnNewDocument') {
+      forwarded = { ...params, source: prefix + textOf(params.source) };
+    }
+    if (method === 'Page.bringToFront') await activate(this.api, tabId);
+    let result =
+      (await this.send(tabId, method, message.params === undefined ? undefined : forwarded)) ?? {};
+    if (cookieReader(method)) result = dropProtectedCookies(guard, result);
+    if (typeof result.stream === 'string') this.state.streams.add(result.stream);
+    if (method === 'IO.resolveBlob' && typeof result.uuid === 'string') {
+      this.state.streams.add(`blob:${result.uuid}`);
+    }
+    if (method === 'IO.close') this.state.streams.delete(textOf(params.handle));
+    return result;
+  }
+
+  async dispatch(message) {
+    const params = bag(message.params);
+    const outright = refusedOutright(message.method, params, message.sessionId);
+    if (outright) throw new Error(outright);
+    switch (message.method) {
+      case 'Target.getTargets':
+        return this.targets();
+      case 'Target.getTargetInfo':
+        return this.targetInfo(params);
+      case 'Target.setDiscoverTargets':
+        return this.discover(params);
+      case 'Target.createTarget':
+        return this.create(params);
+      case 'Target.closeTarget':
+        return this.closeTarget(params);
+      case 'Target.activateTarget':
+        await activate(this.api, await this.guarded(params));
+        return {};
+      case 'Target.attachToTarget':
+        return this.attach(params);
+      case 'Target.detachFromTarget':
+        return this.detach(params);
+      case 'Browser.getVersion':
+        return version();
+      default:
+        return this.sessionCommand(message, params);
+    }
+  }
+
+  leaves(tab, next) {
     if (!next) return false;
-    return blocked(next, 'unprotected', guard.url(state.pageUrl.get(tabId) ?? ''));
+    return blocked(next, 'unprotected', guard.url(tab.pageUrl ?? ''));
   }
 
-  function protectedOrigin(origin) {
+  protectedOrigin(origin) {
     if (!origin || origin === 'null' || origin === '://') return false;
     return guard.url(origin);
   }
 
-  function onEvent(source, method, params) {
-    const tabId = source?.tabId;
-    if (method === 'Page.frameNavigated' && !params?.frame?.parentId) {
-      state.mainFrameId.set(tabId, textOf(params?.frame?.id));
-      const origin = textOf(params?.frame?.securityOrigin);
-      if (protectedOrigin(origin)) {
-        release(tabId);
-        return;
-      }
+  isMain(tab, frameId) {
+    return !tab.mainFrameId || !frameId || frameId === tab.mainFrameId;
+  }
+
+  mentions(value, depth = 0) {
+    if (depth > 12) return false;
+    if (typeof value === 'string') return value.includes(':') && urlProtected(guard, value);
+    if (Array.isArray(value)) return value.some((item) => this.mentions(item, depth + 1));
+    if (value !== null && typeof value === 'object') {
+      return Object.values(value).some((item) => this.mentions(item, depth + 1));
     }
+    return false;
+  }
+
+  classify(tab, params) {
+    const id = params?.requestId;
+    if (typeof id !== 'string') return undefined;
+    const url = requestUrl(params);
+    if (!url && params.documentURL === undefined && params.frameId === undefined) {
+      return tab.requests.get(id);
+    }
+    const started =
+      urlProtected(guard, textOf(params.documentURL)) ||
+      urlProtected(guard, textOf(params.initiator?.url)) ||
+      this.frameProtected(tab, params.frameId);
+    const isProtected = started || urlProtected(guard, url);
+    const value = tab.requests.get(id) === true || isProtected;
+    if (url || started) tab.requests.set(id, value);
+    return tab.requests.get(id);
+  }
+
+  broadcast(tabId, method, params) {
+    for (const sessionId of this.sessionsOf(tabId)) this.post({ method, params, sessionId });
+  }
+
+  deliver(tabId, tab, method, params) {
+    const id = typeof params?.requestId === 'string' ? params.requestId : undefined;
+    const known = this.classify(tab, params);
+    if (known === true) {
+      tab.held.delete(id);
+      return;
+    }
+    let out = params;
+    if (method.startsWith('Network.')) out = stripProtectedCookies(guard, out);
+    if (this.mentions(out)) return;
+    if (id !== undefined && method.endsWith('ExtraInfo') && known !== false) {
+      const held = tab.held.get(id) ?? [];
+      held.push([method, out]);
+      tab.held.set(id, held);
+      if (tab.held.size > 500) tab.held.delete(tab.held.keys().next().value);
+      return;
+    }
+    this.broadcast(tabId, method, out);
+    if (id !== undefined && known === false && tab.held.has(id)) {
+      const held = tab.held.get(id);
+      tab.held.delete(id);
+      for (const [m, p] of held) this.broadcast(tabId, m, p);
+    }
+  }
+
+  watchFrame(tabId, tab, frame) {
+    const url = textOf(frame.url);
+    const isProtected =
+      this.protectedOrigin(textOf(frame.securityOrigin)) || urlProtected(guard, url);
+    if (!frame.parentId) {
+      tab.mainFrameId = textOf(frame.id);
+      if (isProtected || this.leaves(tab, url)) {
+        this.release(tabId);
+        return true;
+      }
+      tab.pageUrl = url;
+    }
+    if (typeof frame.id === 'string') tab.frames.set(frame.id, isProtected);
+    return isProtected;
+  }
+
+  watchContext(tabId, tab, ctx) {
+    const frameId = textOf(ctx.auxData?.frameId);
+    const isProtected = this.protectedOrigin(textOf(ctx.origin));
+    if (typeof ctx.id === 'number') tab.contexts.set(ctx.id, isProtected);
+    if (isProtected && ctx.auxData?.isDefault && frameId && frameId === tab.mainFrameId) {
+      this.release(tabId);
+    }
+    return isProtected;
+  }
+
+  watch(tabId, tab, method, p) {
+    if (method === 'Page.frameNavigated') return this.watchFrame(tabId, tab, p.frame ?? {});
     if (method === 'Runtime.executionContextCreated') {
-      const ctx = params?.context;
-      const frameId = textOf(ctx?.auxData?.frameId);
-      const mainId = state.mainFrameId.get(tabId);
-      if (
-        ctx?.auxData?.isDefault &&
-        frameId &&
-        mainId &&
-        frameId === mainId &&
-        protectedOrigin(textOf(ctx?.origin))
-      ) {
-        release(tabId);
-        return;
+      return this.watchContext(tabId, tab, p.context ?? {});
+    }
+    if (method === 'Runtime.executionContextDestroyed') {
+      tab.contexts.delete(p.executionContextId);
+      return false;
+    }
+    if (method === 'Page.navigatedWithinDocument' && this.isMain(tab, textOf(p.frameId))) {
+      const next = textOf(p.url);
+      if (this.leaves(tab, next)) {
+        this.release(tabId);
+        return true;
       }
+      if (next) tab.pageUrl = next;
     }
-    const sessionId = sessionFor(state, tabId);
-    if (sessionId === undefined) return;
-    const next = destination(method, params);
-    if (leaves(tabId, next)) {
-      release(tabId);
-      return;
-    }
-    if (next && !blocked(next, 'unknown')) state.pageUrl.set(tabId, next);
-    post({ method, params: params ?? {}, sessionId });
+    return false;
   }
 
-  function onUpdated(tabId, changeInfo, tab) {
-    if (sessionFor(state, tabId) === undefined && !state.ownedTabs.has(tabId)) return;
-    const pending = textOf(changeInfo?.pendingUrl) || textOf(tab?.pendingUrl);
-    if (leaves(tabId, textOf(changeInfo?.url)) || leaves(tabId, pending)) {
-      release(tabId);
-      return;
-    }
-    void recheck(tabId);
-  }
-
-  async function recheck(tabId) {
-    if (sessionFor(state, tabId) === undefined && !state.ownedTabs.has(tabId)) return;
-    try {
-      const seen = await demandTab(api, await readTab(api, tabId));
-      if (sessionFor(state, tabId) === undefined && !state.ownedTabs.has(tabId)) return;
-      state.pageUrl.set(tabId, seen.url);
-    } catch {
-      release(tabId);
-    }
-  }
-
-  function onDetach(source) {
+  onEvent(source, method, params) {
+    if (typeof source?.sessionId === 'string') return;
     const tabId = source?.tabId;
-    const sessionId = sessionFor(state, tabId);
-    if (sessionId === undefined) return;
-    forget(state, tabId);
-    post({
-      method: 'Target.detachedFromTarget',
-      params: { sessionId, targetId: String(tabId) },
-      sessionId,
+    const tab = this.tabState(tabId);
+    if (!tab) return;
+    const p = params ?? {};
+    if (method === 'Fetch.requestPaused' || method === 'Fetch.authRequired') {
+      void this.onPaused(tabId, method, p).catch(() => undefined);
+      return;
+    }
+    if (method.startsWith('Target.')) return;
+    if (this.watch(tabId, tab, method, p)) return;
+    if (this.contextProtected(tab, p)) return;
+    this.deliver(tabId, tab, method, p);
+  }
+
+  async announce(tab, created) {
+    if (!this.state.discover || typeof tab?.id !== 'number') return;
+    if (await tabBlocked(this.api, tab)) {
+      this.hide(tab.id);
+      return;
+    }
+    const known = this.state.seen.has(tab.id);
+    this.state.seen.add(tab.id);
+    this.post({
+      method: known && !created ? 'Target.targetInfoChanged' : 'Target.targetCreated',
+      params: { targetInfo: this.info(tab) },
     });
   }
 
-  async function run(message) {
-    try {
-      post({ id: message.id, result: await dispatch(message, state, api) });
-    } catch (error) {
-      post({ id: message.id, error: String(error?.message ?? error) });
+  onCreated(tab) {
+    void this.announce(tab, true).catch(() => undefined);
+  }
+
+  onUpdated(tabId, changeInfo, tab) {
+    const change = changeInfo ?? {};
+    const current = { id: tabId, ...(tab ?? {}) };
+    const t = this.tabState(tabId);
+    if (t || this.state.ownedTabs.has(tabId)) {
+      const pendingUrl = textOf(change.pendingUrl) || textOf(tab?.pendingUrl);
+      const probe = t ?? { pageUrl: '' };
+      if (this.leaves(probe, textOf(change.url)) || this.leaves(probe, pendingUrl)) {
+        if (this.state.discover) this.hide(tabId);
+        else this.release(tabId);
+        return;
+      }
+      void this.recheck(tabId);
+    }
+    if (!this.state.discover) return;
+    if (change.url === undefined && change.title === undefined && change.pendingUrl === undefined) {
+      return;
+    }
+    void this.announce(current, false).catch(() => undefined);
+  }
+
+  onRemoved(tabId) {
+    this.release(tabId);
+    if (this.state.seen.delete(tabId) && this.state.discover) {
+      this.post({ method: 'Target.targetDestroyed', params: { targetId: String(tabId) } });
     }
   }
 
-  function close() {
-    if (closed) return;
-    closed = true;
-    api.debugger.onEvent.removeListener(onEvent);
-    api.debugger.onDetach.removeListener(onDetach);
-    api.tabs.onUpdated?.removeListener(onUpdated);
-    const owned = [...state.ownedTabs];
-    for (const tabId of [...state.inflight.keys()]) drop(state, tabId);
-    state.ownedTabs.clear();
-    state.sessionToTab.clear();
-    state.attachRefCounts.clear();
-    for (const tabId of owned) api.debugger.detach({ tabId }).catch(() => undefined);
+  async recheck(tabId) {
+    if (!this.tabState(tabId) && !this.state.ownedTabs.has(tabId)) return;
+    try {
+      const seen = await demandTab(this.api, await readTab(this.api, tabId));
+      const tab = this.tabState(tabId);
+      if (tab) tab.pageUrl = seen.url;
+    } catch {
+      if (this.state.discover) this.hide(tabId);
+      else this.release(tabId);
+    }
   }
 
-  api.debugger.onEvent.addListener(onEvent);
-  api.debugger.onDetach.addListener(onDetach);
-  api.tabs.onUpdated?.addListener(onUpdated);
-  port.onDisconnect.addListener(close);
+  onDetach(source) {
+    const tabId = source?.tabId;
+    if (!this.state.tabs.has(tabId) && !this.state.ownedTabs.has(tabId)) return;
+    const sessions = this.sessionsOf(tabId);
+    this.forget(tabId);
+    for (const sessionId of sessions) {
+      this.post({
+        method: 'Target.detachedFromTarget',
+        params: { sessionId, targetId: String(tabId) },
+      });
+    }
+  }
 
-  return {
-    handle(message) {
-      if (!isCdp(message)) return false;
-      if (!closed) {
-        const serial =
-          message.method === 'Target.attachToTarget' ||
-          message.method === 'Target.detachFromTarget' ||
-          message.method === 'Target.closeTarget' ||
-          message.method === 'Target.createTarget';
-        const task = serial
-          ? (chain = chain.then(() => run(message)).catch(() => undefined))
-          : run(message).catch(() => undefined);
-        pending = Promise.all([pending, task]).then(() => undefined);
-      }
-      return true;
-    },
-    close,
-    settled: () => pending,
-  };
+  async run(message) {
+    try {
+      this.post({ id: message.id, result: await this.dispatch(message) });
+    } catch (error) {
+      this.post({ id: message.id, error: String(error?.message ?? error) });
+    }
+  }
+
+  shutdown() {
+    if (this.closed) return;
+    this.closed = true;
+    this.api.debugger.onEvent.removeListener(this.onEvent);
+    this.api.debugger.onDetach.removeListener(this.onDetach);
+    this.api.tabs.onUpdated?.removeListener(this.onUpdated);
+    this.api.tabs.onCreated?.removeListener(this.onCreated);
+    this.api.tabs.onRemoved?.removeListener(this.onRemoved);
+    const owned = [...this.state.ownedTabs];
+    for (const tabId of [...this.state.inflight.keys()]) this.drop(tabId);
+    this.state.ownedTabs.clear();
+    this.state.sessions.clear();
+    this.state.tabs.clear();
+    for (const tabId of owned) this.api.debugger.detach({ tabId }).catch(() => undefined);
+  }
+
+  handle(message) {
+    if (!isCdp(message)) return false;
+    if (!this.closed) {
+      const serial =
+        message.method === 'Target.attachToTarget' ||
+        message.method === 'Target.detachFromTarget' ||
+        message.method === 'Target.closeTarget' ||
+        message.method === 'Target.createTarget';
+      const task = serial
+        ? (this.chain = this.chain.then(() => this.run(message)).catch(() => undefined))
+        : this.run(message).catch(() => undefined);
+      this.pending = Promise.all([this.pending, task]).then(() => undefined);
+    }
+    return true;
+  }
+
+  close() {
+    this.shutdown();
+  }
+
+  settled() {
+    return this.pending;
+  }
 }
 
 export function listen(port, extensionId, api) {
@@ -475,5 +982,5 @@ export function listen(port, extensionId, api) {
     port.disconnect();
     return null;
   }
-  return openCdp(port, api);
+  return new Connection(port, api);
 }

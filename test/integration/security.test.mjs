@@ -194,6 +194,73 @@ test('plaintext canary: migration encrypts 6.248.11 plaintext, relay.js world se
   await extClose(page, secTid);
 });
 
+test('the secrets page saves through encrypted storage and marks unreadable entries (B-SEC2)', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const name = `B8_PAGE_${Date.now()}`;
+  const broken = `${name}_BROKEN`;
+  const value = 'page-saved-plaintext-67890';
+  const { targetId, sessionId } = await (async () => {
+    const created = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+    return { targetId: created.targetId, sessionId: await extSession(page, created.targetId) };
+  })();
+  await extEval(
+    page,
+    sessionId,
+    `new Promise((resolve) => { const wait = () => document.getElementById("c-save") ? resolve(true) : setTimeout(wait, 50); wait(); })`
+  );
+  await extEval(
+    page,
+    sessionId,
+    `new Promise((resolve) => chrome.storage.local.set({ ${JSON.stringify(broken)}: { ct: "AAAA", iv: "AAAAAAAAAAAAAAAA" }, ${JSON.stringify(`${broken}_DOMAINS`)}: "upstream.test" }, resolve))`
+  );
+  await extEval(
+    page,
+    sessionId,
+    `(() => { document.querySelector('[data-pane="custom"]')?.click(); document.getElementById("c-name").value = ${JSON.stringify(name)}; document.getElementById("c-value").value = ${JSON.stringify(value)}; document.getElementById("c-domains").value = "upstream.test"; document.getElementById("c-save").click(); return true; })()`
+  );
+  const stored = await extEval(
+    page,
+    sessionId,
+    `new Promise((resolve) => { const started = Date.now(); const poll = () => chrome.storage.local.get(${JSON.stringify(name)}, (r) => { const v = r[${JSON.stringify(name)}]; if (v !== undefined || Date.now() - started > 10000) resolve(v ?? null); else setTimeout(poll, 100); }); poll(); })`
+  );
+  assert.ok(
+    stored.result.value && typeof stored.result.value.ct === 'string',
+    `the page must store {ct, iv}: got ${JSON.stringify(stored.result.value)}`
+  );
+  assert.equal(JSON.stringify(stored.result.value).includes(value), false);
+  const rows = await extEval(
+    page,
+    sessionId,
+    `new Promise((resolve) => { document.getElementById("refreshBtn").click(); const started = Date.now(); const poll = () => { const found = [...document.querySelectorAll(".secret-row")].map((row) => ({ name: row.dataset.name, unreadable: row.classList.contains("secret-row-unreadable") })); if (found.some((r) => r.name === ${JSON.stringify(broken)}) || Date.now() - started > 10000) resolve(found); else setTimeout(poll, 100); }; poll(); })`
+  );
+  const listed = rows.result.value;
+  assert.deepEqual(
+    listed.find((r) => r.name === name),
+    { name, unreadable: false },
+    'the saved secret is listed as readable'
+  );
+  assert.deepEqual(
+    listed.find((r) => r.name === broken),
+    { name: broken, unreadable: true },
+    'the broken ciphertext is listed as unreadable'
+  );
+  const masked = await extEval(
+    page,
+    sessionId,
+    `new Promise((resolve) => chrome.runtime.sendMessage({ type: "secrets.list-masked-entries" }, resolve))`
+  );
+  assert.ok(
+    masked.result.value.entries.some((e) => e.name === name && e.maskedValue !== value),
+    'the pipeline decrypts the page-saved secret'
+  );
+  await extEval(
+    page,
+    sessionId,
+    `new Promise((resolve) => chrome.storage.local.remove([${JSON.stringify(name)}, ${JSON.stringify(`${name}_DOMAINS`)}, ${JSON.stringify(broken)}, ${JSON.stringify(`${broken}_DOMAINS`)}], resolve))`
+  );
+  await extClose(page, targetId);
+});
+
 test('content-script senders are refused by six handlers; secrets.html senders succeed (B-SEC1)', async (t) => {
   const page = await chrome.visit(t, slicc);
 
