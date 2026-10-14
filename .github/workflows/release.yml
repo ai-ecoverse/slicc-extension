@@ -52,6 +52,7 @@ jobs:
 
   publish:
     needs: release
+    if: vars.CWS_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: chrome-web-store
