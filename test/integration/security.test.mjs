@@ -11,6 +11,7 @@ after(() => chrome?.close());
 
 const slicc = 'https://seven.sliccy.ai/';
 const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
+const refused = "slicc: refused: target is on seven's origin";
 
 function extPage(page, url) {
   return page.evaluate(
@@ -207,7 +208,7 @@ test('the secrets page saves through encrypted storage and marks unreadable entr
   await extEval(
     page,
     sessionId,
-    `new Promise((resolve) => { const wait = () => document.getElementById("c-save") ? resolve(true) : setTimeout(wait, 50); wait(); })`
+    `new Promise((resolve) => { const wait = () => document.readyState === "complete" ? resolve(true) : setTimeout(wait, 50); wait(); })`
   );
   await extEval(
     page,
@@ -329,50 +330,41 @@ test('a navigation to the vault fails before it commits and the session stays (i
       targetId: created.targetId,
       flatten: true,
     });
-    let ready;
-    for (let i = 0; i < 40; i++) {
-      try {
-        ready = await globalThis.sliccExtension.cdp.send(
-          'Runtime.evaluate',
-          { expression: '1+1', returnByValue: true },
-          attached.sessionId
+    const href = (expression) =>
+      globalThis.sliccExtension.cdp
+        .send('Runtime.evaluate', { expression, returnByValue: true }, attached.sessionId)
+        .then(
+          (r) => r.result?.value,
+          (error) => `error ${error.message}`
         );
-        break;
-      } catch (error) {
-        if (!String(error.message).includes('execution context')) throw error;
-        await new Promise((r) => setTimeout(r, 50));
-      }
+    const loaded = 'https://other.test/ complete';
+    let ready = '';
+    for (let i = 0; i < 200 && ready !== loaded; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 50));
+      ready = await href('`${location.href} ${document.readyState}`');
     }
-    if (ready?.result?.value !== 2) throw new Error('no context');
-    await globalThis.sliccExtension.cdp
-      .send(
-        'Runtime.evaluate',
-        { expression: 'location.href = "https://vault.sliccy.ai/"', returnByValue: true },
-        attached.sessionId
-      )
-      .catch(() => undefined);
-    await new Promise((r) => setTimeout(r, 2500));
-    const after = await globalThis.sliccExtension.cdp
-      .send(
-        'Runtime.evaluate',
-        { expression: 'location.href', returnByValue: true },
-        attached.sessionId
-      )
-      .then(
-        (r) => r.result?.value,
-        (error) => `error ${error.message}`
-      );
+    if (ready !== loaded) throw new Error(`not loaded: ${ready}`);
+    await href('location.href = "https://vault.sliccy.ai/"');
+    const hops = [];
+    for (let i = 0; i < 200 && hops.at(-1) !== 'chrome-error://chromewebdata/'; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 50));
+      hops.push(await href('location.href'));
+    }
     await globalThis.sliccExtension.cdp
       .send('Target.closeTarget', { targetId: created.targetId })
       .catch(() => undefined);
-    return { after };
+    return { hops };
   });
-  assert.equal(typeof answer.after, 'string');
-  assert.equal(answer.after.startsWith('error'), false, 'the session stays');
-  assert.equal(
-    answer.after.startsWith('https://vault.sliccy.ai'),
-    false,
-    'the vault never commits'
+  assert.equal(answer.hops.at(-1), 'chrome-error://chromewebdata/', 'the hop fails at the request');
+  assert.deepEqual(
+    answer.hops.filter(
+      (href) =>
+        href !== 'https://other.test/' &&
+        href !== 'chrome-error://chromewebdata/' &&
+        href !== `error ${refused}`
+    ),
+    [],
+    'the session stays and the vault never commits'
   );
 });
 
