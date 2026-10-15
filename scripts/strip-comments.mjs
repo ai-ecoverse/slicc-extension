@@ -211,6 +211,15 @@ if (pr3979needed) {
     '$1\n  if (!isTrustedInternalSender(port.sender)) return;'
   );
 } else {
+  if (
+    /chrome\.runtime\.onConnect\.addListener\(\(port\) => \{[\s\S]{0,800}?port\.disconnect\(\)/.test(
+      content
+    )
+  ) {
+    throw new Error(
+      "strip-comments: six's onConnect gate disconnects foreign ports, which would cut seven's relay port; keep B-SEC1-onconnect until slicc#3979 returns instead"
+    );
+  }
   skip(3979, 'six-sw.js');
 }
 

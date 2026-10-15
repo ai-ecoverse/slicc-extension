@@ -66,10 +66,18 @@ async function marked(page, sessionId, tag) {
   );
 }
 
-async function settledOff(page, sessionId) {
+async function stayed(page, sessionId, origin) {
   return page.evaluate(
-    async (sid) => Boolean(await h.until(async () => h.detached(sid), 10000)),
-    sessionId
+    async ({ sid, origin }) => {
+      await h.sleep(2500);
+      const href = await h.evaluate(sid, 'location.href');
+      return {
+        detached: h.detached(sid),
+        landed: typeof href === 'string' && href.startsWith(origin),
+        answered: typeof href === 'string',
+      };
+    },
+    { sid: sessionId, origin }
   );
 }
 
@@ -84,7 +92,11 @@ for (const [name, origin] of Object.entries(targets)) {
 
     const tag = `c1-${name}`;
     const guarded = await initScriptThenNavigate(page, tag, `${origin}/landing?k=SECRET`);
-    assert.equal(await settledOff(page, guarded.sessionId), true, 'session released');
+    assert.deepEqual(
+      await stayed(page, guarded.sessionId, origin),
+      { detached: false, landed: false, answered: true },
+      'the protected navigation fails and the session stays'
+    );
     assert.equal(await beaconed(tag, 3000), false, 'no beacon from the protected origin');
     const leaked = await page.evaluate(() =>
       JSON.stringify(h.content(h.events)).includes('SECRET')
@@ -104,7 +116,11 @@ for (const [name, origin] of Object.entries(targets)) {
 
     const tag = `c2-${name}`;
     const guarded = await initScriptThenNavigate(page, tag, hop(hop(`${origin}/landing`)));
-    assert.equal(await settledOff(page, guarded.sessionId), true, 'session released');
+    assert.deepEqual(
+      await stayed(page, guarded.sessionId, origin),
+      { detached: false, landed: false, answered: true },
+      'the protected navigation fails and the session stays'
+    );
     assert.equal(await beaconed(tag, 3000), false, 'no beacon from the protected origin');
     await page.evaluate((id) => h.close(id), guarded.targetId);
   });
@@ -235,7 +251,8 @@ for (const [name, origin] of Object.entries(targets)) {
       decodeURIComponent(seen.search ?? '').includes('/inner')
     );
     assert.deepEqual(fromFrame, [], 'no beacon from the protected iframe');
-    assert.equal(guarded.detached, true, 'the session is cut before the protected frame loads');
+    assert.equal(guarded.alive, 2, 'the tab stays attached');
+    assert.equal(guarded.detached, false, 'only the protected frame fails');
     await page.evaluate((id) => h.close(id), guarded.targetId);
   });
 
@@ -285,7 +302,9 @@ for (const [name, origin] of Object.entries(targets)) {
           { expression: `location.href = ${JSON.stringify(`${origin}/c5?k=SECRET`)}` },
           sessionId
         );
-        const released = await h.until(async () => h.detached(sessionId));
+        await h.sleep(2500);
+        const released = h.detached(sessionId);
+        const href = await h.evaluate(sessionId, 'location.href');
         await h.sleep(500);
         const leaked = h
           .content(h.events.slice(count))
@@ -301,7 +320,8 @@ for (const [name, origin] of Object.entries(targets)) {
           fulfilled,
           title,
           forged,
-          released: Boolean(released),
+          released,
+          landed: typeof href === 'string' && href.startsWith(origin),
           leaked,
         };
       },
@@ -311,7 +331,8 @@ for (const [name, origin] of Object.entries(targets)) {
     assert.equal(answer.fulfilled.error, undefined, 'control fulfill accepted');
     assert.equal(answer.title, 'fulfilled-c5', 'control fulfilled body renders');
     assert.match(answer.forged.error, /^slicc: refused: /, 'unknown request ids are refused');
-    assert.equal(answer.released, true, 'session released on the protected navigation');
+    assert.equal(answer.released, false, 'the session stays');
+    assert.equal(answer.landed, false, 'the protected document never commits');
     assert.deepEqual(answer.leaked, [], 'nothing about the protected request reaches the client');
   });
 
@@ -514,10 +535,6 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
       const popupInfo = (await h.cdp.send('Target.getTargetInfo', { targetId: popup.targetId }))
         .targetInfo;
       await h.sleep(800);
-      const popupSession = await h.cdp.send('Target.attachToTarget', {
-        targetId: popup.targetId,
-        flatten: true,
-      });
       await h.evaluate(
         sessionId,
         `window.w.location.href = ${JSON.stringify(`${vault}/became?k=SECRET`)}; true`
@@ -530,7 +547,10 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
             e.params.targetInfo.url.startsWith(vault)
         )
       );
-      const popupDetached = await h.until(async () => h.detached(popupSession.sessionId));
+      const popupDetached = await h.attempt('Target.attachToTarget', {
+        targetId: popup.targetId,
+        flatten: true,
+      });
       const refusedInfo = await h.attempt('Target.getTargetInfo', { targetId: popup.targetId });
       const listed = (await h.cdp.send('Target.getTargets')).targetInfos.some(
         (i) => i.targetId === popup.targetId
@@ -555,7 +575,7 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
         popupInfo,
         targetId,
         destroyed: Boolean(destroyed),
-        popupDetached: Boolean(popupDetached),
+        popupDetached,
         refusedInfo,
         listed,
         distinct: second.sessionId !== sessionId,
@@ -582,7 +602,12 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
   );
   assert.equal(answer.popupInfo.openerId, answer.targetId, 'openerId from openerTabId');
   assert.equal(answer.destroyed, true, 'a tab that becomes protected is announced as protected');
-  assert.equal(answer.popupDetached, true, 'and its session detached');
+  assert.equal(
+    answer.popupDetached.error,
+    "slicc: refused: target is on seven's origin",
+    'and it can no longer be attached'
+  );
+  assert.equal(answer.refusedInfo.result.targetInfo.title, '', 'its title is redacted');
   assert.ok(
     answer.refusedInfo.result.targetInfo.url.startsWith(targets.vault),
     'getTargetInfo shows the guard the protected url'

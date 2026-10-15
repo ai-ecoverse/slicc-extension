@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
 import { launch } from './chrome.mjs';
 
@@ -318,7 +319,7 @@ test('content-script senders are refused by six handlers; secrets.html senders s
   await extClose(page, targetId);
 });
 
-test('CDP detaches when a tab navigates to vault via seven (integration)', async (t) => {
+test('a navigation to the vault fails before it commits and the session stays (integration)', async (t) => {
   const page = await chrome.visit(t, slicc);
   const answer = await page.evaluate(async () => {
     const created = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
@@ -350,26 +351,29 @@ test('CDP detaches when a tab navigates to vault via seven (integration)', async
         attached.sessionId
       )
       .catch(() => undefined);
-    let detached = false;
-    for (let i = 0; i < 80; i++) {
-      try {
-        await globalThis.sliccExtension.cdp.send(
-          'Runtime.evaluate',
-          { expression: '1', returnByValue: true },
-          attached.sessionId
-        );
-        await new Promise((r) => setTimeout(r, 50));
-      } catch {
-        detached = true;
-        break;
-      }
-    }
+    await new Promise((r) => setTimeout(r, 2500));
+    const after = await globalThis.sliccExtension.cdp
+      .send(
+        'Runtime.evaluate',
+        { expression: 'location.href', returnByValue: true },
+        attached.sessionId
+      )
+      .then(
+        (r) => r.result?.value,
+        (error) => `error ${error.message}`
+      );
     await globalThis.sliccExtension.cdp
       .send('Target.closeTarget', { targetId: created.targetId })
       .catch(() => undefined);
-    return { detached };
+    return { after };
   });
-  assert.equal(answer.detached, true);
+  assert.equal(typeof answer.after, 'string');
+  assert.equal(answer.after.startsWith('error'), false, 'the session stays');
+  assert.equal(
+    answer.after.startsWith('https://vault.sliccy.ai'),
+    false,
+    'the vault never commits'
+  );
 });
 
 test('six bridge navigation to vault triggers detach (B24-1-tabs-onupdated)', async (t) => {
@@ -484,4 +488,40 @@ test('six bridge navigation to vault triggers detach (B24-1-tabs-onupdated)', as
   assert.ok(!answer.error, `bridge test failed: ${JSON.stringify(answer)}`);
   assert.equal(answer.detached, true, 'bridge must receive Target.detachedFromTarget');
   assert.equal(answer.refused, true, 'evaluate after detach must be refused');
+});
+
+test('webNavigation adds no permission warning over 6.248.11, so an in-place update stays enabled', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const current = JSON.parse(
+    await readFile(new URL('../../extension/manifest.json', import.meta.url))
+  );
+  const released = {
+    ...current,
+    permissions: [
+      'debugger',
+      'tabs',
+      'tabGroups',
+      'identity',
+      'storage',
+      'webRequest',
+      'declarativeNetRequestWithHostAccess',
+      'notifications',
+      'sidePanel',
+    ],
+  };
+  assert.deepEqual(
+    current.permissions.filter((p) => !released.permissions.includes(p)),
+    ['webNavigation']
+  );
+  const { targetId } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const sid = await extSession(page, targetId);
+  const warnings = await extEval(
+    page,
+    sid,
+    `Promise.all([${JSON.stringify(JSON.stringify(released))}, ${JSON.stringify(JSON.stringify(current))}].map((m) => chrome.management.getPermissionWarningsByManifest(m)))`
+  );
+  const [before, after] = warnings.result.value;
+  assert.ok(before.length > 0, `6.248.11 has warnings: ${JSON.stringify(before)}`);
+  assert.deepEqual([...after].sort(), [...before].sort(), 'the warning set is unchanged');
+  await extClose(page, targetId);
 });

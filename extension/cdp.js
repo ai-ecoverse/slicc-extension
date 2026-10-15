@@ -32,7 +32,7 @@ import {
 
 const guard = protectedOrigins(protectedRules);
 const prefix = initScriptPrefix(protectedRules);
-export const PROTECTED_DOCUMENTS = 'detach';
+const ERROR_PAGE = 'chrome-error://chromewebdata/';
 
 const BACKEND = { urlPattern: '*', resourceType: 'Document', requestStage: 'Request' };
 const FETCH_ANSWERS = new Set([
@@ -224,10 +224,9 @@ function plainContinue(params) {
 }
 
 class Connection {
-  constructor(port, api, mode = PROTECTED_DOCUMENTS) {
+  constructor(port, api) {
     this.port = port;
     this.api = api;
-    this.mode = mode;
     trackSources(api);
     this.state = {
       sessions: new Map(),
@@ -235,6 +234,7 @@ class Connection {
       ownedTabs: new Set(),
       inflight: new Map(),
       seen: new Set(),
+      failed: new Map(),
       streams: new Set(),
       discover: false,
       counter: 0,
@@ -304,14 +304,27 @@ class Connection {
     return this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, method, params));
   }
 
-  info(tab) {
+  view(tab) {
+    const failed = this.state.failed.get(tab?.id);
+    if (!failed || textOf(tab.url) !== failed) return tab;
+    const pendingUrl = textOf(tab.pendingUrl) === failed ? '' : tab.pendingUrl;
+    return { ...tab, url: ERROR_PAGE, title: '', pendingUrl };
+  }
+
+  async read(tabId) {
+    return this.view(await readTab(this.api, tabId));
+  }
+
+  info(raw) {
+    const tab = this.view(raw);
     const out = {
       targetId: String(tab.id),
       type: 'page',
-      title: tab.title ?? '',
-      url: urlProtected(guard, textOf(tab.pendingUrl))
-        ? tab.pendingUrl
-        : tab.url || tab.pendingUrl || '',
+      title:
+        urlProtected(guard, textOf(tab.url)) || urlProtected(guard, textOf(tab.pendingUrl))
+          ? ''
+          : (tab.title ?? ''),
+      url: tab.url || tab.pendingUrl || '',
       attached: this.sessionsOf(tab.id).length > 0,
       canAccessOpener: false,
     };
@@ -387,7 +400,7 @@ class Connection {
       };
     }
     const tabId = tabFrom(params.targetId);
-    const tab = await readTab(this.api, tabId);
+    const tab = await this.read(tabId);
     this.state.seen.add(tabId);
     return { targetInfo: this.info(tab) };
   }
@@ -431,7 +444,7 @@ class Connection {
 
   async guarded(params) {
     const tabId = tabFrom(readTargetId(params));
-    await demandTab(this.api, await readTab(this.api, tabId));
+    await demandTab(this.api, await this.read(tabId));
     return tabId;
   }
 
@@ -467,7 +480,7 @@ class Connection {
     if (params.flatten !== true) throw new Error('only flatten: true is supported');
     const targetId = readTargetId(params);
     const tabId = tabFrom(targetId);
-    const seen = await demandTab(this.api, await readTab(this.api, tabId));
+    const seen = await demandTab(this.api, await this.read(tabId));
     let tab = this.tabState(tabId);
     if (!tab) {
       if (!this.state.ownedTabs.has(tabId)) {
@@ -609,7 +622,7 @@ class Connection {
         return;
       }
       if (params.resourceType === 'Document' && atRequest) {
-        await this.protectedDocument(tabId, tab, requestId, frameId);
+        await this.protectedDocument(tabId, tab, requestId, frameId, url);
         return;
       }
       await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
@@ -699,7 +712,7 @@ class Connection {
     }
     const { tabId } = session;
     const tab = this.tabState(tabId);
-    const seen = await demandTab(this.api, await readTab(this.api, tabId));
+    const seen = await demandTab(this.api, await this.read(tabId));
     tab.pageUrl = seen.url;
     if (method.startsWith('Target.')) {
       throw new Error(`slicc: refused: ${method} is not supported on a page session`);
@@ -843,29 +856,21 @@ class Connection {
     }
   }
 
-  async protectedDocument(tabId, tab, requestId, frameId) {
-    if (this.mode !== 'fail') {
-      this.release(tabId);
-      return;
-    }
+  async protectedDocument(tabId, tab, requestId, frameId, url) {
+    if (this.isMain(tab, frameId)) this.state.failed.set(tabId, url);
     await this.send(tabId, 'Fetch.failRequest', {
       requestId,
       errorReason: 'BlockedByClient',
     }).catch(() => undefined);
-    if (this.isMain(tab, frameId)) this.release(tabId);
   }
 
   watchChild(tabId, method, p) {
     const url = textOf(p.targetInfo?.url);
     if (method === 'Target.attachedToTarget') {
       if (urlProtected(guard, url)) {
-        if (this.mode === 'fail') {
-          void this.api.debugger
-            .sendCommand({ tabId }, 'Target.detachFromTarget', { sessionId: textOf(p.sessionId) })
-            .catch(() => undefined);
-          return;
-        }
-        this.release(tabId);
+        void this.api.debugger
+          .sendCommand({ tabId }, 'Target.detachFromTarget', { sessionId: textOf(p.sessionId) })
+          .catch(() => undefined);
         return;
       }
       const sessionId = textOf(p.sessionId);
@@ -875,8 +880,12 @@ class Connection {
         .catch(() => undefined);
       return;
     }
-    if (method === 'Target.targetInfoChanged' && urlProtected(guard, url) && this.mode !== 'fail') {
-      this.release(tabId);
+    if (method === 'Target.targetInfoChanged' && urlProtected(guard, url)) {
+      void this.api.debugger
+        .sendCommand({ tabId }, 'Target.detachFromTarget', {
+          targetId: textOf(p.targetInfo?.targetId),
+        })
+        .catch(() => undefined);
     }
   }
 
@@ -898,7 +907,12 @@ class Connection {
     const url = textOf(frame.url);
     const isProtected =
       this.protectedOrigin(textOf(frame.securityOrigin)) || urlProtected(guard, url);
+    if (!frame.parentId && url.startsWith('chrome-error:')) {
+      tab.mainFrameId = textOf(frame.id);
+      return urlProtected(guard, textOf(frame.unreachableUrl));
+    }
     if (!frame.parentId) {
+      this.state.failed.delete(tabId);
       tab.mainFrameId = textOf(frame.id);
       if (isProtected || this.leaves(tab, url)) {
         this.release(tabId);
@@ -921,12 +935,7 @@ class Connection {
   }
 
   watch(tabId, tab, method, p) {
-    if (this.headsToProtected(method, p)) {
-      if (this.mode === 'fail' && !this.isMain(tab, textOf(p.frameId))) return true;
-      this.broadcast(tabId, method, p);
-      if (this.mode !== 'fail') this.release(tabId);
-      return true;
-    }
+    if (this.headsToProtected(method, p)) return true;
     if (method === 'Page.frameNavigated') return this.watchFrame(tabId, tab, p.frame ?? {});
     if (method === 'Runtime.executionContextCreated') {
       return this.watchContext(tabId, tab, p.context ?? {});
@@ -967,7 +976,7 @@ class Connection {
 
   async announce(tab, created) {
     if (!this.state.discover || typeof tab?.id !== 'number') return;
-    if (await tabBlocked(this.api, tab)) this.release(tab.id);
+    if (await tabBlocked(this.api, this.view(tab))) this.release(tab.id);
     const known = this.state.seen.has(tab.id);
     this.state.seen.add(tab.id);
     this.post({
@@ -993,9 +1002,10 @@ class Connection {
     const current = { id: tabId, ...(tab ?? {}) };
     const t = this.tabState(tabId);
     if (t || this.state.ownedTabs.has(tabId)) {
-      const pendingUrl = textOf(change.pendingUrl) || textOf(tab?.pendingUrl);
       const probe = t ?? { pageUrl: '' };
-      if (this.leaves(probe, textOf(change.url)) || this.leaves(probe, pendingUrl)) {
+      const failed = this.state.failed.get(tabId);
+      if (change.url !== undefined && change.url !== failed) this.state.failed.delete(tabId);
+      if (change.url !== failed && this.leaves(probe, textOf(change.url))) {
         this.release(tabId);
       } else {
         void this.recheck(tabId);
@@ -1009,6 +1019,7 @@ class Connection {
   }
 
   onRemoved(tabId) {
+    this.state.failed.delete(tabId);
     this.release(tabId);
     if (this.state.seen.delete(tabId) && this.state.discover) {
       this.post({ method: 'Target.targetDestroyed', params: { targetId: String(tabId) } });
@@ -1018,9 +1029,14 @@ class Connection {
   async recheck(tabId) {
     if (!this.tabState(tabId) && !this.state.ownedTabs.has(tabId)) return;
     try {
-      const seen = await demandTab(this.api, await readTab(this.api, tabId));
+      const current = await this.read(tabId);
+      const url = textOf(current?.url);
+      if (blocked(url, await openerOf(this.api, current))) {
+        this.release(tabId);
+        return;
+      }
       const tab = this.tabState(tabId);
-      if (tab) tab.pageUrl = seen.url;
+      if (tab) tab.pageUrl = url;
     } catch {
       this.release(tabId);
     }
@@ -1090,11 +1106,11 @@ class Connection {
   }
 }
 
-export function listen(port, extensionId, api, mode = PROTECTED_DOCUMENTS) {
+export function listen(port, extensionId, api) {
   if (port.name !== 'slicc-fetch') return null;
   if (!trusted(port.sender, extensionId)) {
     port.disconnect();
     return null;
   }
-  return new Connection(port, api, mode);
+  return new Connection(port, api);
 }

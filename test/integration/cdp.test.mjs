@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
-import { listen, PROTECTED_DOCUMENTS } from '../../extension/cdp.js';
+import { listen } from '../../extension/cdp.js';
 import { protectedOrigins } from '../../extension/protected.mjs';
 import { protectedRules } from '../../extension/protected-rules.js';
 import { launch } from './chrome.mjs';
@@ -354,7 +354,7 @@ test('target commands list, open, activate, and close tabs', async () => {
     {
       targetId: '7',
       type: 'page',
-      title: 'fake slicc',
+      title: '',
       url: 'https://seven.sliccy.ai/',
       attached: false,
       canAccessOpener: false,
@@ -598,24 +598,27 @@ test('pending url, opener, and a later navigation stay off protected origins', a
   });
   await cdp.settled();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(
-    api.sent.some((sent) => sent.method === 'Fetch.failRequest'),
-    false,
-    'the backend detaches instead of answering'
-  );
+  assert.deepEqual(api.sent.at(-1), {
+    tabId: 8,
+    method: 'Fetch.failRequest',
+    params: { requestId: 'interception-1', errorReason: 'BlockedByClient' },
+  });
   assert.equal(
     connection.posted.some((message) => message.method === 'Fetch.requestPaused'),
     false
   );
-  assert.equal(api.detached.at(-1), 8);
-  assert.equal(api.detached.length, held + 1);
-  const third = await command(cdp, connection, {
+  assert.equal(api.detached.length, held, 'the session stays');
+  api.locations = new Map([
+    [8, { url: 'https://other.test/', pendingUrl: 'https://seven.sliccy.ai/' }],
+  ]);
+  const pendingNow = await command(cdp, connection, {
     id: 9,
-    method: 'Target.attachToTarget',
-    params: { targetId: '8', flatten: true },
+    method: 'Runtime.evaluate',
+    params: { expression: '1' },
+    sessionId: '8',
   });
-  assert.deepEqual(third.result, { sessionId: '8' });
-  api.visit(8, { url: 'https://other.test/', pendingUrl: 'https://seven.sliccy.ai/' });
+  assert.equal(pendingNow.error, refused, 'commands wait out a pending protected navigation');
+  api.visit(8, { url: 'https://seven.sliccy.ai/' });
   assert.equal(connection.posted.at(-1).method, 'Target.detachedFromTarget');
   const moved = await command(cdp, connection, {
     id: 10,
@@ -840,6 +843,17 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
           break;
         }
       }
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const settled = await globalThis.sliccExtension.cdp
+        .send(
+          'Runtime.evaluate',
+          { expression: 'location.href', returnByValue: true },
+          hoppedSession.sessionId
+        )
+        .then(
+          (r) => r.result?.value,
+          (error) => `error ${error.message}`
+        );
       await globalThis.sliccExtension.cdp
         .send('Target.closeTarget', { targetId: hopped.targetId })
         .catch(() => undefined);
@@ -849,6 +863,7 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
         blankOk,
         navigated,
         gone,
+        settled,
         leaked: seen.some((event) => JSON.stringify(event).includes('seven.sliccy.ai')),
       };
     },
@@ -859,7 +874,10 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
   assert.equal(answer.blankOk, true);
   assert.equal(answer.navigated, refused);
   assert.equal(answer.leaked, false);
-  assert.equal(answer.gone === refused || answer.gone.includes('No tab attached'), true);
+  assert.ok(answer.gone === 'ran' || answer.gone === refused, answer.gone);
+  assert.equal(typeof answer.settled, 'string');
+  assert.equal(answer.settled.startsWith('error'), false, 'the session stays');
+  assert.equal(answer.settled.startsWith('https://seven.sliccy.ai'), false, 'seven never commits');
 });
 
 test('vault-feature-x gets no extension scripts (B24-4)', async (t) => {
@@ -1455,25 +1473,36 @@ test('shield owns Fetch: protected requests never reach the client, client patte
   );
   assert.equal(events(connection, 'Fetch.requestPaused').length, 2);
   assert.equal(events(connection, 'Target.detachedFromTarget').length, 0);
-  const sentBefore = user(api).length;
   api.fire(8, 'Fetch.requestPaused', {
     requestId: 'i3',
     frameId: 'child',
     resourceType: 'Document',
     request: { url: 'https://seven.sliccy.ai/frame' },
   });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'i5',
+    frameId: 'main',
+    resourceType: 'Document',
+    redirectedRequestId: 'i1',
+    request: { url: 'https://vault.sliccy.ai/' },
+  });
   await tick();
-  assert.equal(user(api).length, sentBefore, 'the backend detaches instead of answering');
-  assert.deepEqual(api.detached, [8], 'the debugger detaches before the document commits');
   assert.deepEqual(
-    events(connection, 'Target.detachedFromTarget').map((e) => e.params.sessionId),
-    ['8', second]
+    user(api)
+      .slice(-2)
+      .map((s) => [s.method, s.params]),
+    [
+      ['Fetch.failRequest', { requestId: 'i3', errorReason: 'BlockedByClient' }],
+      ['Fetch.failRequest', { requestId: 'i5', errorReason: 'BlockedByClient' }],
+    ]
   );
+  assert.deepEqual(api.detached, [], 'the tab and its sessions stay');
+  assert.equal(events(connection, 'Target.detachedFromTarget').length, 0);
   assert.equal(events(connection, 'Fetch.requestPaused').length, 2);
   cdp.close();
 });
 
-test('shield detaches before a redirect hop into a protected origin commits', async () => {
+test('shield fails a redirect hop into a protected origin before it commits', async () => {
   const { connection, api, cdp } = open();
   api.locations = new Map([[8, { url: 'https://other.test/' }]]);
   await command(cdp, connection, {
@@ -1506,7 +1535,12 @@ test('shield detaches before a redirect hop into a protected origin commits', as
     request: { url: 'https://vault.sliccy.ai/landing?k=SECRET' },
   });
   await tick();
-  assert.deepEqual(api.detached, [8]);
+  assert.deepEqual(api.detached, []);
+  assert.deepEqual(user(api).at(-1), {
+    tabId: 8,
+    method: 'Fetch.failRequest',
+    params: { requestId: 'r2', errorReason: 'BlockedByClient' },
+  });
   assert.deepEqual(
     events(connection, 'Fetch.requestPaused').map((e) => e.params.requestId),
     ['r1']
@@ -1583,54 +1617,4 @@ test('shield hides protected network events, holds ExtraInfo until classified, a
   });
   assert.equal(allowed.error, undefined);
   cdp.close();
-});
-
-test('PROTECTED_DOCUMENTS switch: detach lets the document load untouched, fail blocks it at the request', async () => {
-  assert.equal(PROTECTED_DOCUMENTS, 'detach');
-  for (const mode of ['detach', 'fail']) {
-    const connection = port('slicc-fetch', 'https://seven.sliccy.ai/play');
-    const api = fakeChrome();
-    const cdp = listen(connection, extensionId, api, mode);
-    api.locations = new Map([[8, { url: 'https://other.test/' }]]);
-    await command(cdp, connection, {
-      id: 1,
-      method: 'Target.attachToTarget',
-      params: { targetId: '8', flatten: true },
-    });
-    api.fire(8, 'Page.frameNavigated', { frame: { id: 'main', url: 'https://other.test/' } });
-    api.fire(8, 'Fetch.requestPaused', {
-      requestId: 'sub',
-      frameId: 'child',
-      resourceType: 'Document',
-      request: { url: 'https://vault.sliccy.ai/frame' },
-    });
-    await tick();
-    const failed = () =>
-      api.sent.filter((s) => s.method === 'Fetch.failRequest').map((s) => s.params.requestId);
-    if (mode === 'detach') {
-      assert.deepEqual(failed(), [], mode);
-      assert.deepEqual(api.detached, [8], `${mode}: a protected frame cuts the tab`);
-      cdp.close();
-      continue;
-    }
-    assert.deepEqual(failed(), ['sub'], `${mode}: the frame request fails`);
-    assert.deepEqual(api.detached, [], `${mode}: the tab keeps its session`);
-    const alive = await command(cdp, connection, {
-      id: 2,
-      method: 'Runtime.evaluate',
-      params: { expression: '1' },
-      sessionId: '8',
-    });
-    assert.equal(alive.error, undefined);
-    api.fire(8, 'Fetch.requestPaused', {
-      requestId: 'top',
-      frameId: 'main',
-      resourceType: 'Document',
-      request: { url: 'https://seven.sliccy.ai/' },
-    });
-    await tick();
-    assert.deepEqual(failed(), ['sub', 'top'], `${mode}: the main document fails too`);
-    assert.deepEqual(api.detached, [8], `${mode}: and the session is released`);
-    cdp.close();
-  }
 });
