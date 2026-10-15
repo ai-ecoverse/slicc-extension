@@ -89,6 +89,7 @@ jobs:
         id: chromium
         run: |
           echo "playwright=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
           if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; then
             echo "root=true" >> "$GITHUB_OUTPUT"
           else
@@ -105,7 +106,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/apt
-          key: apt-${{ env.ImageOS }}-${{ env.ImageVersion }}-playwright-${{ steps.chromium.outputs.playwright }}
+          key: apt-${{ steps.chromium.outputs.image }}-playwright-${{ steps.chromium.outputs.playwright }}
 
       - name: Chromium system dependencies
         if: steps.chromium.outputs.root == 'true'
