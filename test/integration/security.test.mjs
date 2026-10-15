@@ -208,7 +208,7 @@ test('the secrets page saves through encrypted storage and marks unreadable entr
   await extEval(
     page,
     sessionId,
-    `new Promise((resolve) => { const wait = () => document.getElementById("c-save") ? resolve(true) : setTimeout(wait, 50); wait(); })`
+    `new Promise((resolve) => { const wait = () => document.readyState === "complete" ? resolve(true) : setTimeout(wait, 50); wait(); })`
   );
   await extEval(
     page,
