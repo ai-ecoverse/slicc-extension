@@ -196,38 +196,34 @@
   },
   {
     "id": "UX-unreadable-copy",
-    "pr": "secrets-page-polish",
-    "upstream": "slicc PR pending from thr_9qs2k3us5v",
+    "pr": 3994,
     "file": "secrets.js",
     "sentinel": "This value can't be read any more. Enter it again.",
-    "label": "unreadable row copy: This value can't be read any more. Enter it again.",
+    "label": "unreadable row copy",
     "match": 1
   },
   {
     "id": "UX-reenter-button",
-    "pr": "secrets-page-polish",
-    "upstream": "slicc PR pending from thr_9qs2k3us5v",
+    "pr": 3994,
     "file": "secrets.js",
     "sentinel": "This value can't be read any more. Enter it again.",
-    "label": "Re-enter button opens Custom secret with name and domains prefilled",
+    "label": "Re-enter opens Custom secret with name and domains prefilled",
     "match": 1
   },
   {
-    "id": "UX-unreadable-layout",
-    "pr": "secrets-page-polish",
-    "upstream": "slicc PR pending from thr_9qs2k3us5v",
+    "id": "UX-unreadable-style",
+    "pr": 3994,
     "file": "secrets.html",
-    "sentinel": "grid-template-columns: 1fr auto auto auto",
-    "label": "unreadable row matches normal rows and fits a fourth button",
+    "sentinel": "box-shadow: inset 0 0 0 1px var(--danger)",
+    "label": "unreadable row keeps the normal surface, marked by an inset border",
     "match": 1
   },
   {
-    "id": "UX-narrow-labels",
-    "pr": "secrets-page-polish",
-    "upstream": "slicc PR pending from thr_9qs2k3us5v",
+    "id": "UX-narrow-layout",
+    "pr": 3994,
     "file": "secrets.html",
-    "sentinel": "grid-template-columns: 1fr auto auto auto",
-    "label": "below 600px: labels above inputs, unreadable row buttons wrap under the name",
+    "sentinel": "box-shadow: inset 0 0 0 1px var(--danger)",
+    "label": "below 600px: labels above inputs, tabs on one scrolling line, unreadable buttons wrap",
     "match": 1
   }
 ]

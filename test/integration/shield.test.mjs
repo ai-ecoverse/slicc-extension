@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
+import { hasSixShield } from '../../scripts/check-six-shield.mjs';
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
 
@@ -13,9 +15,20 @@ const slicc = 'https://seven.sliccy.ai/';
 const ordinary = 'https://other.test';
 const targets = { seven: 'https://seven.sliccy.ai', vault: 'https://vault.sliccy.ai' };
 
-async function client(t) {
-  const page = await chrome.visit(t, slicc);
-  await page.evaluate(install);
+const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
+const leader = 'https://www.sliccy.ai/?slicc=leader';
+const sixShield = hasSixShield(
+  readFileSync(new URL('../../extension/six-sw.js', import.meta.url), 'utf8')
+);
+const transports = ['seven', 'six-bridge'];
+
+async function client(t, transport = 'seven') {
+  if (transport === 'six-bridge' && !sixShield) {
+    t.skip('six bridge C1-C6: pinned tag lacks slicc#3986');
+    return null;
+  }
+  const page = await chrome.visit(t, transport === 'six-bridge' ? leader : slicc);
+  await page.evaluate(install, transport, extId);
   return page;
 }
 
@@ -81,363 +94,375 @@ async function stayed(page, sessionId, origin) {
   );
 }
 
-for (const [name, origin] of Object.entries(targets)) {
-  test(`C1 init script then location.href: runs on ${ordinary}, never on ${name}`, async (t) => {
-    const page = await client(t);
-    const control = `c1-control-${name}`;
-    const opened = await initScriptThenNavigate(page, control, `${ordinary}/landing`);
-    assert.equal(await marked(page, opened.sessionId, control), control, 'control marker');
-    assert.equal(await beaconed(control), true, 'control beacon');
-    await page.evaluate((id) => h.close(id), opened.targetId);
+for (const transport of transports) {
+  for (const [target, origin] of Object.entries(targets)) {
+    const name = transport === 'seven' ? target : `${target}-${transport}`;
+    test(`${transport} C1 init script then location.href: runs on ${ordinary}, never on ${target}`, async (t) => {
+      const page = await client(t, transport);
+      if (!page) return;
+      const control = `c1-control-${name}`;
+      const opened = await initScriptThenNavigate(page, control, `${ordinary}/landing`);
+      assert.equal(await marked(page, opened.sessionId, control), control, 'control marker');
+      assert.equal(await beaconed(control), true, 'control beacon');
+      await page.evaluate((id) => h.close(id), opened.targetId);
 
-    const tag = `c1-${name}`;
-    const guarded = await initScriptThenNavigate(page, tag, `${origin}/landing?k=SECRET`);
-    assert.deepEqual(
-      await stayed(page, guarded.sessionId, origin),
-      { detached: false, landed: false, answered: true },
-      'the protected navigation fails and the session stays'
-    );
-    assert.equal(await beaconed(tag, 3000), false, 'no beacon from the protected origin');
-    const leaked = await page.evaluate(() =>
-      JSON.stringify(h.content(h.events)).includes('SECRET')
-    );
-    assert.equal(leaked, false);
-    await page.evaluate((id) => h.close(id), guarded.targetId);
-  });
-
-  test(`C2 init script then a 302 chain: runs on ${ordinary}, never on ${name}`, async (t) => {
-    const page = await client(t);
-    const control = `c2-control-${name}`;
-    const hop = (to) => `${ordinary}/redirect?to=${encodeURIComponent(to)}`;
-    const opened = await initScriptThenNavigate(page, control, hop(hop(`${ordinary}/landing`)));
-    assert.equal(await marked(page, opened.sessionId, control), control, 'control marker');
-    assert.equal(await beaconed(control), true, 'control beacon');
-    await page.evaluate((id) => h.close(id), opened.targetId);
-
-    const tag = `c2-${name}`;
-    const guarded = await initScriptThenNavigate(page, tag, hop(hop(`${origin}/landing`)));
-    assert.deepEqual(
-      await stayed(page, guarded.sessionId, origin),
-      { detached: false, landed: false, answered: true },
-      'the protected navigation fails and the session stays'
-    );
-    assert.equal(await beaconed(tag, 3000), false, 'no beacon from the protected origin');
-    await page.evaluate((id) => h.close(id), guarded.targetId);
-  });
-
-  test(`C3 window.open popup: ${ordinary} popup is attachable, ${name} popup is not`, async (t) => {
-    const page = await client(t);
-    const answer = await page.evaluate(
-      async ({ start, ordinary, origin }) => {
-        await h.cdp.send('Target.setDiscoverTargets', { discover: true });
-        const { targetId, sessionId } = await h.open(start);
-        await h.cdp.send(
-          'Page.addScriptToEvaluateOnNewDocument',
-          { source: h.beaconSource('c3-popup') },
-          sessionId
-        );
-        const popup = async (url) => {
-          const before = new Set(
-            (await h.cdp.send('Target.getTargets')).targetInfos.map((info) => info.targetId)
-          );
-          const count = h.events.length;
-          await h.evaluate(sessionId, `Boolean(window.open(${JSON.stringify(url)}, "_blank"))`);
-          await h.sleep(1500);
-          const listed = (await h.cdp.send('Target.getTargets')).targetInfos.filter(
-            (info) => !before.has(info.targetId)
-          );
-          const later = h.events.slice(count);
-          const created = later
-            .filter((event) => event.method === 'Target.targetCreated')
-            .map((event) => event.params.targetInfo);
-          const destroyed = later
-            .filter((event) => event.method === 'Target.targetDestroyed')
-            .map((event) => event.params.targetId);
-          const leaked = later.some((event) =>
-            /sliccy\.ai|SECRET/.test(JSON.stringify(event.params?.targetInfo ?? {}))
-          );
-          return { listed, created, destroyed, leaked };
-        };
-        const plain = await popup(`${ordinary}/popup`);
-        const plainId = plain.listed[0]?.targetId;
-        const attached = plainId
-          ? await h.attempt('Target.attachToTarget', { targetId: plainId, flatten: true })
-          : { error: 'none' };
-        const openerId = plainId
-          ? (await h.cdp.send('Target.getTargetInfo', { targetId: plainId })).targetInfo.openerId
-          : undefined;
-        const guarded = await popup(`${origin}/popup?k=SECRET`);
-        const guardedId = guarded.listed[0]?.targetId;
-        guarded.attach = guardedId
-          ? await h.attempt('Target.attachToTarget', { targetId: guardedId, flatten: true })
-          : { error: 'not listed' };
-        if (guardedId) await h.close(guardedId);
-        const attachedTo = h.events
-          .filter((event) => event.method === 'Target.attachedToTarget')
-          .map((event) => event.params?.targetInfo?.url);
-        if (plainId) await h.close(plainId);
-        await h.close(targetId);
-        return { targetId, plain, attached, openerId, guarded, attachedTo };
-      },
-      { start: `${ordinary}/start`, ordinary, origin }
-    );
-    assert.equal(answer.plain.listed.length, 1, 'control popup is listed');
-    assert.equal(answer.plain.created.length, 1, 'control popup is announced');
-    assert.equal(answer.openerId, answer.targetId, 'control popup reports its opener');
-    assert.match(answer.attached.result?.sessionId ?? '', /^\d+/, 'control popup attaches');
-    assert.equal(answer.guarded.listed.length, 1, 'protected popup is listed for the guard');
-    assert.equal(
-      answer.guarded.attach.error,
-      "slicc: refused: target is on seven's origin",
-      'protected popup cannot be attached'
-    );
-    assert.deepEqual(answer.attachedTo, [], 'no popup comes up attached');
-    assert.equal(beacons('c3-popup').length, 0, 'the init script never runs in a popup');
-    const refused = await page.evaluate(async () =>
-      h.attempt('Target.setAutoAttach', {
-        autoAttach: true,
-        waitForDebuggerOnStart: false,
-        flatten: true,
-      })
-    );
-    assert.match(refused.error, /^slicc: refused: /);
-  });
-
-  test(`C4 iframe: init script runs in a ${ordinary} iframe, never in a ${name} iframe`, async (t) => {
-    const page = await client(t);
-    const control = `c4-control-${name}`;
-    const opened = await page.evaluate(
-      async ({ tag, start }) => {
-        const { targetId, sessionId } = await h.open(`${start}/start`);
-        await h.cdp.send(
-          'Page.addScriptToEvaluateOnNewDocument',
-          { source: h.beaconSource(tag) },
-          sessionId
-        );
-        await h.land(sessionId, `${start}/frame?src=${encodeURIComponent(`${start}/inner`)}`);
-        return { targetId, sessionId };
-      },
-      { tag: control, start: ordinary }
-    );
-    assert.equal(await beaconed(control), true, 'control beacon');
-    const frames = beacons(control).map((seen) => decodeURIComponent(seen.search ?? ''));
-    assert.ok(
-      frames.some((at) => at.includes('/inner')),
-      'the iframe ran the script'
-    );
-    await page.evaluate((id) => h.close(id), opened.targetId);
-
-    const tag = `c4-${name}`;
-    const guarded = await page.evaluate(
-      async ({ tag, start, origin }) => {
-        const { targetId, sessionId } = await h.open(`${start}/start`);
-        await h.cdp.send(
-          'Page.addScriptToEvaluateOnNewDocument',
-          { source: h.beaconSource(tag) },
-          sessionId
-        );
-        await h.land(
-          sessionId,
-          `${start}/frame?src=${encodeURIComponent(`${origin}/inner?k=SECRET`)}`
-        );
-        await h.sleep(1500);
-        const alive = await h.evaluate(sessionId, '1 + 1');
-        return { targetId, sessionId, alive, detached: h.detached(sessionId) };
-      },
-      { tag, start: ordinary, origin }
-    );
-    assert.equal(await beaconed(tag), true, 'the top document still runs the script');
-    const fromFrame = beacons(tag).filter((seen) =>
-      decodeURIComponent(seen.search ?? '').includes('/inner')
-    );
-    assert.deepEqual(fromFrame, [], 'no beacon from the protected iframe');
-    assert.equal(guarded.alive, 2, 'the tab stays attached');
-    assert.equal(guarded.detached, false, 'only the protected frame fails');
-    await page.evaluate((id) => h.close(id), guarded.targetId);
-  });
-
-  test(`C5 Fetch.enable '*': ${ordinary} documents pause and fulfill, ${name} never reaches the client`, async (t) => {
-    const page = await client(t);
-    const answer = await page.evaluate(
-      async ({ ordinary, origin }) => {
-        const { targetId, sessionId } = await h.open(`${ordinary}/start`);
-        await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, sessionId);
-        const pausedFor = (url) =>
-          h.events.find(
-            (event) =>
-              event.method === 'Fetch.requestPaused' &&
-              event.sessionId === sessionId &&
-              event.params.request.url.startsWith(url)
-          );
-        await h.attempt(
-          'Runtime.evaluate',
-          { expression: `location.href = ${JSON.stringify(`${ordinary}/c5`)}` },
-          sessionId
-        );
-        const plain = await h.until(async () => pausedFor(`${ordinary}/c5`));
-        const fulfilled = plain
-          ? await h.attempt(
-              'Fetch.fulfillRequest',
-              {
-                requestId: plain.params.requestId,
-                responseCode: 200,
-                responseHeaders: [{ name: 'content-type', value: 'text/html' }],
-                body: btoa('<!doctype html><title>fulfilled-c5</title>'),
-              },
-              sessionId
-            )
-          : { error: 'never paused' };
-        const title = await h.until(async () => {
-          const value = await h.evaluate(sessionId, 'document.title');
-          return value === 'fulfilled-c5' ? value : undefined;
-        });
-        const count = h.events.length;
-        const forged = await h.attempt(
-          'Fetch.fulfillRequest',
-          { requestId: 'interception-job-1.0', responseCode: 200, body: '' },
-          sessionId
-        );
-        await h.attempt(
-          'Runtime.evaluate',
-          { expression: `location.href = ${JSON.stringify(`${origin}/c5?k=SECRET`)}` },
-          sessionId
-        );
-        await h.sleep(2500);
-        const released = h.detached(sessionId);
-        const href = await h.evaluate(sessionId, 'location.href');
-        await h.sleep(500);
-        const leaked = h
-          .content(h.events.slice(count))
-          .filter(
-            (event) =>
-              JSON.stringify(event).includes('SECRET') ||
-              (event.method === 'Fetch.requestPaused' &&
-                event.params.request.url.startsWith(origin))
-          );
-        await h.close(targetId);
-        return {
-          paused: Boolean(plain),
-          fulfilled,
-          title,
-          forged,
-          released,
-          landed: typeof href === 'string' && href.startsWith(origin),
-          leaked,
-        };
-      },
-      { ordinary, origin }
-    );
-    assert.equal(answer.paused, true, 'control request paused toward the client');
-    assert.equal(answer.fulfilled.error, undefined, 'control fulfill accepted');
-    assert.equal(answer.title, 'fulfilled-c5', 'control fulfilled body renders');
-    assert.match(answer.forged.error, /^slicc: refused: /, 'unknown request ids are refused');
-    assert.equal(answer.released, false, 'the session stays');
-    assert.equal(answer.landed, false, 'the protected document never commits');
-    assert.deepEqual(answer.leaked, [], 'nothing about the protected request reaches the client');
-  });
-
-  test(`C6 cookies: ${ordinary} cookies read and write, ${name} cookies are refused or filtered`, async (t) => {
-    const raw = await chrome.visit(t, `${origin}/cookie?name=c6${name}`);
-    assert.ok(await raw.evaluate(() => document.cookie.includes('c6')), 'protected cookie planted');
-    const page = await client(t);
-    const answer = await page.evaluate(
-      async ({ ordinary, origin, name }) => {
-        const { targetId, sessionId } = await h.open(`${ordinary}/start`);
-        const set = await h.attempt(
-          'Network.setCookie',
-          { name: 'c6plain', value: 'ok', url: `${ordinary}/` },
-          sessionId
-        );
-        const read = await h.attempt('Network.getCookies', { urls: [`${ordinary}/`] }, sessionId);
-        const all = await h.attempt('Network.getAllCookies', {}, sessionId);
-        const storage = await h.attempt('Storage.getCookies', {}, sessionId);
-        const refusedSet = await h.attempt(
-          'Network.setCookie',
-          { name: 'x', value: '1', url: `${origin}/` },
-          sessionId
-        );
-        const refusedDomain = await h.attempt(
-          'Network.setCookie',
-          { name: 'x', value: '1', domain: '.sliccy.ai', path: '/' },
-          sessionId
-        );
-        const refusedMany = await h.attempt(
-          'Network.setCookies',
-          { cookies: [{ name: 'x', value: '1', url: `${origin}/` }] },
-          sessionId
-        );
-        const refusedDelete = await h.attempt(
-          'Network.deleteCookies',
-          { name: `c6${name}`, url: `${origin}/` },
-          sessionId
-        );
-        const refusedRead = await h.attempt(
-          'Network.getCookies',
-          { urls: [`${origin}/`] },
-          sessionId
-        );
-        const refusedStorage = await h.attempt(
-          'Storage.setCookies',
-          { cookies: [{ name: 'x', value: '1', domain: new URL(origin).hostname }] },
-          sessionId
-        );
-        await h.attempt(
-          'Network.deleteCookies',
-          { name: 'c6plain', url: `${ordinary}/` },
-          sessionId
-        );
-        await h.close(targetId);
-        return {
-          set,
-          read,
-          all,
-          storage,
-          refusedSet,
-          refusedDomain,
-          refusedMany,
-          refusedDelete,
-          refusedRead,
-          refusedStorage,
-        };
-      },
-      { ordinary, origin, name }
-    );
-    assert.equal(answer.set.error, undefined, 'control setCookie');
-    assert.ok(
-      answer.read.result.cookies.some((c) => c.name === 'c6plain'),
-      'control getCookies'
-    );
-    assert.ok(
-      answer.all.result.cookies.some((c) => c.name === 'c6plain'),
-      'control getAllCookies'
-    );
-    assert.equal(
-      answer.all.result.cookies.some((c) => c.domain.includes('sliccy.ai')),
-      false,
-      'getAllCookies drops protected cookies'
-    );
-    if (answer.storage.result) {
-      assert.equal(
-        answer.storage.result.cookies.some((c) => c.domain.includes('sliccy.ai')),
-        false,
-        'Storage.getCookies drops protected cookies'
+      const tag = `c1-${name}`;
+      const guarded = await initScriptThenNavigate(page, tag, `${origin}/landing?k=SECRET`);
+      assert.deepEqual(
+        await stayed(page, guarded.sessionId, origin),
+        { detached: false, landed: false, answered: true },
+        'the protected navigation fails and the session stays'
       );
-    }
-    for (const key of [
-      'refusedSet',
-      'refusedDomain',
-      'refusedMany',
-      'refusedDelete',
-      'refusedRead',
-      'refusedStorage',
-    ]) {
-      assert.match(answer[key].error ?? '', /^slicc: refused: /, key);
-    }
-    assert.ok(
-      await raw.evaluate(() => document.cookie.includes('c6')),
-      'protected cookie untouched'
-    );
-  });
+      assert.equal(await beaconed(tag, 3000), false, 'no beacon from the protected origin');
+      const leaked = await page.evaluate(() =>
+        JSON.stringify(h.content(h.events)).includes('SECRET')
+      );
+      assert.equal(leaked, false);
+      await page.evaluate((id) => h.close(id), guarded.targetId);
+    });
+
+    test(`${transport} C2 init script then a 302 chain: runs on ${ordinary}, never on ${target}`, async (t) => {
+      const page = await client(t, transport);
+      if (!page) return;
+      const control = `c2-control-${name}`;
+      const hop = (to) => `${ordinary}/redirect?to=${encodeURIComponent(to)}`;
+      const opened = await initScriptThenNavigate(page, control, hop(hop(`${ordinary}/landing`)));
+      assert.equal(await marked(page, opened.sessionId, control), control, 'control marker');
+      assert.equal(await beaconed(control), true, 'control beacon');
+      await page.evaluate((id) => h.close(id), opened.targetId);
+
+      const tag = `c2-${name}`;
+      const guarded = await initScriptThenNavigate(page, tag, hop(hop(`${origin}/landing`)));
+      assert.deepEqual(
+        await stayed(page, guarded.sessionId, origin),
+        { detached: false, landed: false, answered: true },
+        'the protected navigation fails and the session stays'
+      );
+      assert.equal(await beaconed(tag, 3000), false, 'no beacon from the protected origin');
+      await page.evaluate((id) => h.close(id), guarded.targetId);
+    });
+
+    test(`${transport} C3 window.open popup: ${ordinary} popup is attachable, ${target} popup is not`, async (t) => {
+      const page = await client(t, transport);
+      if (!page) return;
+      const answer = await page.evaluate(
+        async ({ start, ordinary, origin }) => {
+          await h.cdp.send('Target.setDiscoverTargets', { discover: true });
+          const { targetId, sessionId } = await h.open(start);
+          await h.cdp.send(
+            'Page.addScriptToEvaluateOnNewDocument',
+            { source: h.beaconSource('c3-popup') },
+            sessionId
+          );
+          const popup = async (url) => {
+            const before = new Set(
+              (await h.cdp.send('Target.getTargets')).targetInfos.map((info) => info.targetId)
+            );
+            const count = h.events.length;
+            await h.evaluate(sessionId, `Boolean(window.open(${JSON.stringify(url)}, "_blank"))`);
+            await h.sleep(1500);
+            const listed = (await h.cdp.send('Target.getTargets')).targetInfos.filter(
+              (info) => !before.has(info.targetId)
+            );
+            const later = h.events.slice(count);
+            const created = later
+              .filter((event) => event.method === 'Target.targetCreated')
+              .map((event) => event.params.targetInfo);
+            const destroyed = later
+              .filter((event) => event.method === 'Target.targetDestroyed')
+              .map((event) => event.params.targetId);
+            const leaked = later.some((event) =>
+              /sliccy\.ai|SECRET/.test(JSON.stringify(event.params?.targetInfo ?? {}))
+            );
+            return { listed, created, destroyed, leaked };
+          };
+          const plain = await popup(`${ordinary}/popup`);
+          const plainId = plain.listed[0]?.targetId;
+          const attached = plainId
+            ? await h.attempt('Target.attachToTarget', { targetId: plainId, flatten: true })
+            : { error: 'none' };
+          const openerId = plainId
+            ? (await h.cdp.send('Target.getTargetInfo', { targetId: plainId })).targetInfo.openerId
+            : undefined;
+          const guarded = await popup(`${origin}/popup?k=SECRET`);
+          const guardedId = guarded.listed[0]?.targetId;
+          guarded.attach = guardedId
+            ? await h.attempt('Target.attachToTarget', { targetId: guardedId, flatten: true })
+            : { error: 'not listed' };
+          if (guardedId) await h.close(guardedId);
+          const attachedTo = h.events
+            .filter((event) => event.method === 'Target.attachedToTarget')
+            .map((event) => event.params?.targetInfo?.url);
+          if (plainId) await h.close(plainId);
+          await h.close(targetId);
+          return { targetId, plain, attached, openerId, guarded, attachedTo };
+        },
+        { start: `${ordinary}/start`, ordinary, origin }
+      );
+      assert.equal(answer.plain.listed.length, 1, 'control popup is listed');
+      assert.equal(answer.plain.created.length, 1, 'control popup is announced');
+      assert.equal(answer.openerId, answer.targetId, 'control popup reports its opener');
+      assert.match(answer.attached.result?.sessionId ?? '', /^\d+/, 'control popup attaches');
+      assert.equal(answer.guarded.listed.length, 1, 'protected popup is listed for the guard');
+      assert.equal(
+        answer.guarded.attach.error,
+        "slicc: refused: target is on seven's origin",
+        'protected popup cannot be attached'
+      );
+      assert.deepEqual(answer.attachedTo, [], 'no popup comes up attached');
+      assert.equal(beacons('c3-popup').length, 0, 'the init script never runs in a popup');
+      const refused = await page.evaluate(async () =>
+        h.attempt('Target.setAutoAttach', {
+          autoAttach: true,
+          waitForDebuggerOnStart: false,
+          flatten: true,
+        })
+      );
+      assert.match(refused.error, /^slicc: refused: /);
+    });
+
+    test(`${transport} C4 iframe: init script runs in a ${ordinary} iframe, never in a ${target} iframe`, async (t) => {
+      const page = await client(t, transport);
+      if (!page) return;
+      const control = `c4-control-${name}`;
+      const opened = await page.evaluate(
+        async ({ tag, start }) => {
+          const { targetId, sessionId } = await h.open(`${start}/start`);
+          await h.cdp.send(
+            'Page.addScriptToEvaluateOnNewDocument',
+            { source: h.beaconSource(tag) },
+            sessionId
+          );
+          await h.land(sessionId, `${start}/frame?src=${encodeURIComponent(`${start}/inner`)}`);
+          return { targetId, sessionId };
+        },
+        { tag: control, start: ordinary }
+      );
+      assert.equal(await beaconed(control), true, 'control beacon');
+      const frames = beacons(control).map((seen) => decodeURIComponent(seen.search ?? ''));
+      assert.ok(
+        frames.some((at) => at.includes('/inner')),
+        'the iframe ran the script'
+      );
+      await page.evaluate((id) => h.close(id), opened.targetId);
+
+      const tag = `c4-${name}`;
+      const guarded = await page.evaluate(
+        async ({ tag, start, origin }) => {
+          const { targetId, sessionId } = await h.open(`${start}/start`);
+          await h.cdp.send(
+            'Page.addScriptToEvaluateOnNewDocument',
+            { source: h.beaconSource(tag) },
+            sessionId
+          );
+          await h.land(
+            sessionId,
+            `${start}/frame?src=${encodeURIComponent(`${origin}/inner?k=SECRET`)}`
+          );
+          await h.sleep(1500);
+          const alive = await h.evaluate(sessionId, '1 + 1');
+          return { targetId, sessionId, alive, detached: h.detached(sessionId) };
+        },
+        { tag, start: ordinary, origin }
+      );
+      assert.equal(await beaconed(tag), true, 'the top document still runs the script');
+      const fromFrame = beacons(tag).filter((seen) =>
+        decodeURIComponent(seen.search ?? '').includes('/inner')
+      );
+      assert.deepEqual(fromFrame, [], 'no beacon from the protected iframe');
+      assert.equal(guarded.alive, 2, 'the tab stays attached');
+      assert.equal(guarded.detached, false, 'only the protected frame fails');
+      await page.evaluate((id) => h.close(id), guarded.targetId);
+    });
+
+    test(`${transport} C5 Fetch.enable '*': ${ordinary} documents pause and fulfill, ${target} never reaches the client`, async (t) => {
+      const page = await client(t, transport);
+      if (!page) return;
+      const answer = await page.evaluate(
+        async ({ ordinary, origin }) => {
+          const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+          await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, sessionId);
+          const pausedFor = (url) =>
+            h.events.find(
+              (event) =>
+                event.method === 'Fetch.requestPaused' &&
+                event.sessionId === sessionId &&
+                event.params.request.url.startsWith(url)
+            );
+          await h.attempt(
+            'Runtime.evaluate',
+            { expression: `location.href = ${JSON.stringify(`${ordinary}/c5`)}` },
+            sessionId
+          );
+          const plain = await h.until(async () => pausedFor(`${ordinary}/c5`));
+          const fulfilled = plain
+            ? await h.attempt(
+                'Fetch.fulfillRequest',
+                {
+                  requestId: plain.params.requestId,
+                  responseCode: 200,
+                  responseHeaders: [{ name: 'content-type', value: 'text/html' }],
+                  body: btoa('<!doctype html><title>fulfilled-c5</title>'),
+                },
+                sessionId
+              )
+            : { error: 'never paused' };
+          const title = await h.until(async () => {
+            const value = await h.evaluate(sessionId, 'document.title');
+            return value === 'fulfilled-c5' ? value : undefined;
+          });
+          const count = h.events.length;
+          const forged = await h.attempt(
+            'Fetch.fulfillRequest',
+            { requestId: 'interception-job-1.0', responseCode: 200, body: '' },
+            sessionId
+          );
+          await h.attempt(
+            'Runtime.evaluate',
+            { expression: `location.href = ${JSON.stringify(`${origin}/c5?k=SECRET`)}` },
+            sessionId
+          );
+          await h.sleep(2500);
+          const released = h.detached(sessionId);
+          const href = await h.evaluate(sessionId, 'location.href');
+          await h.sleep(500);
+          const leaked = h
+            .content(h.events.slice(count))
+            .filter(
+              (event) =>
+                JSON.stringify(event).includes('SECRET') ||
+                (event.method === 'Fetch.requestPaused' &&
+                  event.params.request.url.startsWith(origin))
+            );
+          await h.close(targetId);
+          return {
+            paused: Boolean(plain),
+            fulfilled,
+            title,
+            forged,
+            released,
+            landed: typeof href === 'string' && href.startsWith(origin),
+            leaked,
+          };
+        },
+        { ordinary, origin }
+      );
+      assert.equal(answer.paused, true, 'control request paused toward the client');
+      assert.equal(answer.fulfilled.error, undefined, 'control fulfill accepted');
+      assert.equal(answer.title, 'fulfilled-c5', 'control fulfilled body renders');
+      assert.match(answer.forged.error, /^slicc: refused: /, 'unknown request ids are refused');
+      assert.equal(answer.released, false, 'the session stays');
+      assert.equal(answer.landed, false, 'the protected document never commits');
+      assert.deepEqual(answer.leaked, [], 'nothing about the protected request reaches the client');
+    });
+
+    test(`${transport} C6 cookies: ${ordinary} cookies read and write, ${target} cookies are refused or filtered`, async (t) => {
+      const raw = await chrome.visit(t, `${origin}/cookie?name=c6${name}`);
+      assert.ok(
+        await raw.evaluate(() => document.cookie.includes('c6')),
+        'protected cookie planted'
+      );
+      const page = await client(t, transport);
+      if (!page) return;
+      const answer = await page.evaluate(
+        async ({ ordinary, origin, name }) => {
+          const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+          const set = await h.attempt(
+            'Network.setCookie',
+            { name: 'c6plain', value: 'ok', url: `${ordinary}/` },
+            sessionId
+          );
+          const read = await h.attempt('Network.getCookies', { urls: [`${ordinary}/`] }, sessionId);
+          const all = await h.attempt('Network.getAllCookies', {}, sessionId);
+          const storage = await h.attempt('Storage.getCookies', {}, sessionId);
+          const refusedSet = await h.attempt(
+            'Network.setCookie',
+            { name: 'x', value: '1', url: `${origin}/` },
+            sessionId
+          );
+          const refusedDomain = await h.attempt(
+            'Network.setCookie',
+            { name: 'x', value: '1', domain: '.sliccy.ai', path: '/' },
+            sessionId
+          );
+          const refusedMany = await h.attempt(
+            'Network.setCookies',
+            { cookies: [{ name: 'x', value: '1', url: `${origin}/` }] },
+            sessionId
+          );
+          const refusedDelete = await h.attempt(
+            'Network.deleteCookies',
+            { name: `c6${name}`, url: `${origin}/` },
+            sessionId
+          );
+          const refusedRead = await h.attempt(
+            'Network.getCookies',
+            { urls: [`${origin}/`] },
+            sessionId
+          );
+          const refusedStorage = await h.attempt(
+            'Storage.setCookies',
+            { cookies: [{ name: 'x', value: '1', domain: new URL(origin).hostname }] },
+            sessionId
+          );
+          await h.attempt(
+            'Network.deleteCookies',
+            { name: 'c6plain', url: `${ordinary}/` },
+            sessionId
+          );
+          await h.close(targetId);
+          return {
+            set,
+            read,
+            all,
+            storage,
+            refusedSet,
+            refusedDomain,
+            refusedMany,
+            refusedDelete,
+            refusedRead,
+            refusedStorage,
+          };
+        },
+        { ordinary, origin, name }
+      );
+      assert.equal(answer.set.error, undefined, 'control setCookie');
+      assert.ok(
+        answer.read.result.cookies.some((c) => c.name === 'c6plain'),
+        'control getCookies'
+      );
+      assert.ok(
+        answer.all.result.cookies.some((c) => c.name === 'c6plain'),
+        'control getAllCookies'
+      );
+      assert.equal(
+        answer.all.result.cookies.some((c) => c.domain.includes('sliccy.ai')),
+        false,
+        'getAllCookies drops protected cookies'
+      );
+      if (answer.storage.result) {
+        assert.equal(
+          answer.storage.result.cookies.some((c) => c.domain.includes('sliccy.ai')),
+          false,
+          'Storage.getCookies drops protected cookies'
+        );
+      }
+      for (const key of [
+        'refusedSet',
+        'refusedDomain',
+        'refusedMany',
+        'refusedDelete',
+        'refusedRead',
+        'refusedStorage',
+      ]) {
+        assert.match(answer[key].error ?? '', /^slicc: refused: /, key);
+      }
+      assert.ok(
+        await raw.evaluate(() => document.cookie.includes('c6')),
+        'protected cookie untouched'
+      );
+    });
+  }
 }
 
 test('browser-wide and origin-keyed commands are refused; the same commands work on an ordinary origin', async (t) => {

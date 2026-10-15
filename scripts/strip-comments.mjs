@@ -330,10 +330,10 @@ if (pr3980htmlNeeded) {
   skip(3980, 'secrets.html');
 }
 
-const polishPageNeeded = !secretsJs.includes("This value can't be read any more. Enter it again.");
-const polishHtmlNeeded = !secretsHtml.includes('grid-template-columns: 1fr auto auto auto');
+const pr3994pageNeeded = !secretsJs.includes("This value can't be read any more. Enter it again.");
+const pr3994htmlNeeded = !secretsHtml.includes('box-shadow: inset 0 0 0 1px var(--danger)');
 
-if (polishPageNeeded) {
+if (pr3994pageNeeded) {
   applyPage(
     'UX-unreadable-copy',
     /text: "[^"]*Unreadable[^"]*encryption key lost[^"]*"/,
@@ -343,35 +343,46 @@ if (polishPageNeeded) {
   applyPage(
     'UX-reenter-button',
     /( {2}function createSecretRow\(entry\) \{[\s\S]*?)createCopyNameButton\(entry\), createDeleteSecretButton\(entry\)\);/,
-    `  function createReenterButton(entry) {
-    return el("button", { class: "btn-secondary btn", text: "Re-enter", "style:font-size": "11px", "style:padding": "4px 8px", on: { click: () => {
-      document.querySelector('.tab[data-pane="custom"]')?.click();
-      $("c-name").value = entry.name;
-      $("c-domains").value = entry.domains.join(", ");
-      $("c-value").value = "";
-      $("c-value").focus();
-    } } });
+    `  function activatePane(target) {
+    document.querySelectorAll(".tab").forEach((t) => {
+      t.classList.toggle("active", t.dataset.pane === target);
+    });
+    document.querySelectorAll(".pane").forEach((p) => {
+      p.classList.toggle("active", p.id === \`pane-\${target}\`);
+    });
+  }
+  function prefillCustomSecret(entry) {
+    activatePane("custom");
+    $("c-name").value = entry.name;
+    $("c-domains").value = entry.domains.join(", ");
+    const value = $("c-value");
+    value.value = "";
+    $("pane-custom")?.scrollIntoView?.({ block: "nearest" });
+    value.focus();
+  }
+  function createReenterButton(entry) {
+    return el("button", { class: "btn-secondary btn", text: "Re-enter", "style:font-size": "11px", "style:padding": "4px 8px", on: { click: () => prefillCustomSecret(entry) } });
   }
 $1...(entry.unreadable ? [createReenterButton(entry)] : []), createCopyNameButton(entry), createDeleteSecretButton(entry));`
   );
 } else {
-  skip('secrets-page-polish', 'secrets.js');
+  skip(3994, 'secrets.js');
 }
 
-if (polishHtmlNeeded) {
+if (pr3994htmlNeeded) {
   applyHtml(
-    'UX-unreadable-layout',
-    /(\n {4}\.empty \{)/,
-    '\n    .secret-row-unreadable {\n      grid-template-columns: 1fr auto auto auto;\n      background: linear-gradient(rgba(204, 68, 68, 0.05), rgba(204, 68, 68, 0.05)), var(--code-bg);\n    }\n$1'
+    'UX-unreadable-style',
+    /(\.secret-unreadable \{\s*font-size: 11px;\s*)color: #c44;([\s\S]*?)\.secret-row-unreadable \{\s*border: 1px solid #c44;\s*background: rgba\(204, 68, 68, 0\.05\);\s*\}/,
+    '$1color: var(--danger);$2.secret-row-unreadable {\n      grid-template-columns: 1fr auto auto auto;\n      box-shadow: inset 0 0 0 1px var(--danger);\n    }'
   );
 
   applyHtml(
-    'UX-narrow-labels',
-    /(\n {4}<\/style>)/,
-    '\n    @media (max-width: 600px) {\n      .form-grid {\n        grid-template-columns: 1fr;\n        gap: 4px;\n      }\n      .form-grid label {\n        margin-top: 8px;\n      }\n      .form-grid .span2 {\n        grid-column: 1;\n      }\n      .secret-row-unreadable {\n        display: flex;\n        flex-wrap: wrap;\n        justify-content: flex-end;\n      }\n      .secret-row-unreadable .secret-meta {\n        flex-basis: 100%;\n      }\n    }$1'
+    'UX-narrow-layout',
+    /(\.form-grid \.span2 \{\s*grid-column: 1 \/ 3;\s*\})/,
+    '$1\n    @media (max-width: 600px) {\n      body {\n        padding: 16px;\n      }\n      .form-grid {\n        grid-template-columns: 1fr;\n        gap: 4px;\n      }\n      .form-grid label {\n        margin-top: 8px;\n      }\n      .form-grid .span2 {\n        grid-column: 1;\n      }\n      .tabs {\n        flex-wrap: nowrap;\n        overflow-x: auto;\n        scrollbar-width: none;\n      }\n      .tab {\n        flex: none;\n        white-space: nowrap;\n      }\n      .secret-row-unreadable .secret-meta {\n        grid-column: 1 / -1;\n      }\n      .secret-row-unreadable > button:first-of-type {\n        grid-column: 2;\n      }\n    }'
   );
 } else {
-  skip('secrets-page-polish', 'secrets.html');
+  skip(3994, 'secrets.html');
 }
 
 writeFileSync(sixSwPath, content);

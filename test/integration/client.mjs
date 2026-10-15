@@ -1,5 +1,60 @@
-export function install() {
-  const cdp = globalThis.sliccExtension.cdp;
+export async function install(kind = 'seven', extId = '') {
+  async function bridge(extId) {
+    const port = chrome.runtime.connect(extId, { name: 'slicc.cdp-bridge' });
+    const channelId = crypto.randomUUID();
+    const listeners = new Set();
+    const pending = new Map();
+    let next = 0;
+    port.onMessage.addListener((msg) => {
+      if (msg.kind === 'cdp.response') {
+        const done = pending.get(msg.id);
+        pending.delete(msg.id);
+        if (!done) return;
+        if (msg.error) done.reject(new Error(String(msg.error?.message ?? msg.error)));
+        else done.resolve(msg.result ?? {});
+        return;
+      }
+      if (msg.kind === 'cdp.event') {
+        const event = { method: msg.method, params: msg.params ?? {} };
+        if (msg.sessionId !== undefined) event.sessionId = msg.sessionId;
+        for (const listener of listeners) listener(event);
+      }
+    });
+    const welcomed = new Promise((resolve) => {
+      const wait = (msg) => {
+        if (msg.kind !== 'handshake.welcome') return;
+        port.onMessage.removeListener(wait);
+        resolve();
+      };
+      port.onMessage.addListener(wait);
+    });
+    port.postMessage({ bridge: 1, channelId, kind: 'handshake.hello' });
+    await welcomed;
+    return {
+      send(method, params, sessionId) {
+        const id = ++next;
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          const msg = {
+            bridge: 1,
+            channelId,
+            kind: 'cdp.request',
+            id,
+            method,
+            params: params ?? {},
+          };
+          if (sessionId !== undefined) msg.sessionId = sessionId;
+          port.postMessage(msg);
+        });
+      },
+      on(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+  }
+
+  const cdp = kind === 'six-bridge' ? await bridge(extId) : globalThis.sliccExtension.cdp;
   const events = [];
   cdp.on((event) => events.push(event));
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

@@ -92,7 +92,7 @@ function secretsCall(page, sid, message) {
   ).then((r) => r.result.value);
 }
 
-test('plaintext canary: migration encrypts 6.248.11 plaintext, relay.js world sees no canary, secrets.list lists it, fetch proxy delivers it upstream (B-SEC2)', async (t) => {
+test('B-SEC2 plaintext canary: migration encrypts 6.248.11 plaintext, relay.js world sees no canary, secrets.list lists it, fetch proxy delivers it upstream', async (t) => {
   const page = await chrome.visit(t, slicc);
   const canaryName = `B8_CANARY_${Date.now()}`;
   const canaryPlaintext = 'super-secret-canary-value-12345';
@@ -196,7 +196,7 @@ test('plaintext canary: migration encrypts 6.248.11 plaintext, relay.js world se
   await extClose(page, secTid);
 });
 
-test('the secrets page saves through encrypted storage and marks unreadable entries (B-SEC2)', async (t) => {
+test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable entries and offers Re-enter', async (t) => {
   const page = await chrome.visit(t, slicc);
   const name = `B8_PAGE_${Date.now()}`;
   const broken = `${name}_BROKEN`;
@@ -276,7 +276,7 @@ test('the secrets page saves through encrypted storage and marks unreadable entr
   await extClose(page, targetId);
 });
 
-test('content-script senders are refused by six handlers; secrets.html senders succeed (B-SEC1)', async (t) => {
+test('B-SEC1 content-script senders are refused by six handlers; secrets.html senders succeed', async (t) => {
   const page = await chrome.visit(t, slicc);
 
   const contentResults = await page.evaluate(async () => {
@@ -333,7 +333,7 @@ test('content-script senders are refused by six handlers; secrets.html senders s
   await extClose(page, targetId);
 });
 
-test('a navigation to the vault fails before it commits and the session stays (integration)', async (t) => {
+test('B24-1 seven: a navigation to the vault fails before it commits and the session stays', async (t) => {
   const page = await chrome.visit(t, slicc);
   const answer = await page.evaluate(async () => {
     const created = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
@@ -381,7 +381,7 @@ test('a navigation to the vault fails before it commits and the session stays (i
   );
 });
 
-test('six bridge navigation to vault triggers detach (B24-1-tabs-onupdated)', async (t) => {
+test('B24-1 six bridge: a navigation to the vault detaches the session (tabs.onUpdated)', async (t) => {
   const www = await chrome.visit(t, 'https://www.sliccy.ai/?slicc=leader');
   const answer = await www.evaluate(async (eid) => {
     const port = chrome.runtime.connect(eid, { name: 'slicc.cdp-bridge' });
@@ -528,5 +528,53 @@ test('webNavigation adds no permission warning over 6.248.11, so an in-place upd
   const [before, after] = warnings.result.value;
   assert.ok(before.length > 0, `6.248.11 has warnings: ${JSON.stringify(before)}`);
   assert.deepEqual([...after].sort(), [...before].sort(), 'the warning set is unchanged');
+  await extClose(page, targetId);
+});
+
+test('B24-3 the legacy offscreen cdp-command path is gone: no answer, nothing attaches; a trusted internal message still works', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const created = await page.evaluate(async () =>
+    globalThis.sliccExtension.cdp.send('Target.createTarget', { url: 'https://other.test/' })
+  );
+  const { targetId } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const sid = await extSession(page, targetId);
+  const answer = await extEval(
+    page,
+    sid,
+    `(async () => {
+      const relayed = [];
+      chrome.runtime.onMessage.addListener((m) => { if (m?.source === 'service-worker') relayed.push(m.payload?.type); });
+      const send = (msg) => new Promise((resolve) => chrome.runtime.sendMessage(msg, (r) => resolve({ response: r ?? null, error: chrome.runtime.lastError?.message ?? null })));
+      const control = await send({ type: 'secrets.list' });
+      const legacy = [];
+      for (const [method, params] of [['Target.getTargets', {}], ['Target.attachToTarget', { targetId: ${JSON.stringify(created.targetId)}, flatten: true }], ['Runtime.evaluate', { expression: '1+1' }]]) {
+        legacy.push(await send({ source: 'offscreen', payload: { type: 'cdp-command', id: method, method, params, sessionId: ${JSON.stringify(created.targetId)} } }));
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+      return { control: Array.isArray(control.response?.entries), legacy, relayed };
+    })()`
+  );
+  const result = answer.result.value;
+  assert.equal(result.control, true, 'secrets.list from secrets.html answers');
+  for (const legacy of result.legacy) {
+    assert.equal(
+      legacy.response,
+      null,
+      `legacy cdp-command must get no answer: ${JSON.stringify(legacy)}`
+    );
+  }
+  assert.deepEqual(result.relayed, [], 'no cdp-response is broadcast');
+  const attach = await page.evaluate(
+    async (tid) =>
+      globalThis.sliccExtension.cdp
+        .send('Target.attachToTarget', { targetId: tid, flatten: true })
+        .then(
+          (r) => r.sessionId,
+          (e) => `error ${e.message}`
+        ),
+    created.targetId
+  );
+  assert.equal(attach, created.targetId, 'the tab was never attached by the legacy path');
+  await extClose(page, created.targetId);
   await extClose(page, targetId);
 });
