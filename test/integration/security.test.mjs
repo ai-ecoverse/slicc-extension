@@ -84,6 +84,27 @@ async function relayWorld(page) {
   throw new Error('relay.js isolated world not found');
 }
 
+const IDB = `(fn) => new Promise((resolve, reject) => { const r = indexedDB.open('slicc-secrets', 2); r.onupgradeneeded = () => { for (const n of ['keys', 'records']) if (!r.result.objectStoreNames.contains(n)) r.result.createObjectStore(n); }; r.onerror = () => reject(r.error); r.onsuccess = () => { const db = r.result; const tx = db.transaction(['keys', 'records'], 'readwrite'); let out; Promise.resolve(fn(tx, (v) => { out = v; })).catch(reject); tx.oncomplete = () => { db.close(); resolve(out); }; tx.onerror = () => reject(tx.error); }; })`;
+
+function assertNoSecretRecords(items, needles) {
+  const text = JSON.stringify(items);
+  for (const needle of needles) {
+    assert.equal(text.includes(needle), false, `chrome.storage.local still shows ${needle}`);
+  }
+  for (const [key, value] of Object.entries(items)) {
+    assert.equal(
+      key.endsWith('_DOMAINS'),
+      false,
+      `a secret's domains are still in storage.local: ${key}`
+    );
+    assert.equal(
+      typeof value === 'object' && value !== null && 'ct' in value && 'iv' in value,
+      false,
+      `ciphertext is still in storage.local: ${key}`
+    );
+  }
+}
+
 function secretsCall(page, sid, message) {
   return extEval(
     page,
@@ -102,7 +123,7 @@ test('B-SEC2 plaintext canary: migration encrypts 6.248.11 plaintext, relay.js w
   const planted = await extEval(
     page,
     secSid,
-    `new Promise((resolve, reject) => { chrome.storage.local.set({ ${JSON.stringify(canaryName)}: ${JSON.stringify(canaryPlaintext)}, ${JSON.stringify(`${canaryName}_DOMAINS`)}: "upstream.test" }, () => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : chrome.storage.local.get(${JSON.stringify(canaryName)}, (r) => resolve(r[${JSON.stringify(canaryName)}]))); })`
+    `new Promise((resolve, reject) => { chrome.storage.local.set({ B8_CONTROL_SETTING: "visible", ${JSON.stringify(canaryName)}: ${JSON.stringify(canaryPlaintext)}, ${JSON.stringify(`${canaryName}_DOMAINS`)}: "upstream.test" }, () => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : chrome.storage.local.get(${JSON.stringify(canaryName)}, (r) => resolve(r[${JSON.stringify(canaryName)}]))); })`
   );
   assert.equal(planted.result.value, canaryPlaintext, 'canary must be planted as plaintext');
 
@@ -119,18 +140,8 @@ test('B-SEC2 plaintext canary: migration encrypts 6.248.11 plaintext, relay.js w
   });
   assert.equal(dump.exceptionDetails, undefined, 'relay.js world must read chrome.storage.local');
   const items = JSON.parse(dump.result.value);
-  const stored = items[canaryName];
-  assert.ok(
-    stored && typeof stored.ct === 'string' && typeof stored.iv === 'string',
-    `canary must be stored as {ct, iv}: got ${JSON.stringify(stored)}`
-  );
-  for (const [key, value] of Object.entries(items)) {
-    assert.equal(
-      JSON.stringify(value).includes(canaryPlaintext),
-      false,
-      `relay.js world sees the canary in ${key}`
-    );
-  }
+  assert.equal(items.B8_CONTROL_SETTING, 'visible', 'control: a non-secret setting stays readable');
+  assertNoSecretRecords(items, [canaryName, canaryPlaintext, 'upstream.test']);
 
   const listed = await secretsCall(page, secSid, { type: 'secrets.list' });
   assert.ok(
@@ -191,7 +202,7 @@ test('B-SEC2 plaintext canary: migration encrypts 6.248.11 plaintext, relay.js w
   await extEval(
     page,
     secSid,
-    `new Promise((resolve) => { chrome.storage.local.remove([${JSON.stringify(canaryName)}, ${JSON.stringify(`${canaryName}_DOMAINS`)}], resolve); })`
+    `new Promise((resolve) => chrome.runtime.sendMessage({ type: 'secrets.delete', name: ${JSON.stringify(canaryName)} }, () => chrome.storage.local.remove('B8_CONTROL_SETTING', resolve)))`
   );
   await extClose(page, secTid);
 });
@@ -213,7 +224,7 @@ test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable 
   await extEval(
     page,
     sessionId,
-    `new Promise((resolve) => chrome.storage.local.set({ ${JSON.stringify(broken)}: { ct: "AAAA", iv: "AAAAAAAAAAAAAAAA" }, ${JSON.stringify(`${broken}_DOMAINS`)}: "upstream.test" }, resolve))`
+    `(${IDB})((tx) => { tx.objectStore('records').put({ name: ${JSON.stringify(broken)}, value: { ct: 'AAAA', iv: 'AAAAAAAAAAAAAAAA' }, domains: 'upstream.test' }, ${JSON.stringify(broken)}); })`
   );
   await extEval(
     page,
@@ -223,13 +234,15 @@ test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable 
   const stored = await extEval(
     page,
     sessionId,
-    `new Promise((resolve) => { const started = Date.now(); const poll = () => chrome.storage.local.get(${JSON.stringify(name)}, (r) => { const v = r[${JSON.stringify(name)}]; if (v !== undefined || Date.now() - started > 10000) resolve(v ?? null); else setTimeout(poll, 100); }); poll(); })`
+    `(async () => { const started = Date.now(); for (;;) { const rec = await (${IDB})((tx, done) => { const g = tx.objectStore('records').get(${JSON.stringify(name)}); g.onsuccess = () => done(g.result ?? null); }); if (rec || Date.now() - started > 10000) return { rec, local: await chrome.storage.local.get(null) }; await new Promise((r) => setTimeout(r, 100)); } })()`
   );
+  const record = stored.result.value.rec;
   assert.ok(
-    stored.result.value && typeof stored.result.value.ct === 'string',
-    `the page must store {ct, iv}: got ${JSON.stringify(stored.result.value)}`
+    record && typeof record.value?.ct === 'string' && record.domains === 'upstream.test',
+    `the page must store an encrypted record in IndexedDB: got ${JSON.stringify(record)}`
   );
-  assert.equal(JSON.stringify(stored.result.value).includes(value), false);
+  assert.equal(JSON.stringify(record).includes(value), false);
+  assertNoSecretRecords(stored.result.value.local, [name, value]);
   const rows = await extEval(
     page,
     sessionId,
@@ -271,7 +284,7 @@ test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable 
   await extEval(
     page,
     sessionId,
-    `new Promise((resolve) => chrome.storage.local.remove([${JSON.stringify(name)}, ${JSON.stringify(`${name}_DOMAINS`)}, ${JSON.stringify(broken)}, ${JSON.stringify(`${broken}_DOMAINS`)}], resolve))`
+    `new Promise((resolve) => chrome.runtime.sendMessage({ type: 'secrets.delete', name: ${JSON.stringify(name)} }, resolve)).then(() => (${IDB})((tx) => { tx.objectStore('records').delete(${JSON.stringify(broken)}); }))`
   );
   await extClose(page, targetId);
 });
@@ -577,4 +590,105 @@ test('B24-3 the legacy offscreen cdp-command path is gone: no answer, nothing at
   assert.equal(attach, created.targetId, 'the tab was never attached by the legacy path');
   await extClose(page, created.targetId);
   await extClose(page, targetId);
+});
+
+test('B-SEC2 in-place migration moves 6.248.11 plaintext and {ct, iv} records into IndexedDB, crash-safely, and relay.js can read none of them', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const stamp = Date.now();
+  const plain = {
+    name: `B8_MIG_PLAIN_${stamp}`,
+    value: 'migrate-plain-value-111',
+    domains: 'plain.example',
+  };
+  const sealed = {
+    name: `B8_MIG_SEALED_${stamp}`,
+    value: 'migrate-sealed-value-222',
+    domains: 'sealed.example',
+  };
+  const first = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const firstSid = await extSession(page, first.targetId);
+  await secretsCall(page, firstSid, {
+    type: 'secrets.set',
+    name: `B8_MIG_WARM_${stamp}`,
+    value: 'warm-up-value-333',
+    domains: ['warm.example'],
+  });
+  const planted = await extEval(
+    page,
+    firstSid,
+    `(async () => {
+      const key = await (${IDB})((tx, done) => { const g = tx.objectStore('keys').get('aes-gcm-secrets'); g.onsuccess = () => done(g.result); });
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(${JSON.stringify(sealed.value)})));
+      const b64 = (bytes) => btoa(String.fromCharCode(...bytes));
+      await chrome.storage.local.set({
+        B8_MIG_SETTING: 'still-here',
+        ${JSON.stringify(plain.name)}: ${JSON.stringify(plain.value)},
+        ${JSON.stringify(`${plain.name}_DOMAINS`)}: ${JSON.stringify(plain.domains)},
+        ${JSON.stringify(sealed.name)}: { ct: b64(ct), iv: b64(iv) },
+        ${JSON.stringify(`${sealed.name}_DOMAINS`)}: ${JSON.stringify(sealed.domains)},
+      });
+      return Object.keys(await chrome.storage.local.get(null));
+    })()`
+  );
+  assert.ok(planted.result.value.includes(sealed.name), 'both formats planted');
+  const second = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const secondSid = await extSession(page, second.targetId);
+  const migrated = await extEval(
+    page,
+    secondSid,
+    `(async () => { const started = Date.now(); for (;;) { const local = await chrome.storage.local.get(null); if (!(${JSON.stringify(plain.name)} in local) && !(${JSON.stringify(sealed.name)} in local)) return local; if (Date.now() - started > 15000) return local; await new Promise((r) => setTimeout(r, 100)); } })()`
+  );
+  assertNoSecretRecords(migrated.result.value, [
+    plain.name,
+    sealed.name,
+    plain.value,
+    sealed.value,
+  ]);
+  assert.equal(migrated.result.value.B8_MIG_SETTING, 'still-here', 'non-secret settings stay put');
+  const values = async (sid) =>
+    (await secretsCall(page, sid, { type: 'secrets.list-with-values-for-pipeline' })).entries;
+  const after = await values(secondSid);
+  for (const want of [plain, sealed]) {
+    const got = after.find((e) => e.name === want.name);
+    assert.equal(got?.value, want.value, `${want.name} keeps its value`);
+    assert.deepEqual(got?.domains, [want.domains], `${want.name} keeps its domains`);
+  }
+  await extEval(
+    page,
+    secondSid,
+    `chrome.storage.local.set({ ${JSON.stringify(plain.name)}: 'stale-after-crash', ${JSON.stringify(`${plain.name}_DOMAINS`)}: 'stale.example' })`
+  );
+  const third = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const thirdSid = await extSession(page, third.targetId);
+  const retried = await extEval(
+    page,
+    thirdSid,
+    `(async () => { const started = Date.now(); for (;;) { const local = await chrome.storage.local.get(null); if (!(${JSON.stringify(plain.name)} in local) || Date.now() - started > 15000) return local; await new Promise((r) => setTimeout(r, 100)); } })()`
+  );
+  assertNoSecretRecords(retried.result.value, [plain.name, 'stale-after-crash']);
+  const kept = (await values(thirdSid)).find((e) => e.name === plain.name);
+  assert.equal(kept?.value, plain.value, 'a rerun after a crash keeps the IndexedDB record');
+  const world = await relayWorld(page);
+  const dump = await page.send('Runtime.evaluate', {
+    expression:
+      'new Promise((resolve) => chrome.storage.local.get(null, (items) => resolve(JSON.stringify(items))))',
+    awaitPromise: true,
+    returnByValue: true,
+    contextId: world,
+  });
+  const seen = JSON.parse(dump.result.value);
+  assert.equal(seen.B8_MIG_SETTING, 'still-here', 'control: relay.js reads a non-secret setting');
+  assertNoSecretRecords(seen, [plain.name, sealed.name, plain.value, sealed.value, plain.domains]);
+  const level = await extEval(
+    page,
+    thirdSid,
+    `(async () => { try { await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }); return 'accepted'; } catch (e) { return 'refused: ' + e.message; } })()`
+  );
+  t.diagnostic(`chrome.storage.local.setAccessLevel: ${level.result.value}`);
+  for (const name of [plain.name, sealed.name, `B8_MIG_WARM_${stamp}`]) {
+    await secretsCall(page, thirdSid, { type: 'secrets.delete', name });
+  }
+  await extEval(page, thirdSid, `chrome.storage.local.remove('B8_MIG_SETTING')`);
+  for (const tab of [first, second, third]) await extClose(page, tab.targetId);
 });
