@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   bump:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     env:
       LEFTHOOK: "0"
@@ -41,7 +41,12 @@ jobs:
 
       - name: Chromium system dependencies
         if: steps.check.outputs.release == 'true'
-        run: npx playwright-core install --with-deps chromium
+        run: |
+          if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; then
+            npx playwright-core install-deps chromium
+          else
+            echo "::notice title=Chromium system dependencies::No root on $RUNNER_NAME, so install-deps is skipped and the runner image's system libraries serve Chromium."
+          fi
 
       - name: Integration tests
         if: steps.check.outputs.release == 'true'
