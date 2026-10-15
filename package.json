@@ -23,7 +23,7 @@
     "release": "semantic-release"
   },
   "devDependencies": {
-    "@ai-ecoverse/slicc-browsers": "1.6.0",
+    "@ai-ecoverse/slicc-browsers": "1.7.0",
     "@ai-ecoverse/slicc-shared-web": "1.18.1",
     "@biomejs/biome": "2.5.15",
     "@semantic-release/exec": "7.1.0",
