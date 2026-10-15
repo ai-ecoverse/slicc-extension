@@ -288,5 +288,14 @@
     "sentinel": "_secRecordStore",
     "label": "secrets page lists records, unreadable included, from IndexedDB",
     "match": 1
+  },
+  {
+    "id": "B-SEC3-sw-delete-unreadable",
+    "pr": "six-secret-store",
+    "upstream": "six follow-up PR pending",
+    "file": "six-sw.js",
+    "sentinel": "_secRecordStore",
+    "label": "secrets.delete removes a record by name, readable or not",
+    "match": 1
   }
 ]

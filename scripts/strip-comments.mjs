@@ -120,7 +120,7 @@ if (pr3977needed) {
 
   apply(
     'B24-1-navigate-bridge',
-    /(const tabId = sessionId !== void 0 \? state2\.sessionToTab\.get\(sessionId\) : void 0;\s*if \(tabId === void 0\) \{[^}]+\})/,
+    /(const tabId = sessionId !== void 0 \? state2\.sessionToTab\.get\(sessionId\) : void 0;\s*if \(tabId === void 0\) \{\s*throw new Error\(`[^`]*`\);\s*\})/,
     `$1\n  if (method === "Page.navigate") { const _navUrl = typeof params?.["url"] === "string" ? params["url"] : void 0; if (_navUrl && _isProtectedUrl(_navUrl)) ${refuse} }`
   );
 
@@ -138,7 +138,7 @@ if (pr3977needed) {
 
   apply(
     'B24-1-navigate-legacy',
-    /(async function cdpSendCommand\(method, params, sessionId\) \{\s*const tabId = sessionId \? sessionToTab\.get\(sessionId\) : void 0;\s*if \(tabId === void 0\) \{[^}]+\})/,
+    /(async function cdpSendCommand\(method, params, sessionId\) \{\s*const tabId = sessionId \? sessionToTab\.get\(sessionId\) : void 0;\s*if \(tabId === void 0\) \{\s*throw new Error\(`[^`]*`\);\s*\})/,
     `$1\n  if (method === "Page.navigate") { const _navUrl = typeof params?.["url"] === "string" ? params["url"] : void 0; if (_navUrl && _isProtectedUrl(_navUrl)) ${refuse} }`
   );
 
@@ -384,6 +384,13 @@ function idbStore(source, prefix) {
 
 if (!content.includes('_secRecordStore')) {
   content = idbStore(content, 'B-SEC3-sw');
+  content = assertPatch(
+    content,
+    'B-SEC3-sw-delete-unreadable',
+    /const existing = await listSecrets\(storageLocal\);\s*if \(!existing\.some\(\(e\) => e\.name === name\)\) \{/,
+    'await _secEnsureMigrated();\n      if (!(await _secGetRecord(name))) {'
+  );
+  applied.push('B-SEC3-sw-delete-unreadable');
 } else {
   skip('six-secret-store', 'six-sw.js');
 }
