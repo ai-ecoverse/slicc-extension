@@ -64,6 +64,7 @@ jobs:
     timeout-minutes: 15
     env:
       LEFTHOOK: "0"
+      npm_config_cache: ${{ github.workspace }}/../npm-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
