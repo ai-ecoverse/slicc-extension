@@ -32,6 +32,8 @@ import {
 
 const guard = protectedOrigins(protectedRules);
 const prefix = initScriptPrefix(protectedRules);
+export const PROTECTED_DOCUMENTS = 'detach';
+
 const BACKEND = { urlPattern: '*', resourceType: 'Document', requestStage: 'Request' };
 const FETCH_ANSWERS = new Set([
   'Fetch.continueRequest',
@@ -222,9 +224,10 @@ function plainContinue(params) {
 }
 
 class Connection {
-  constructor(port, api) {
+  constructor(port, api, mode = PROTECTED_DOCUMENTS) {
     this.port = port;
     this.api = api;
+    this.mode = mode;
     trackSources(api);
     this.state = {
       sessions: new Map(),
@@ -606,7 +609,7 @@ class Connection {
         return;
       }
       if (params.resourceType === 'Document' && atRequest) {
-        this.release(tabId);
+        await this.protectedDocument(tabId, tab, requestId, frameId);
         return;
       }
       await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
@@ -840,10 +843,28 @@ class Connection {
     }
   }
 
+  async protectedDocument(tabId, tab, requestId, frameId) {
+    if (this.mode !== 'fail') {
+      this.release(tabId);
+      return;
+    }
+    await this.send(tabId, 'Fetch.failRequest', {
+      requestId,
+      errorReason: 'BlockedByClient',
+    }).catch(() => undefined);
+    if (this.isMain(tab, frameId)) this.release(tabId);
+  }
+
   watchChild(tabId, method, p) {
     const url = textOf(p.targetInfo?.url);
     if (method === 'Target.attachedToTarget') {
       if (urlProtected(guard, url)) {
+        if (this.mode === 'fail') {
+          void this.api.debugger
+            .sendCommand({ tabId }, 'Target.detachFromTarget', { sessionId: textOf(p.sessionId) })
+            .catch(() => undefined);
+          return;
+        }
         this.release(tabId);
         return;
       }
@@ -854,7 +875,9 @@ class Connection {
         .catch(() => undefined);
       return;
     }
-    if (method === 'Target.targetInfoChanged' && urlProtected(guard, url)) this.release(tabId);
+    if (method === 'Target.targetInfoChanged' && urlProtected(guard, url) && this.mode !== 'fail') {
+      this.release(tabId);
+    }
   }
 
   headsToProtected(method, p) {
@@ -899,8 +922,9 @@ class Connection {
 
   watch(tabId, tab, method, p) {
     if (this.headsToProtected(method, p)) {
+      if (this.mode === 'fail' && !this.isMain(tab, textOf(p.frameId))) return true;
       this.broadcast(tabId, method, p);
-      this.release(tabId);
+      if (this.mode !== 'fail') this.release(tabId);
       return true;
     }
     if (method === 'Page.frameNavigated') return this.watchFrame(tabId, tab, p.frame ?? {});
@@ -1066,11 +1090,11 @@ class Connection {
   }
 }
 
-export function listen(port, extensionId, api) {
+export function listen(port, extensionId, api, mode = PROTECTED_DOCUMENTS) {
   if (port.name !== 'slicc-fetch') return null;
   if (!trusted(port.sender, extensionId)) {
     port.disconnect();
     return null;
   }
-  return new Connection(port, api);
+  return new Connection(port, api, mode);
 }

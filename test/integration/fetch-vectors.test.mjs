@@ -19,6 +19,9 @@ const destinations = {
 const twoPixels =
   'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAAAAADRSSBWAAAAC0lEQVR4nGNgYAAAAAMAAbitOmMAAAAASUVORK5CYII=';
 
+const bounded = (expression) =>
+  `Promise.race([${expression}, new Promise((resolve) => setTimeout(() => resolve('timeout'), 10000))])`;
+
 const probes = {
   fetch: (url) => `fetch(${JSON.stringify(url)}).then((r) => r.text(), () => 'error')`,
   xhr: (url) =>
@@ -79,7 +82,7 @@ function subresource(page, kind, dest, tag) {
       await h.close(targetId);
       return { seen: seen.length > 0, body };
     },
-    { ordinary, url, probe: probes[kind](url), kind, twoPixels }
+    { ordinary, url, probe: bounded(probes[kind](url)), kind, twoPixels }
   );
 }
 
