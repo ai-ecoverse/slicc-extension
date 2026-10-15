@@ -1,5 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,10 +24,11 @@ if (!sixRef) {
 
 process.stdout.write(`Resolved six ref: ${sixRef}\n`);
 
-const sixDir = mkdtempSync(resolve(tmpdir(), 'slicc-six-'));
+const cacheDir = process.env.SIX_CACHE_DIR;
+const sixDir = cacheDir ? resolve(cacheDir, sixRef) : mkdtempSync(resolve(tmpdir(), 'slicc-six-'));
 
 function cleanup() {
-  rmSync(sixDir, { recursive: true, force: true });
+  if (!cacheDir) rmSync(sixDir, { recursive: true, force: true });
 }
 
 process.on('exit', cleanup);
@@ -32,12 +41,31 @@ process.on('SIGTERM', () => {
   process.exit(1);
 });
 
-process.stdout.write(`Fetching ai-ecoverse/slicc at ${sixRef}…\n`);
-execFileSync(
-  'git',
-  ['clone', '--depth', '1', '--branch', sixRef, 'https://github.com/ai-ecoverse/slicc.git', sixDir],
-  { stdio: ['ignore', 'pipe', 'pipe'] }
-);
+if (existsSync(resolve(sixDir, '.git'))) {
+  process.stdout.write(`Reusing ai-ecoverse/slicc at ${sixRef} from ${sixDir}\n`);
+} else {
+  const partial = cacheDir ? `${sixDir}.partial` : sixDir;
+  rmSync(partial, { recursive: true, force: true });
+  mkdirSync(partial, { recursive: true });
+  process.stdout.write(`Fetching ai-ecoverse/slicc at ${sixRef}…\n`);
+  execFileSync(
+    'git',
+    [
+      'clone',
+      '--depth',
+      '1',
+      '--branch',
+      sixRef,
+      'https://github.com/ai-ecoverse/slicc.git',
+      partial,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  if (partial !== sixDir) {
+    rmSync(sixDir, { recursive: true, force: true });
+    renameSync(partial, sixDir);
+  }
+}
 
 const sha = execFileSync('git', ['-C', sixDir, 'rev-parse', 'HEAD'], {
   encoding: 'utf8',
