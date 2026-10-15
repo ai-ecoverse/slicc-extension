@@ -190,12 +190,23 @@ for (const transport of transports) {
             ? await h.attempt('Target.attachToTarget', { targetId: guardedId, flatten: true })
             : { error: 'not listed' };
           if (guardedId) await h.close(guardedId);
+          const openerAlive = await h.evaluate(sessionId, '1 + 1');
+          const openerDetached = h.detached(sessionId);
           const attachedTo = h.events
             .filter((event) => event.method === 'Target.attachedToTarget')
             .map((event) => event.params?.targetInfo?.url);
           if (plainId) await h.close(plainId);
           await h.close(targetId);
-          return { targetId, plain, attached, openerId, guarded, attachedTo };
+          return {
+            targetId,
+            plain,
+            attached,
+            openerId,
+            guarded,
+            attachedTo,
+            openerAlive,
+            openerDetached,
+          };
         },
         { start: `${ordinary}/start`, ordinary, origin }
       );
@@ -210,6 +221,8 @@ for (const transport of transports) {
         'protected popup cannot be attached'
       );
       assert.deepEqual(answer.attachedTo, [], 'no popup comes up attached');
+      assert.equal(answer.openerAlive, 2, 'the opener session still answers');
+      assert.equal(answer.openerDetached, false, 'the opener session is not detached');
       assert.equal(beacons('c3-popup').length, 0, 'the init script never runs in a popup');
       const refused = await page.evaluate(async () =>
         h.attempt('Target.setAutoAttach', {
@@ -440,12 +453,21 @@ for (const transport of transports) {
         false,
         'getAllCookies drops protected cookies'
       );
-      if (answer.storage.result) {
+      if (answer.storage.error === undefined) {
+        assert.ok(Array.isArray(answer.storage.result?.cookies), 'Storage.getCookies answered');
         assert.equal(
           answer.storage.result.cookies.some((c) => c.domain.includes('sliccy.ai')),
           false,
-          'Storage.getCookies drops protected cookies'
+          'Storage.getCookies succeeded and drops protected cookies'
         );
+        t.diagnostic('Storage.getCookies: filtered');
+      } else {
+        assert.match(
+          answer.storage.error,
+          /^slicc: refused: /,
+          'Storage.getCookies failed only with the shield refusal'
+        );
+        t.diagnostic('Storage.getCookies: refused');
       }
       for (const key of [
         'refusedSet',
