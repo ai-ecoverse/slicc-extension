@@ -643,3 +643,138 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
   assert.equal(answer.gone, true, 'targetDestroyed on close');
   assert.equal(answer.leaked, false);
 });
+
+test('S7 sessions belong to their connection, each attach is its own session, and activateTarget focuses the tab', async (t) => {
+  const page = await client(t);
+  const other = await chrome.visit(t, slicc);
+  const answer = await page.evaluate(async (ordinary) => {
+    const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+    const second = await h.cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    const both = [
+      await h.evaluate(sessionId, '1 + 1'),
+      await h.evaluate(second.sessionId, '2 + 2'),
+    ];
+    const activated = await h.attempt('Target.activateTarget', { targetId });
+    const active = (await h.cdp.send('Target.getTargets')).targetInfos.find(
+      (i) => i.targetId === targetId
+    )?.active;
+    return { targetId, sessionId, second: second.sessionId, both, activated, active };
+  }, ordinary);
+  const stolen = await other.evaluate(
+    async (sid) =>
+      globalThis.sliccExtension.cdp
+        .send('Runtime.evaluate', { expression: '1', returnByValue: true }, sid)
+        .then(
+          () => 'ran',
+          (e) => e.message
+        ),
+    answer.sessionId
+  );
+  await page.evaluate((id) => h.close(id), answer.targetId);
+  assert.notEqual(answer.second, answer.sessionId);
+  assert.deepEqual(answer.both, [2, 4]);
+  assert.equal(answer.activated.error, undefined);
+  assert.equal(answer.active, true);
+  assert.match(stolen, /No tab attached/, 'another connection cannot use the session');
+});
+
+test('S7 createTarget refuses blob: and view-source: URLs over seven and the vault', async (t) => {
+  const page = await client(t);
+  const answer = await page.evaluate(async () => {
+    const out = {};
+    for (const url of [
+      'blob:https://vault.sliccy.ai/abc',
+      'view-source:https://vault.sliccy.ai/',
+      'blob:https://seven.sliccy.ai/xyz',
+      'view-source:https://seven.sliccy.ai/page',
+      'https://sliccy.ai/',
+    ]) {
+      out[url] = (await h.attempt('Target.createTarget', { url })).error ?? 'created';
+    }
+    return out;
+  });
+  for (const [url, error] of Object.entries(answer)) {
+    assert.equal(error, "slicc: refused: target is on seven's origin", url);
+  }
+});
+
+test('C5 two sessions with Fetch on one tab both see an ordinary request in turn; a protected request reaches neither', async (t) => {
+  const page = await client(t);
+  const answer = await page.evaluate(async (ordinary) => {
+    const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+    const second = (await h.cdp.send('Target.attachToTarget', { targetId, flatten: true }))
+      .sessionId;
+    const seen = [];
+    const off = h.cdp.on((e) => {
+      if (e.method !== 'Fetch.requestPaused') return;
+      seen.push([e.sessionId === sessionId ? 'first' : 'second', e.params.request.url]);
+      h.attempt('Fetch.continueRequest', { requestId: e.params.requestId }, e.sessionId);
+    });
+    await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/data*' }] }, sessionId);
+    await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/data*' }] }, second);
+    const plain = await h.evaluate(
+      sessionId,
+      `fetch('${ordinary}/data?n=plain').then((r) => r.status, () => 'error')`
+    );
+    const guarded = await h.evaluate(
+      sessionId,
+      "fetch('https://vault.sliccy.ai/data?n=vault', { mode: 'no-cors' }).then((r) => r.type, () => 'error')"
+    );
+    off();
+    await h.close(targetId);
+    return { plain, guarded, seen };
+  }, ordinary);
+  assert.equal(answer.plain, 200);
+  assert.deepEqual(
+    answer.seen.filter(([, url]) => url.includes('n=plain')).map(([who]) => who),
+    ['first', 'second'],
+    'the request reaches each session in attach order'
+  );
+  assert.deepEqual(
+    answer.seen.filter(([, url]) => url.includes('vault')),
+    [],
+    'the protected request is continued by the backend'
+  );
+  assert.notEqual(answer.guarded, 'error');
+});
+
+test('C5 Network events and bodies of protected requests never reach the client; ordinary ones do', async (t) => {
+  const page = await client(t);
+  const answer = await page.evaluate(async (ordinary) => {
+    const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+    await h.cdp.send('Network.enable', {}, sessionId);
+    const mark = h.events.length;
+    await h.evaluate(
+      sessionId,
+      `fetch('${ordinary}/hello?n=plain').then((r) => r.text(), () => 'error')`
+    );
+    await h.evaluate(
+      sessionId,
+      "fetch('https://vault.sliccy.ai/secret?n=vault', { mode: 'no-cors' }).then(() => 'ok', () => 'error')"
+    );
+    await h.sleep(500);
+    const net = h.events.slice(mark).filter((e) => e.method.startsWith('Network.'));
+    const plain = net.find(
+      (e) => e.method === 'Network.requestWillBeSent' && e.params.request.url.includes('n=plain')
+    );
+    const body = plain
+      ? await h.attempt('Network.getResponseBody', { requestId: plain.params.requestId }, sessionId)
+      : { error: 'no plain request' };
+    const unseen = await h.attempt(
+      'Network.getResponseBody',
+      { requestId: 'never-seen' },
+      sessionId
+    );
+    await h.close(targetId);
+    return {
+      plain: Boolean(plain),
+      body,
+      unseen,
+      leaked: net.filter((e) => JSON.stringify(e).includes('vault.sliccy.ai')).length,
+    };
+  }, ordinary);
+  assert.equal(answer.plain, true, 'the ordinary request is visible');
+  assert.equal(answer.body.error, undefined, 'its body can be read');
+  assert.match(answer.unseen.error, /^slicc: refused: /);
+  assert.equal(answer.leaked, 0, 'no Network event mentions the vault');
+});
