@@ -762,7 +762,7 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
   const seven = await sevenTab(page);
   assert.match(seven, /^\d+$/);
   const answer = await page.evaluate(
-    async ({ refused, targetId }) => {
+    async ({ refused, targetId, errorPage }) => {
       const fail = async (method, params, sessionId) => {
         try {
           await globalThis.sliccExtension.cdp.send(method, params, sessionId);
@@ -804,56 +804,26 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
       });
       const seen = [];
       globalThis.sliccExtension.cdp.on((event) => seen.push(event));
-      let ready;
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        try {
-          ready = await globalThis.sliccExtension.cdp.send(
-            'Runtime.evaluate',
-            { expression: '1+1', returnByValue: true },
-            hoppedSession.sessionId
+      const href = (expression) =>
+        globalThis.sliccExtension.cdp
+          .send('Runtime.evaluate', { expression, returnByValue: true }, hoppedSession.sessionId)
+          .then(
+            (r) => r.result?.value,
+            (error) => `error ${error.message}`
           );
-          break;
-        } catch (error) {
-          if (!String(error.message).includes('execution context')) throw error;
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
+      const loaded = 'https://other.test/ complete';
+      let ready = '';
+      for (let attempt = 0; attempt < 200 && ready !== loaded; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 50));
+        ready = await href('`${location.href} ${document.readyState}`');
       }
-      if (ready?.result?.value !== 2) throw new Error('no context');
-      await globalThis.sliccExtension.cdp
-        .send(
-          'Runtime.evaluate',
-          {
-            expression: 'location.href = "https://seven.sliccy.ai/"',
-            returnByValue: true,
-          },
-          hoppedSession.sessionId
-        )
-        .catch(() => undefined);
-      let gone = 'ran';
-      for (let attempt = 0; attempt < 80; attempt += 1) {
-        try {
-          await globalThis.sliccExtension.cdp.send(
-            'Runtime.evaluate',
-            { expression: '1', returnByValue: true },
-            hoppedSession.sessionId
-          );
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        } catch (error) {
-          gone = error.message;
-          break;
-        }
+      if (ready !== loaded) throw new Error(`not loaded: ${ready}`);
+      await href('location.href = "https://seven.sliccy.ai/"');
+      const hops = [];
+      for (let attempt = 0; attempt < 200 && hops.at(-1) !== errorPage; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 50));
+        hops.push(await href('location.href'));
       }
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-      const settled = await globalThis.sliccExtension.cdp
-        .send(
-          'Runtime.evaluate',
-          { expression: 'location.href', returnByValue: true },
-          hoppedSession.sessionId
-        )
-        .then(
-          (r) => r.result?.value,
-          (error) => `error ${error.message}`
-        );
       await globalThis.sliccExtension.cdp
         .send('Target.closeTarget', { targetId: hopped.targetId })
         .catch(() => undefined);
@@ -862,22 +832,28 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
         vault,
         blankOk,
         navigated,
-        gone,
-        settled,
+        hops,
         leaked: seen.some((event) => JSON.stringify(event).includes('seven.sliccy.ai')),
       };
     },
-    { refused, targetId: seven }
+    { refused, targetId: seven, errorPage: 'chrome-error://chromewebdata/' }
   );
   assert.equal(answer.attached, refused);
   assert.equal(answer.vault, refused);
   assert.equal(answer.blankOk, true);
   assert.equal(answer.navigated, refused);
   assert.equal(answer.leaked, false);
-  assert.ok(answer.gone === 'ran' || answer.gone === refused, answer.gone);
-  assert.equal(typeof answer.settled, 'string');
-  assert.equal(answer.settled.startsWith('error'), false, 'the session stays');
-  assert.equal(answer.settled.startsWith('https://seven.sliccy.ai'), false, 'seven never commits');
+  assert.equal(answer.hops.at(-1), 'chrome-error://chromewebdata/', 'the hop fails at the request');
+  assert.deepEqual(
+    answer.hops.filter(
+      (href) =>
+        href !== 'https://other.test/' &&
+        href !== 'chrome-error://chromewebdata/' &&
+        href !== `error ${refused}`
+    ),
+    [],
+    'the session stays and seven never commits'
+  );
 });
 
 test('vault-feature-x gets no extension scripts (B24-4)', async (t) => {
