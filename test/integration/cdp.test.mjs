@@ -37,6 +37,8 @@ function fakeChrome() {
   const eventListeners = new Set();
   const detachListeners = new Set();
   const updateListeners = new Set();
+  const createdListeners = new Set();
+  const removedListeners = new Set();
   const api = {
     attached: [],
     detached: [],
@@ -89,6 +91,22 @@ function fakeChrome() {
           updateListeners.delete(listener);
         },
       },
+      onCreated: {
+        addListener(listener) {
+          createdListeners.add(listener);
+        },
+        removeListener(listener) {
+          createdListeners.delete(listener);
+        },
+      },
+      onRemoved: {
+        addListener(listener) {
+          removedListeners.add(listener);
+        },
+        removeListener(listener) {
+          removedListeners.delete(listener);
+        },
+      },
     },
     windows: {
       create(options) {
@@ -138,6 +156,17 @@ function fakeChrome() {
       api.locations.set(tabId, tab);
       for (const listener of updateListeners) listener(tabId, tab, { id: tabId, ...tab });
     },
+    born(tab) {
+      api.locations = api.locations ?? new Map();
+      api.locations.set(tab.id, tab);
+      for (const listener of createdListeners) listener(tab);
+    },
+    gone(tabId) {
+      for (const listener of removedListeners) listener(tabId, {});
+    },
+    child(tabId, sessionId, method, params) {
+      for (const listener of eventListeners) listener({ tabId, sessionId }, method, params);
+    },
     drop(tabId) {
       for (const listener of detachListeners) listener({ tabId }, 'target_closed');
     },
@@ -151,6 +180,12 @@ function open(url = 'https://seven.sliccy.ai/play') {
   const cdp = listen(connection, extensionId, api);
   assert.ok(cdp);
   return { connection, api, cdp };
+}
+
+function user(api) {
+  return api.sent.filter(
+    (sent) => !['Fetch.enable', 'Page.getFrameTree', 'Target.setAutoAttach'].includes(sent.method)
+  );
 }
 
 async function command(cdp, connection, message) {
@@ -231,7 +266,7 @@ test('flatten other than true is an error and does not attach', async () => {
     sessionId: '8',
   });
   assert.match(later.error, /No tab attached for sessionId: 8/);
-  assert.equal(api.sent.length, 0);
+  assert.equal(user(api).length, 0);
   cdp.close();
 });
 
@@ -251,7 +286,7 @@ test('flatten true keeps the session on the attaching port and forwards its even
     method: 'Target.attachToTarget',
     params: { targetId: '8', flatten: true },
   });
-  assert.deepEqual(again.result, { sessionId: '8' });
+  assert.deepEqual(again.result, { sessionId: '8.1' });
   assert.equal(api.attached.length, 1);
   const evaluated = await command(cdp, connection, {
     id: 3,
@@ -260,9 +295,17 @@ test('flatten true keeps the session on the attaching port and forwards its even
     sessionId: '8',
   });
   assert.deepEqual(evaluated.result, { value: 2 });
-  assert.deepEqual(api.sent, [
+  assert.deepEqual(user(api), [
     { tabId: 8, method: 'Runtime.evaluate', params: { expression: '1+1' } },
   ]);
+  assert.deepEqual(api.sent[0], {
+    tabId: 8,
+    method: 'Fetch.enable',
+    params: {
+      patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Request' }],
+      handleAuthRequests: false,
+    },
+  });
   const stolen = await command(other, stranger, {
     id: 4,
     method: 'Runtime.evaluate',
@@ -272,11 +315,10 @@ test('flatten true keeps the session on the attaching port and forwards its even
   assert.match(stolen.error, /No tab attached for sessionId: 8/);
   api.fire(8, 'Page.loadEventFired', { name: 'load' });
   await cdp.settled();
-  assert.deepEqual(connection.posted.at(-1), {
-    method: 'Page.loadEventFired',
-    params: { name: 'load' },
-    sessionId: '8',
-  });
+  assert.deepEqual(connection.posted.slice(-2), [
+    { method: 'Page.loadEventFired', params: { name: 'load' }, sessionId: '8' },
+    { method: 'Page.loadEventFired', params: { name: 'load' }, sessionId: '8.1' },
+  ]);
   assert.equal(
     stranger.posted.some((message) => message.method === 'Page.loadEventFired'),
     false
@@ -298,7 +340,7 @@ test('flatten true keeps the session on the attaching port and forwards its even
   await command(cdp, connection, {
     id: 7,
     method: 'Target.detachFromTarget',
-    params: { sessionId: '8' },
+    params: { sessionId: '8.1' },
   });
   assert.deepEqual(api.detached, [8]);
   cdp.close();
@@ -312,9 +354,10 @@ test('target commands list, open, activate, and close tabs', async () => {
     {
       targetId: '7',
       type: 'page',
-      title: 'fake slicc',
+      title: '',
       url: 'https://seven.sliccy.ai/',
       attached: false,
+      canAccessOpener: false,
       active: true,
     },
     {
@@ -323,6 +366,7 @@ test('target commands list, open, activate, and close tabs', async () => {
       title: 'other',
       url: 'https://other.test/',
       attached: false,
+      canAccessOpener: false,
       active: false,
     },
   ]);
@@ -374,9 +418,8 @@ test('open, attach and navigate refuse seven and the vault', async () => {
     'https://vault.sliccy.ai/oauth/callback',
     'http://a.b.sliccy.ai:8443/x',
     'devtools://devtools/bundled/inspector.html',
-    'about:blank',
-    'about:srcdoc',
-    '',
+    'blob:https://vault.sliccy.ai/abc',
+    'view-source:https://vault.sliccy.ai/',
   ];
   for (const [index, url] of blocked.entries()) {
     const opened = await command(cdp, connection, {
@@ -421,7 +464,7 @@ test('open, attach and navigate refuse seven and the vault', async () => {
     sessionId: '11',
   });
   assert.equal(later.error, refused);
-  assert.equal(api.sent.length, 0);
+  assert.equal(user(api).length, 0);
   api.locations = new Map([[11, 'https://example.test/']]);
   const navigated = await command(cdp, connection, {
     id: 44,
@@ -430,7 +473,7 @@ test('open, attach and navigate refuse seven and the vault', async () => {
     sessionId: '11',
   });
   assert.equal(navigated.error, refused);
-  assert.equal(api.sent.length, 0);
+  assert.equal(user(api).length, 0);
   const blank = await command(cdp, connection, {
     id: 45,
     method: 'Page.navigate',
@@ -438,7 +481,7 @@ test('open, attach and navigate refuse seven and the vault', async () => {
     sessionId: '11',
   });
   assert.deepEqual(blank.result, { value: 2 });
-  assert.equal(api.sent.at(-1).method, 'Page.navigate');
+  assert.equal(user(api).at(-1).method, 'Page.navigate');
   cdp.close();
 });
 
@@ -519,7 +562,7 @@ test('pending url, opener, and a later navigation stay off protected origins', a
     sessionId: '8',
   });
   assert.match(later.error, /No tab attached/);
-  assert.equal(api.sent.length, 0);
+  assert.equal(user(api).length, 0);
   api.fire(8, 'Runtime.consoleAPICalled', { type: 'log' });
   assert.equal(
     connection.posted.some((message) => message.method === 'Runtime.consoleAPICalled'),
@@ -536,25 +579,46 @@ test('pending url, opener, and a later navigation stay off protected origins', a
     type: 'XHR',
     request: { url: 'https://vault.sliccy.ai/oauth/token' },
   });
-  assert.equal(connection.posted.at(-1).method, 'Network.requestWillBeSent');
-  assert.equal(api.detached.length, held);
   api.fire(8, 'Network.requestWillBeSent', {
-    type: 'Document',
-    request: { url: 'https://vault.sliccy.ai/' },
+    requestId: 'n1',
+    type: 'XHR',
+    request: { url: 'https://other.test/ok' },
   });
+  assert.equal(connection.posted.at(-1).method, 'Network.requestWillBeSent');
+  assert.equal(connection.posted.at(-1).params.request.url, 'https://other.test/ok');
   assert.equal(
     connection.posted.filter((message) => message.method === 'Network.requestWillBeSent').length,
     1
   );
-  assert.equal(api.detached.at(-1), 8);
-  assert.equal(api.detached.length, held + 1);
-  const third = await command(cdp, connection, {
-    id: 9,
-    method: 'Target.attachToTarget',
-    params: { targetId: '8', flatten: true },
+  assert.equal(api.detached.length, held);
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'interception-1',
+    resourceType: 'Document',
+    request: { url: 'https://vault.sliccy.ai/' },
   });
-  assert.deepEqual(third.result, { sessionId: '8' });
-  api.visit(8, { url: 'https://other.test/', pendingUrl: 'https://seven.sliccy.ai/' });
+  await cdp.settled();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(api.sent.at(-1), {
+    tabId: 8,
+    method: 'Fetch.failRequest',
+    params: { requestId: 'interception-1', errorReason: 'BlockedByClient' },
+  });
+  assert.equal(
+    connection.posted.some((message) => message.method === 'Fetch.requestPaused'),
+    false
+  );
+  assert.equal(api.detached.length, held, 'the session stays');
+  api.locations = new Map([
+    [8, { url: 'https://other.test/', pendingUrl: 'https://seven.sliccy.ai/' }],
+  ]);
+  const pendingNow = await command(cdp, connection, {
+    id: 9,
+    method: 'Runtime.evaluate',
+    params: { expression: '1' },
+    sessionId: '8',
+  });
+  assert.equal(pendingNow.error, refused, 'commands wait out a pending protected navigation');
+  api.visit(8, { url: 'https://seven.sliccy.ai/' });
   assert.equal(connection.posted.at(-1).method, 'Target.detachedFromTarget');
   const moved = await command(cdp, connection, {
     id: 10,
@@ -566,6 +630,38 @@ test('pending url, opener, and a later navigation stay off protected origins', a
   cdp.close();
 });
 
+const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
+
+function sevenTab(page) {
+  return page.evaluate(async (id) => {
+    const cdp = globalThis.sliccExtension.cdp;
+    const { targetId } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${id}/secrets.html`,
+    });
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    let found;
+    for (let i = 0; i < 40 && !found; i++) {
+      try {
+        const r = await cdp.send(
+          'Runtime.evaluate',
+          {
+            expression:
+              'chrome.tabs.query({}).then((tabs) => tabs.filter((tab) => (tab.url || "").startsWith("https://seven.sliccy.ai/")).map((tab) => String(tab.id)))',
+            awaitPromise: true,
+            returnByValue: true,
+          },
+          sessionId
+        );
+        found = r.result?.value?.[0];
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined);
+    return found;
+  }, extId);
+}
+
 let chrome;
 before(async () => {
   chrome = await launch();
@@ -576,14 +672,15 @@ test('a sliccy.ai page can list and open targets, and flatten is required', asyn
   const page = await chrome.visit(t, slicc);
   const listed = await page.evaluate(async () => {
     const { targetInfos } = await globalThis.sliccExtension.cdp.send('Target.getTargets');
-    return targetInfos.some((target) => target.url.startsWith('https://seven.sliccy.ai/'));
+    return {
+      some: targetInfos.length > 0,
+      seven: targetInfos.some((target) => target.url.startsWith('https://seven.sliccy.ai/')),
+    };
   });
-  assert.equal(listed, true);
-  const rejected = await page.evaluate(async () => {
-    const { targetInfos } = await globalThis.sliccExtension.cdp.send('Target.getTargets');
-    const targetId = targetInfos.find((target) =>
-      target.url.startsWith('https://seven.sliccy.ai/')
-    ).targetId;
+  assert.deepEqual(listed, { some: true, seven: true });
+  const seven = await sevenTab(page);
+  assert.match(seven, /^\d+$/);
+  const rejected = await page.evaluate(async (targetId) => {
     const missing = await globalThis.sliccExtension.cdp
       .send('Target.attachToTarget', { targetId })
       .then(
@@ -603,7 +700,7 @@ test('a sliccy.ai page can list and open targets, and flatten is required', asyn
         (error) => error.message
       );
     return { missing, explicit, later };
-  });
+  }, seven);
   assert.equal(rejected.missing, 'only flatten: true is supported');
   assert.equal(rejected.explicit, 'only flatten: true is supported');
   assert.match(rejected.later, /No tab attached/);
@@ -652,110 +749,872 @@ test('flatten true attaches, evaluates, and returns events on that session', asy
   });
   assert.match(answer.attached.sessionId, /^\d+$/);
   assert.equal(answer.evaluated.result.value, 2);
-  assert.equal(answer.events.length > 0, true);
+  const scoped = answer.events.filter((event) => !event.method.startsWith('Target.'));
+  assert.equal(scoped.length > 0, true);
   assert.equal(
-    answer.events.every((event) => event.sessionId === answer.attached.sessionId),
+    scoped.every((event) => event.sessionId === answer.attached.sessionId),
     true
   );
 });
 
 test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) => {
   const page = await chrome.visit(t, slicc);
-  const answer = await page.evaluate(async (refused) => {
-    const fail = async (method, params, sessionId) => {
-      try {
-        await globalThis.sliccExtension.cdp.send(method, params, sessionId);
-        return 'ran';
-      } catch (error) {
-        return error.message;
+  const seven = await sevenTab(page);
+  assert.match(seven, /^\d+$/);
+  const answer = await page.evaluate(
+    async ({ refused, targetId }) => {
+      const fail = async (method, params, sessionId) => {
+        try {
+          await globalThis.sliccExtension.cdp.send(method, params, sessionId);
+          return 'ran';
+        } catch (error) {
+          return error.message;
+        }
+      };
+      const attached = await fail('Target.attachToTarget', { targetId, flatten: true });
+      const vault = await fail('Target.createTarget', { url: 'https://vault.sliccy.ai/' });
+      const blank = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
+        url: 'about:blank',
+      });
+      const blankOk = typeof blank.targetId === 'string';
+      await globalThis.sliccExtension.cdp
+        .send('Target.closeTarget', { targetId: blank.targetId })
+        .catch(() => undefined);
+      const created = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
+        url: 'https://other.test/',
+      });
+      const session = await globalThis.sliccExtension.cdp.send('Target.attachToTarget', {
+        targetId: created.targetId,
+        flatten: true,
+      });
+      const navigated = await fail(
+        'Page.navigate',
+        { url: 'https://vault.sliccy.ai/secret' },
+        session.sessionId
+      );
+      await globalThis.sliccExtension.cdp
+        .send('Target.closeTarget', { targetId: created.targetId })
+        .catch(() => undefined);
+      const hopped = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
+        url: 'https://other.test/',
+      });
+      const hoppedSession = await globalThis.sliccExtension.cdp.send('Target.attachToTarget', {
+        targetId: hopped.targetId,
+        flatten: true,
+      });
+      const seen = [];
+      globalThis.sliccExtension.cdp.on((event) => seen.push(event));
+      let ready;
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        try {
+          ready = await globalThis.sliccExtension.cdp.send(
+            'Runtime.evaluate',
+            { expression: '1+1', returnByValue: true },
+            hoppedSession.sessionId
+          );
+          break;
+        } catch (error) {
+          if (!String(error.message).includes('execution context')) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
       }
-    };
-    const { targetInfos } = await globalThis.sliccExtension.cdp.send('Target.getTargets');
-    const targetId = targetInfos.find((target) =>
-      target.url.startsWith('https://seven.sliccy.ai/')
-    ).targetId;
-    const attached = await fail('Target.attachToTarget', { targetId, flatten: true });
-    const vault = await fail('Target.createTarget', { url: 'https://vault.sliccy.ai/' });
-    const blank = await fail('Target.createTarget', { url: 'about:blank' });
-    const created = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
-      url: 'https://example.test/',
-    });
-    const session = await globalThis.sliccExtension.cdp.send('Target.attachToTarget', {
-      targetId: created.targetId,
-      flatten: true,
-    });
-    const navigated = await fail(
-      'Page.navigate',
-      { url: 'https://vault.sliccy.ai/secret' },
-      session.sessionId
-    );
-    await globalThis.sliccExtension.cdp
-      .send('Target.closeTarget', { targetId: created.targetId })
-      .catch(() => undefined);
-    const hopped = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
-      url: 'https://other.test/',
-    });
-    const hoppedSession = await globalThis.sliccExtension.cdp.send('Target.attachToTarget', {
-      targetId: hopped.targetId,
-      flatten: true,
-    });
-    const seen = [];
-    globalThis.sliccExtension.cdp.on((event) => seen.push(event));
-    let ready;
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      try {
-        ready = await globalThis.sliccExtension.cdp.send(
+      if (ready?.result?.value !== 2) throw new Error('no context');
+      await globalThis.sliccExtension.cdp
+        .send(
           'Runtime.evaluate',
-          { expression: '1+1', returnByValue: true },
+          {
+            expression: 'location.href = "https://seven.sliccy.ai/"',
+            returnByValue: true,
+          },
           hoppedSession.sessionId
-        );
-        break;
-      } catch (error) {
-        if (!String(error.message).includes('execution context')) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        )
+        .catch(() => undefined);
+      let gone = 'ran';
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        try {
+          await globalThis.sliccExtension.cdp.send(
+            'Runtime.evaluate',
+            { expression: '1', returnByValue: true },
+            hoppedSession.sessionId
+          );
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        } catch (error) {
+          gone = error.message;
+          break;
+        }
       }
-    }
-    if (ready?.result?.value !== 2) throw new Error('no context');
-    await globalThis.sliccExtension.cdp
-      .send(
-        'Runtime.evaluate',
-        {
-          expression: 'location.href = "https://seven.sliccy.ai/"',
-          returnByValue: true,
-        },
-        hoppedSession.sessionId
-      )
-      .catch(() => undefined);
-    let gone = 'ran';
-    for (let attempt = 0; attempt < 80; attempt += 1) {
-      try {
-        await globalThis.sliccExtension.cdp.send(
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const settled = await globalThis.sliccExtension.cdp
+        .send(
           'Runtime.evaluate',
-          { expression: '1', returnByValue: true },
+          { expression: 'location.href', returnByValue: true },
           hoppedSession.sessionId
+        )
+        .then(
+          (r) => r.result?.value,
+          (error) => `error ${error.message}`
         );
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      } catch (error) {
-        gone = error.message;
-        break;
-      }
-    }
-    await globalThis.sliccExtension.cdp
-      .send('Target.closeTarget', { targetId: hopped.targetId })
-      .catch(() => undefined);
-    return {
-      attached,
-      vault,
-      blank,
-      navigated,
-      gone,
-      leaked: seen.some((event) => JSON.stringify(event).includes('seven.sliccy.ai')),
-    };
-  }, refused);
+      await globalThis.sliccExtension.cdp
+        .send('Target.closeTarget', { targetId: hopped.targetId })
+        .catch(() => undefined);
+      return {
+        attached,
+        vault,
+        blankOk,
+        navigated,
+        gone,
+        settled,
+        leaked: seen.some((event) => JSON.stringify(event).includes('seven.sliccy.ai')),
+      };
+    },
+    { refused, targetId: seven }
+  );
   assert.equal(answer.attached, refused);
   assert.equal(answer.vault, refused);
-  assert.equal(answer.blank, refused);
+  assert.equal(answer.blankOk, true);
   assert.equal(answer.navigated, refused);
   assert.equal(answer.leaked, false);
-  assert.equal(answer.gone === refused || answer.gone.includes('No tab attached'), true);
+  assert.ok(answer.gone === 'ran' || answer.gone === refused, answer.gone);
+  assert.equal(typeof answer.settled, 'string');
+  assert.equal(answer.settled.startsWith('error'), false, 'the session stays');
+  assert.equal(answer.settled.startsWith('https://seven.sliccy.ai'), false, 'seven never commits');
+});
+
+test('vault-feature-x gets no extension scripts (B24-4)', async (t) => {
+  const page = await chrome.visit(t, 'https://vault-feature-x.sliccy.ai/');
+  assert.equal(
+    await page.evaluate(() => 'sliccExtension' in globalThis),
+    false,
+    'vault-feature-x must not have sliccExtension'
+  );
+});
+
+test('createTarget about:blank succeeds and creates a real tab (S7-1)', async () => {
+  const { connection, api, cdp } = open();
+  const blank = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.createTarget',
+    params: { url: 'about:blank' },
+  });
+  assert.ok(blank.result?.targetId);
+  assert.deepEqual(api.created, [{ url: 'about:blank', active: false }]);
+  const empty = await command(cdp, connection, {
+    id: 2,
+    method: 'Target.createTarget',
+    params: {},
+  });
+  assert.ok(empty.result?.targetId);
+  cdp.close();
+});
+
+test('securityOrigin in Page.frameNavigated triggers detach (S7-1)', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  api.fire(8, 'Page.frameNavigated', {
+    frame: { id: 'f1', url: 'https://vault.sliccy.ai/', securityOrigin: 'https://vault.sliccy.ai' },
+  });
+  await cdp.settled();
+  assert.equal(connection.posted.at(-1).method, 'Target.detachedFromTarget');
+  cdp.close();
+});
+
+test('Runtime.executionContextCreated with protected origin triggers detach (S7-1)', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  api.fire(8, 'Page.frameNavigated', {
+    frame: { id: 'main-frame-1', url: 'https://other.test/', securityOrigin: 'https://other.test' },
+  });
+  await cdp.settled();
+  api.fire(8, 'Runtime.executionContextCreated', {
+    context: {
+      id: 1,
+      origin: 'https://vault.sliccy.ai',
+      auxData: { isDefault: true, frameId: 'main-frame-1' },
+    },
+  });
+  await cdp.settled();
+  assert.equal(connection.posted.at(-1).method, 'Target.detachedFromTarget');
+  cdp.close();
+});
+
+test('a protected iframe does not detach the tab (Codex P2)', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  api.fire(8, 'Page.frameNavigated', {
+    frame: { id: 'main-frame-1', url: 'https://other.test/', securityOrigin: 'https://other.test' },
+  });
+  await cdp.settled();
+  api.fire(8, 'Runtime.executionContextCreated', {
+    context: {
+      id: 2,
+      origin: 'https://vault.sliccy.ai',
+      auxData: { isDefault: true, frameId: 'iframe-1' },
+    },
+  });
+  await cdp.settled();
+  const last = connection.posted.at(-1);
+  assert.notEqual(
+    last.method,
+    'Target.detachedFromTarget',
+    'iframe context must not detach the tab'
+  );
+  const eval1 = await command(cdp, connection, {
+    id: 2,
+    method: 'Runtime.evaluate',
+    params: { expression: '1' },
+    sessionId: '8',
+  });
+  assert.deepEqual(eval1.result, { value: 2 });
+  cdp.close();
+});
+
+test('concurrent dispatch: awaitPromise evaluate does not deadlock with Fetch.continueRequest (S7-2)', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  await command(cdp, connection, {
+    id: 2,
+    method: 'Fetch.enable',
+    params: { patterns: [{ urlPattern: '*' }] },
+    sessionId: '8',
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'r1',
+    resourceType: 'XHR',
+    request: { url: 'https://other.test/x' },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.posted.at(-1).method, 'Fetch.requestPaused');
+  assert.equal(connection.posted.at(-1).sessionId, '8');
+  let evalResolved = false;
+  let fetchResolved = false;
+  const evalPromise = new Promise((resolve) => {
+    api.debugger.sendCommand = (target, method, params) => {
+      api.sent.push({ tabId: target.tabId, method, params });
+      if (method === 'Runtime.evaluate') {
+        return new Promise((r) => {
+          setTimeout(() => {
+            evalResolved = true;
+            r({ result: { value: 'done' } });
+          }, 50);
+        });
+      }
+      if (method === 'Fetch.continueRequest') {
+        fetchResolved = true;
+        return Promise.resolve({});
+      }
+      return Promise.resolve({ value: 2 });
+    };
+  });
+  cdp.handle({
+    id: 10,
+    method: 'Runtime.evaluate',
+    params: { expression: 'await fetch("/x")', awaitPromise: true },
+    sessionId: '8',
+  });
+  cdp.handle({
+    id: 11,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'r1' },
+    sessionId: '8',
+  });
+  await cdp.settled();
+  assert.equal(evalResolved, true);
+  assert.equal(fetchResolved, true);
+  cdp.close();
+});
+
+test('blob: and view-source: URLs over protected origins are refused in createTarget', async () => {
+  const { connection, api, cdp } = open();
+  for (const url of [
+    'blob:https://vault.sliccy.ai/abc',
+    'view-source:https://vault.sliccy.ai/',
+    'blob:https://seven.sliccy.ai/xyz',
+    'view-source:https://seven.sliccy.ai/page',
+  ]) {
+    const result = await command(cdp, connection, {
+      id: 1,
+      method: 'Target.createTarget',
+      params: { url },
+    });
+    assert.equal(result.error, refused, `${url} should be refused`);
+  }
+  cdp.close();
+});
+
+async function tick() {
+  for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function events(connection, method) {
+  return connection.posted.filter((message) => message.method === method);
+}
+
+test('S7-3 Target.getTargetInfo reports type, url and openerId for every tab', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([
+    [8, { url: 'https://other.test/', title: 'other', openerTabId: 11 }],
+    [11, { url: 'https://example.test/' }],
+  ]);
+  const plain = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.getTargetInfo',
+    params: { targetId: '8' },
+  });
+  assert.deepEqual(plain.result.targetInfo, {
+    targetId: '8',
+    type: 'page',
+    title: 'other',
+    url: 'https://other.test/',
+    attached: false,
+    canAccessOpener: false,
+    openerId: '11',
+  });
+  const blank = await command(cdp, connection, {
+    id: 2,
+    method: 'Target.getTargetInfo',
+    params: { targetId: '11' },
+  });
+  assert.equal(blank.result.targetInfo.openerId, undefined);
+  const seven = await command(cdp, connection, {
+    id: 3,
+    method: 'Target.getTargetInfo',
+    params: { targetId: '7' },
+  });
+  assert.equal(
+    seven.result.targetInfo.url,
+    'https://seven.sliccy.ai/',
+    'the guard sees the real url'
+  );
+  api.locations.set(12, { url: 'about:blank', openerTabId: 7 });
+  const inherited = await command(cdp, connection, {
+    id: 4,
+    method: 'Target.getTargetInfo',
+    params: { targetId: '12' },
+  });
+  assert.equal(inherited.result.targetInfo.openerId, '7', 'the guard sees the protected opener');
+  const attach = await command(cdp, connection, {
+    id: 7,
+    method: 'Target.attachToTarget',
+    params: { targetId: '12', flatten: true },
+  });
+  assert.equal(attach.error, refused);
+  const browser = await command(cdp, connection, { id: 5, method: 'Target.getTargetInfo' });
+  assert.equal(browser.result.targetInfo.type, 'browser');
+  const version = await command(cdp, connection, { id: 6, method: 'Browser.getVersion' });
+  assert.match(version.result.product, /^Chrome\//);
+  assert.equal(version.result.protocolVersion, '1.3');
+  cdp.close();
+});
+
+test('S7-3 setDiscoverTargets emits created, changed and destroyed, and detaches tabs that become protected', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/', title: 'other' }]]);
+  const on = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.setDiscoverTargets',
+    params: { discover: true },
+  });
+  assert.deepEqual(on.result, {});
+  assert.deepEqual(
+    events(connection, 'Target.targetCreated').map((e) => e.params.targetInfo.targetId),
+    ['7', '8']
+  );
+  api.born({ id: 20, url: '', pendingUrl: 'https://example.test/', openerTabId: 8 });
+  api.born({ id: 21, url: '', pendingUrl: 'https://vault.sliccy.ai/' });
+  await tick();
+  const created = events(connection, 'Target.targetCreated')
+    .map((e) => e.params.targetInfo)
+    .sort((a, b) => Number(a.targetId) - Number(b.targetId));
+  assert.deepEqual(
+    created.map((info) => info.targetId),
+    ['7', '8', '20', '21']
+  );
+  assert.equal(created[2].openerId, '8');
+  assert.equal(created[3].url, 'https://vault.sliccy.ai/');
+  api.visit(20, { url: 'https://example.test/a', title: 'a' });
+  await tick();
+  api.visit(20, { url: 'https://example.test/b', title: 'a' });
+  await tick();
+  assert.deepEqual(
+    events(connection, 'Target.targetInfoChanged').map((e) => e.params.targetInfo.url),
+    ['https://example.test/a', 'https://example.test/b']
+  );
+  await command(cdp, connection, {
+    id: 2,
+    method: 'Target.attachToTarget',
+    params: { targetId: '20', flatten: true },
+  });
+  api.visit(20, { url: 'https://seven.sliccy.ai/x' });
+  await tick();
+  assert.equal(
+    events(connection, 'Target.targetInfoChanged').at(-1).params.targetInfo.url,
+    'https://seven.sliccy.ai/x'
+  );
+  assert.deepEqual(
+    events(connection, 'Target.detachedFromTarget').map((e) => e.params.sessionId),
+    ['20']
+  );
+  const after = await command(cdp, connection, {
+    id: 4,
+    method: 'Runtime.evaluate',
+    params: {},
+    sessionId: '20',
+  });
+  assert.match(after.error, /No tab attached/);
+  api.gone(8);
+  await tick();
+  assert.deepEqual(
+    events(connection, 'Target.targetDestroyed').map((e) => e.params.targetId),
+    ['8']
+  );
+  await command(cdp, connection, {
+    id: 3,
+    method: 'Target.setDiscoverTargets',
+    params: { discover: false },
+  });
+  api.born({ id: 22, url: 'https://example.test/' });
+  await tick();
+  assert.equal(events(connection, 'Target.targetCreated').length, 4);
+  cdp.close();
+});
+
+test('S7-3 detachedFromTarget fires for every session when a tab closes or the backend drops it', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  const first = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  const second = await command(cdp, connection, {
+    id: 2,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.notEqual(first.result.sessionId, second.result.sessionId);
+  api.drop(8);
+  assert.deepEqual(
+    events(connection, 'Target.detachedFromTarget').map((e) => e.params.sessionId),
+    [first.result.sessionId, second.result.sessionId]
+  );
+  const later = await command(cdp, connection, {
+    id: 3,
+    method: 'Runtime.evaluate',
+    params: {},
+    sessionId: second.result.sessionId,
+  });
+  assert.match(later.error, /No tab attached/);
+  cdp.close();
+});
+
+test('shield refuses browser-wide, origin-keyed and protected-target commands', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  const before = user(api).length;
+  let id = 10;
+  for (const [method, params, sessionId] of [
+    ['Target.exposeDevToolsProtocol', { targetId: '8' }],
+    ['Target.sendMessageToTarget', { targetId: '8', message: '{}' }],
+    ['Target.attachToBrowserTarget', {}],
+    ['Target.setAutoAttach', { autoAttach: true, flatten: true }, '8'],
+    ['Tracing.start', {}, '8'],
+    ['Extensions.loadUnpacked', { path: '/x' }, '8'],
+    ['Network.clearBrowserCookies', {}, '8'],
+    ['Storage.clearCookies', {}, '8'],
+    ['Browser.resetPermissions', {}, '8'],
+    ['Browser.grantPermissions', { permissions: ['geolocation'] }, '8'],
+    ['Security.setIgnoreCertificateErrors', { ignore: true }, '8'],
+    ['Fetch.enable', {}],
+    ['Target.activateTarget', { targetId: '7' }],
+    ['Target.closeTarget', { targetId: '7' }],
+    ['Storage.clearDataForOrigin', { origin: 'https://vault.sliccy.ai', storageTypes: 'all' }, '8'],
+    ['Storage.getUsageAndQuota', { origin: 'https://seven.sliccy.ai' }, '8'],
+    [
+      'Storage.clearDataForStorageKey',
+      { storageKey: 'https://vault.sliccy.ai/', storageTypes: 'all' },
+      '8',
+    ],
+    [
+      'DOMStorage.getDOMStorageItems',
+      { storageId: { securityOrigin: 'https://vault.sliccy.ai', isLocalStorage: true } },
+      '8',
+    ],
+    ['IndexedDB.requestDatabaseNames', { securityOrigin: 'https://seven.sliccy.ai' }, '8'],
+    ['CacheStorage.requestCacheNames', { storageKey: 'https://seven.sliccy.ai/' }, '8'],
+    [
+      'Browser.setPermission',
+      {
+        permission: { name: 'geolocation' },
+        setting: 'granted',
+        origin: 'https://vault.sliccy.ai',
+      },
+      '8',
+    ],
+    ['Network.loadNetworkResource', { url: 'https://vault.sliccy.ai/x', options: {} }, '8'],
+    ['Fetch.enable', { patterns: [{ urlPattern: '*://vault.sliccy.ai/*' }] }, '8'],
+    ['Network.getResponseBody', { requestId: 'unknown' }, '8'],
+    ['IO.read', { handle: 'h1' }, '8'],
+    ['Fetch.fulfillRequest', { requestId: 'interception-job-9.0', responseCode: 200 }, '8'],
+  ]) {
+    const answer = await command(cdp, connection, { id: id++, method, params, sessionId });
+    assert.match(answer.error ?? '', /^slicc: refused: /, `${method} ${JSON.stringify(params)}`);
+  }
+  assert.equal(user(api).length, before, 'nothing refused reached chrome.debugger');
+  assert.deepEqual(api.removed, []);
+  const plain = await command(cdp, connection, {
+    id: id++,
+    method: 'Storage.getUsageAndQuota',
+    params: { origin: 'https://other.test' },
+    sessionId: '8',
+  });
+  assert.equal(plain.error, undefined, 'the same command on an ordinary origin passes');
+  cdp.close();
+});
+
+test('shield refuses protected cookie writes and filters protected cookies from reads', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  api.debugger.sendCommand = (target, method, params) => {
+    api.sent.push({ tabId: target.tabId, method, params });
+    if (method.endsWith('Cookies')) {
+      return Promise.resolve({
+        cookies: [
+          { name: 'v', domain: 'vault.sliccy.ai' },
+          { name: 's', domain: '.sliccy.ai' },
+          { name: 'ok', domain: 'other.test' },
+        ],
+      });
+    }
+    return Promise.resolve({});
+  };
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  let id = 2;
+  for (const [method, params] of [
+    ['Network.setCookie', { name: 'x', value: '1', url: 'https://vault.sliccy.ai/' }],
+    ['Network.setCookie', { name: 'x', value: '1', domain: '.sliccy.ai' }],
+    ['Network.setCookies', { cookies: [{ name: 'x', value: '1', domain: 'seven.sliccy.ai' }] }],
+    ['Network.deleteCookies', { name: 'x', url: 'https://seven.sliccy.ai/' }],
+    ['Storage.setCookies', { cookies: [{ name: 'x', value: '1', domain: 'vault.sliccy.ai' }] }],
+    ['Page.deleteCookie', { cookieName: 'x', url: 'https://vault.sliccy.ai/' }],
+    ['Network.getCookies', { urls: ['https://vault.sliccy.ai/'] }],
+  ]) {
+    const answer = await command(cdp, connection, { id: id++, method, params, sessionId: '8' });
+    assert.match(answer.error ?? '', /^slicc: refused: /, `${method} ${JSON.stringify(params)}`);
+  }
+  const set = await command(cdp, connection, {
+    id: id++,
+    method: 'Network.setCookie',
+    params: { name: 'ok', value: '1', url: 'https://other.test/' },
+    sessionId: '8',
+  });
+  assert.equal(set.error, undefined);
+  for (const method of ['Network.getCookies', 'Network.getAllCookies', 'Storage.getCookies']) {
+    const read = await command(cdp, connection, { id: id++, method, params: {}, sessionId: '8' });
+    assert.deepEqual(read.result.cookies, [{ name: 'ok', domain: 'other.test' }], method);
+  }
+  cdp.close();
+});
+
+test('shield wraps init scripts so they throw on protected origins before client code', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  await command(cdp, connection, {
+    id: 2,
+    method: 'Page.addScriptToEvaluateOnNewDocument',
+    params: { source: 'window.marker = 1;', runImmediately: true },
+    sessionId: '8',
+  });
+  const sent = user(api).at(-1);
+  assert.equal(sent.method, 'Page.addScriptToEvaluateOnNewDocument');
+  assert.equal(sent.params.runImmediately, true);
+  assert.ok(sent.params.source.endsWith('\nwindow.marker = 1;'));
+  assert.ok(sent.params.source.startsWith('if ((function () {'));
+  assert.match(sent.params.source, /throw "slicc: refused: init script on a protected origin"/);
+  cdp.close();
+});
+
+test('shield owns Fetch: protected requests never reach the client, client patterns chain across sessions', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  const second = (
+    await command(cdp, connection, {
+      id: 2,
+      method: 'Target.attachToTarget',
+      params: { targetId: '8', flatten: true },
+    })
+  ).result.sessionId;
+  api.fire(8, 'Page.frameNavigated', { frame: { id: 'main', url: 'https://other.test/' } });
+  await command(cdp, connection, {
+    id: 3,
+    method: 'Fetch.enable',
+    params: { patterns: [{ urlPattern: '*', resourceType: 'Document' }] },
+    sessionId: '8',
+  });
+  await command(cdp, connection, {
+    id: 4,
+    method: 'Fetch.enable',
+    params: { patterns: [{ urlPattern: 'https://other.test/*' }] },
+    sessionId: second,
+  });
+  assert.deepEqual(api.sent.filter((s) => s.method === 'Fetch.enable').at(-1).params, {
+    patterns: [
+      { urlPattern: '*', resourceType: 'Document', requestStage: 'Request' },
+      { urlPattern: '*', resourceType: 'Document' },
+      { urlPattern: 'https://other.test/*' },
+    ],
+    handleAuthRequests: false,
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'i1',
+    frameId: 'main',
+    resourceType: 'Document',
+    request: { url: 'https://other.test/next' },
+  });
+  await tick();
+  assert.deepEqual(
+    events(connection, 'Fetch.requestPaused').map((e) => [e.params.requestId, e.sessionId]),
+    [['i1', '8']]
+  );
+  const forged = await command(cdp, connection, {
+    id: 5,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'i1' },
+    sessionId: second,
+  });
+  assert.match(forged.error, /^slicc: refused: /, 'only the owner answers');
+  await command(cdp, connection, {
+    id: 6,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'i1' },
+    sessionId: '8',
+  });
+  assert.deepEqual(
+    events(connection, 'Fetch.requestPaused').map((e) => [e.params.requestId, e.sessionId]),
+    [
+      ['i1', '8'],
+      ['i1', second],
+    ]
+  );
+  assert.equal(
+    user(api).some((s) => s.method === 'Fetch.continueRequest'),
+    false
+  );
+  await command(cdp, connection, {
+    id: 7,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'i1' },
+    sessionId: second,
+  });
+  assert.deepEqual(user(api).at(-1), {
+    tabId: 8,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'i1' },
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'i2',
+    frameId: 'main',
+    resourceType: 'XHR',
+    request: { url: 'https://vault.sliccy.ai/api' },
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'i4',
+    frameId: 'main',
+    resourceType: 'Image',
+    request: { url: 'https://cdn.test/a.png' },
+  });
+  await tick();
+  assert.deepEqual(
+    user(api)
+      .slice(-2)
+      .map((s) => [s.method, s.params]),
+    [
+      ['Fetch.continueRequest', { requestId: 'i2' }],
+      ['Fetch.continueRequest', { requestId: 'i4' }],
+    ]
+  );
+  assert.equal(events(connection, 'Fetch.requestPaused').length, 2);
+  assert.equal(events(connection, 'Target.detachedFromTarget').length, 0);
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'i3',
+    frameId: 'child',
+    resourceType: 'Document',
+    request: { url: 'https://seven.sliccy.ai/frame' },
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'i5',
+    frameId: 'main',
+    resourceType: 'Document',
+    redirectedRequestId: 'i1',
+    request: { url: 'https://vault.sliccy.ai/' },
+  });
+  await tick();
+  assert.deepEqual(
+    user(api)
+      .slice(-2)
+      .map((s) => [s.method, s.params]),
+    [
+      ['Fetch.failRequest', { requestId: 'i3', errorReason: 'BlockedByClient' }],
+      ['Fetch.failRequest', { requestId: 'i5', errorReason: 'BlockedByClient' }],
+    ]
+  );
+  assert.deepEqual(api.detached, [], 'the tab and its sessions stay');
+  assert.equal(events(connection, 'Target.detachedFromTarget').length, 0);
+  assert.equal(events(connection, 'Fetch.requestPaused').length, 2);
+  cdp.close();
+});
+
+test('shield fails a redirect hop into a protected origin before it commits', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  await command(cdp, connection, {
+    id: 2,
+    method: 'Fetch.enable',
+    params: { patterns: [{ urlPattern: '*' }] },
+    sessionId: '8',
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'r1',
+    resourceType: 'Document',
+    request: { url: 'https://other.test/redirect' },
+  });
+  await tick();
+  await command(cdp, connection, {
+    id: 3,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'r1' },
+    sessionId: '8',
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'r2',
+    resourceType: 'Document',
+    redirectedRequestId: 'r1',
+    request: { url: 'https://vault.sliccy.ai/landing?k=SECRET' },
+  });
+  await tick();
+  assert.deepEqual(api.detached, []);
+  assert.deepEqual(user(api).at(-1), {
+    tabId: 8,
+    method: 'Fetch.failRequest',
+    params: { requestId: 'r2', errorReason: 'BlockedByClient' },
+  });
+  assert.deepEqual(
+    events(connection, 'Fetch.requestPaused').map((e) => e.params.requestId),
+    ['r1']
+  );
+  assert.equal(JSON.stringify(connection.posted).includes('SECRET'), false);
+  cdp.close();
+});
+
+test('shield hides protected network events, holds ExtraInfo until classified, and drops child sessions', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  api.fire(8, 'Network.requestWillBeSentExtraInfo', {
+    requestId: 'n1',
+    associatedCookies: [{ cookie: { name: 'v', domain: 'vault.sliccy.ai' } }],
+  });
+  api.fire(8, 'Network.requestWillBeSentExtraInfo', { requestId: 'n2', headers: {} });
+  assert.equal(events(connection, 'Network.requestWillBeSentExtraInfo').length, 0);
+  api.fire(8, 'Network.requestWillBeSent', {
+    requestId: 'n1',
+    type: 'XHR',
+    request: { url: 'https://vault.sliccy.ai/x' },
+  });
+  api.fire(8, 'Network.responseReceived', {
+    requestId: 'n1',
+    response: { url: 'https://vault.sliccy.ai/x' },
+  });
+  api.fire(8, 'Network.loadingFinished', { requestId: 'n1' });
+  api.fire(8, 'Network.requestWillBeSent', {
+    requestId: 'n2',
+    type: 'XHR',
+    request: { url: 'https://other.test/y' },
+  });
+  api.fire(8, 'Network.requestWillBeSent', {
+    requestId: 'n3',
+    type: 'Script',
+    documentURL: 'https://other.test/',
+    initiator: { type: 'script', url: 'https://seven.sliccy.ai/x.js' },
+    request: { url: 'https://cdn.test/z.js' },
+  });
+  api.fire(8, 'Runtime.consoleAPICalled', { args: [{ value: 'https://vault.sliccy.ai/leak' }] });
+  api.child(8, 'child-1', 'Runtime.consoleAPICalled', { args: [] });
+  const ids = connection.posted
+    .filter((m) => m.method?.startsWith('Network.'))
+    .map((m) => [m.method, m.params.requestId]);
+  assert.deepEqual(ids, [
+    ['Network.requestWillBeSent', 'n2'],
+    ['Network.requestWillBeSentExtraInfo', 'n2'],
+  ]);
+  assert.equal(events(connection, 'Runtime.consoleAPICalled').length, 0);
+  const body = await command(cdp, connection, {
+    id: 2,
+    method: 'Network.getResponseBody',
+    params: { requestId: 'n1' },
+    sessionId: '8',
+  });
+  assert.equal(body.error, refused);
+  const initiated = await command(cdp, connection, {
+    id: 3,
+    method: 'Network.getResponseBody',
+    params: { requestId: 'n3' },
+    sessionId: '8',
+  });
+  assert.equal(initiated.error, refused);
+  const allowed = await command(cdp, connection, {
+    id: 4,
+    method: 'Network.getResponseBody',
+    params: { requestId: 'n2' },
+    sessionId: '8',
+  });
+  assert.equal(allowed.error, undefined);
+  cdp.close();
 });

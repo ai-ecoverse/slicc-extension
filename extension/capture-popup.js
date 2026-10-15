@@ -82,7 +82,9 @@ function succeed(bytes, mimeType, width, height, durationMs) {
 }
 __name2(succeed, "succeed");
 __name(succeed, "succeed");
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+  if (!sender.url || !sender.url.startsWith("chrome-extension://" + chrome.runtime.id)) return false;
   if (msg && msg.target === "capture-popup" && msg.type === "capture-abort" && (!request || msg.requestId === request.requestId)) {
     window.close();
   }

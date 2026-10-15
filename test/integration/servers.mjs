@@ -42,11 +42,56 @@ function listen(tls, handler) {
   });
 }
 
+const onePixel = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==',
+  'base64'
+);
+
 export async function pages(tls) {
   const html = await readFile(new URL('page/index.html', import.meta.url));
   const probe = await readFile(new URL('page/probe.html', import.meta.url));
   return listen(tls, (request, response) => {
-    const { pathname } = new URL(request.url, 'https://vault.sliccy.ai');
+    const { pathname, searchParams } = new URL(request.url, 'https://vault.sliccy.ai');
+    if (pathname === '/redirect') {
+      return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();
+    }
+    if (pathname === '/frame') {
+      const src = JSON.stringify(searchParams.get('src') ?? '/');
+      const page = `<!doctype html><title>frame</title><iframe src=${src}></iframe>`;
+      return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(page);
+    }
+    const cors = {
+      'access-control-allow-origin': request.headers.origin ?? '*',
+      'access-control-allow-credentials': 'true',
+    };
+    if (pathname === '/data') {
+      return response
+        .writeHead(200, { 'content-type': 'text/plain', ...cors })
+        .end(`real-${searchParams.get('n') ?? ''}`);
+    }
+    if (pathname === '/img') {
+      return response.writeHead(200, { 'content-type': 'image/png', ...cors }).end(onePixel);
+    }
+    if (pathname === '/auth') {
+      if (request.headers.authorization === `Basic ${btoa('u:p')}`) {
+        return response.writeHead(200, { 'content-type': 'text/plain', ...cors }).end('authed');
+      }
+      return response
+        .writeHead(401, {
+          'www-authenticate': 'Basic realm="slicc"',
+          'content-type': 'text/plain',
+          ...cors,
+        })
+        .end('denied');
+    }
+    if (pathname === '/cookie') {
+      return response
+        .writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'set-cookie': `${searchParams.get('name') ?? 'jar'}=secret; Secure; SameSite=None; Path=/`,
+        })
+        .end(html);
+    }
     const body = pathname === '/probe' ? probe : html;
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
   });
@@ -109,9 +154,9 @@ export async function upstream(tls) {
     '/stream': (response) => stream(response, progress),
   };
   const server = await listen(tls, async (request, response) => {
-    const { pathname } = new URL(request.url, 'https://upstream.test');
+    const { pathname, search } = new URL(request.url, 'https://upstream.test');
     const body = await collect(request);
-    seen.push({ method: request.method, path: pathname, headers: request.headers });
+    seen.push({ method: request.method, path: pathname, search, headers: request.headers });
     if (request.method === 'OPTIONS') {
       return response.writeHead(pathname.startsWith('/strict/') ? 405 : 204).end();
     }

@@ -15,9 +15,11 @@ export async function launch() {
     `MAP vault.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP vault-preview.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP vault-x.sliccy.ai 127.0.0.1:${site.port}`,
+    `MAP vault-feature-x.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP get.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP www.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP other.test 127.0.0.1:${site.port}`,
+    `MAP ordinary.test 127.0.0.1:${site.port}`,
     `MAP upstream.test 127.0.0.1:${remote.port}`,
     `MAP ims-na1.adobelogin.com 127.0.0.1:${adobe.port}`,
   ].join(', ');
