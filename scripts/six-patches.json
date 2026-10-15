@@ -193,5 +193,41 @@
     "sentinel": "listSecretsIncludingUnreadable",
     "label": "subtitle says encrypted at rest",
     "match": 1
+  },
+  {
+    "id": "UX-unreadable-copy",
+    "pr": "secrets-page-polish",
+    "upstream": "slicc PR pending from thr_9qs2k3us5v",
+    "file": "secrets.js",
+    "sentinel": "This value can't be read any more. Enter it again.",
+    "label": "unreadable row copy: This value can't be read any more. Enter it again.",
+    "match": 1
+  },
+  {
+    "id": "UX-reenter-button",
+    "pr": "secrets-page-polish",
+    "upstream": "slicc PR pending from thr_9qs2k3us5v",
+    "file": "secrets.js",
+    "sentinel": "This value can't be read any more. Enter it again.",
+    "label": "Re-enter button opens Custom secret with name and domains prefilled",
+    "match": 1
+  },
+  {
+    "id": "UX-unreadable-layout",
+    "pr": "secrets-page-polish",
+    "upstream": "slicc PR pending from thr_9qs2k3us5v",
+    "file": "secrets.html",
+    "sentinel": "grid-template-columns: 1fr auto auto auto",
+    "label": "unreadable row matches normal rows and fits a fourth button",
+    "match": 1
+  },
+  {
+    "id": "UX-narrow-labels",
+    "pr": "secrets-page-polish",
+    "upstream": "slicc PR pending from thr_9qs2k3us5v",
+    "file": "secrets.html",
+    "sentinel": "grid-template-columns: 1fr auto auto auto",
+    "label": "below 600px: labels above inputs, unreadable row buttons wrap under the name",
+    "match": 1
   }
 ]

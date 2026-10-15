@@ -246,6 +246,19 @@ test('the secrets page saves through encrypted storage and marks unreadable entr
     { name: broken, unreadable: true },
     'the broken ciphertext is listed as unreadable'
   );
+  const reenter = await extEval(
+    page,
+    sessionId,
+    `(() => { const row = document.querySelector('.secret-row[data-name=${JSON.stringify(broken)}]'); const text = row.querySelector('.secret-unreadable').textContent; const button = [...row.querySelectorAll('button')].find((b) => b.textContent === 'Re-enter'); button.click(); return { text, name: document.getElementById('c-name').value, domains: document.getElementById('c-domains').value, value: document.getElementById('c-value').value, pane: document.querySelector('.pane.active')?.id, focused: document.activeElement?.id }; })()`
+  );
+  assert.deepEqual(reenter.result.value, {
+    text: "This value can't be read any more. Enter it again.",
+    name: broken,
+    domains: 'upstream.test',
+    value: '',
+    pane: 'pane-custom',
+    focused: 'c-value',
+  });
   const masked = await extEval(
     page,
     sessionId,

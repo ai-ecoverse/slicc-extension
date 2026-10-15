@@ -330,6 +330,50 @@ if (pr3980htmlNeeded) {
   skip(3980, 'secrets.html');
 }
 
+const polishPageNeeded = !secretsJs.includes("This value can't be read any more. Enter it again.");
+const polishHtmlNeeded = !secretsHtml.includes('grid-template-columns: 1fr auto auto auto');
+
+if (polishPageNeeded) {
+  applyPage(
+    'UX-unreadable-copy',
+    /text: "[^"]*Unreadable[^"]*encryption key lost[^"]*"/,
+    'text: "This value can\'t be read any more. Enter it again."'
+  );
+
+  applyPage(
+    'UX-reenter-button',
+    /( {2}function createSecretRow\(entry\) \{[\s\S]*?)createCopyNameButton\(entry\), createDeleteSecretButton\(entry\)\);/,
+    `  function createReenterButton(entry) {
+    return el("button", { class: "btn-secondary btn", text: "Re-enter", "style:font-size": "11px", "style:padding": "4px 8px", on: { click: () => {
+      document.querySelector('.tab[data-pane="custom"]')?.click();
+      $("c-name").value = entry.name;
+      $("c-domains").value = entry.domains.join(", ");
+      $("c-value").value = "";
+      $("c-value").focus();
+    } } });
+  }
+$1...(entry.unreadable ? [createReenterButton(entry)] : []), createCopyNameButton(entry), createDeleteSecretButton(entry));`
+  );
+} else {
+  skip('secrets-page-polish', 'secrets.js');
+}
+
+if (polishHtmlNeeded) {
+  applyHtml(
+    'UX-unreadable-layout',
+    /(\n {4}\.empty \{)/,
+    '\n    .secret-row-unreadable {\n      grid-template-columns: 1fr auto auto auto;\n      background: linear-gradient(rgba(204, 68, 68, 0.05), rgba(204, 68, 68, 0.05)), var(--code-bg);\n    }\n$1'
+  );
+
+  applyHtml(
+    'UX-narrow-labels',
+    /(\n {4}<\/style>)/,
+    '\n    @media (max-width: 600px) {\n      .form-grid {\n        grid-template-columns: 1fr;\n        gap: 4px;\n      }\n      .form-grid label {\n        margin-top: 8px;\n      }\n      .form-grid .span2 {\n        grid-column: 1;\n      }\n      .secret-row-unreadable {\n        display: flex;\n        flex-wrap: wrap;\n        justify-content: flex-end;\n      }\n      .secret-row-unreadable .secret-meta {\n        flex-basis: 100%;\n      }\n    }$1'
+  );
+} else {
+  skip('secrets-page-polish', 'secrets.html');
+}
+
 writeFileSync(sixSwPath, content);
 writeFileSync(secretsPath, secretsJs);
 writeFileSync(secretsHtmlPath, secretsHtml);
