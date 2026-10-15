@@ -74,16 +74,51 @@ jobs:
 
       - run: npm ci
 
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/six
+          key: six-${{ hashFiles('.six-tag') }}
+
       - run: npm run build
+        env:
+          SIX_CACHE_DIR: ${{ runner.temp }}/six
 
       - run: npm run lint
 
-      - name: Chromium system dependencies
+      - name: Chromium version and root
+        id: chromium
         run: |
+          echo "playwright=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
           if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; then
-            npx playwright-core install-deps chromium
+            echo "root=true" >> "$GITHUB_OUTPUT"
           else
             echo "::notice title=Chromium system dependencies::No root on $RUNNER_NAME, so install-deps is skipped and the runner image's system libraries serve Chromium."
+          fi
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.chromium.outputs.playwright }}
+
+      - id: apt
+        if: steps.chromium.outputs.root == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/apt
+          key: apt-${{ env.ImageOS }}-${{ env.ImageVersion }}-playwright-${{ steps.chromium.outputs.playwright }}
+
+      - name: Chromium system dependencies
+        if: steps.chromium.outputs.root == 'true'
+        env:
+          DEBS: ${{ runner.temp }}/apt
+        run: |
+          if ls "$DEBS"/*.deb >/dev/null 2>&1; then
+            sudo dpkg -i "$DEBS"/*.deb
+          else
+            sudo rm -f /var/cache/apt/archives/*.deb
+            npx playwright-core install-deps chromium
+            mkdir -p "$DEBS"
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp {} "$DEBS"/ \;
           fi
 
       - name: Integration tests with coverage, CPU profiles, and screenshots
