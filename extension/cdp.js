@@ -11,6 +11,7 @@ if (typeof URL.canParse !== 'function') {
 
 import { protectedOrigins } from './protected.mjs';
 import { protectedRules } from './protected-rules.js';
+import { seven } from './seven.js';
 import {
   bodyMethod,
   COOKIES,
@@ -137,12 +138,13 @@ async function tabBlocked(api, tab) {
 }
 
 const _sixHosts = ['www.sliccy.ai'];
-const _exL = ['www', 'vault', 'vault-preview', 'get', 'mcpcat'];
-const _exP = ['vault-'];
+const _exL = seven.excludedLabels;
+const _exP = seven.excludedLabelPrefixes;
+const _d = `.${seven.domain}`;
 
 function allowedHost(hostname) {
-  if (!hostname.endsWith('.sliccy.ai') || hostname === 'sliccy.ai') return false;
-  const label = hostname.slice(0, -'.sliccy.ai'.length);
+  if (!hostname.endsWith(_d)) return false;
+  const label = hostname.slice(0, -_d.length);
   if (!label) return false;
   if (_sixHosts.includes(hostname)) return true;
   if (_exL.includes(label) || _exP.some((p) => label.startsWith(p))) return false;

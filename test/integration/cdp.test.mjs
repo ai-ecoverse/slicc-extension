@@ -229,6 +229,7 @@ test('an untrusted sender is disconnected before a CDP command can run', () => {
     ['slicc-fetch', 'https://vault-x.sliccy.ai/', extensionId],
     ['slicc-fetch', 'https://get.sliccy.ai/', extensionId],
     ['slicc-fetch', 'https://mcpcat.sliccy.ai/', extensionId],
+    ['slicc-fetch', 'https://echo.sliccy.ai/', extensionId],
     ['slicc-fetch', 'https://sliccy.ai/', extensionId],
   ];
   for (const [name, url, id] of rejected) {
@@ -416,6 +417,7 @@ test('open, attach and navigate refuse seven and the vault', async () => {
   const blocked = [
     'https://seven.sliccy.ai/',
     'https://vault.sliccy.ai/oauth/callback',
+    'https://echo.sliccy.ai/',
     'http://a.b.sliccy.ai:8443/x',
     'devtools://devtools/bundled/inspector.html',
     'blob:https://vault.sliccy.ai/abc',
@@ -456,6 +458,14 @@ test('open, attach and navigate refuse seven and the vault', async () => {
     params: { targetId: '11', flatten: true },
   });
   assert.deepEqual(session.result, { sessionId: '11' });
+  api.locations = new Map([[11, 'https://echo.sliccy.ai/']]);
+  const echoed = await command(cdp, connection, {
+    id: 46,
+    method: 'Runtime.evaluate',
+    params: { expression: '1' },
+    sessionId: '11',
+  });
+  assert.equal(echoed.error, refused);
   api.locations = new Map([[11, 'https://vault.sliccy.ai/']]);
   const later = await command(cdp, connection, {
     id: 43,
