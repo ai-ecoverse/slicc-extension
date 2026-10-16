@@ -27,6 +27,12 @@ if (typeof Uint8Array.fromBase64 !== 'function') {
 import { listen, trusted } from './cdp.js';
 import './six-sw.js';
 
+try {
+  chrome.storage?.local
+    ?.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' })
+    ?.catch?.(() => undefined);
+} catch {}
+
 const dnr = chrome.declarativeNetRequest;
 const restored = new Set(['cookie', 'origin', 'referer', 'user-agent']);
 const ready = dnr

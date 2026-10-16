@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
 import { launch } from './chrome.mjs';
+import { install } from './client.mjs';
 
 let chrome;
 before(async () => {
@@ -71,7 +72,7 @@ function extClose(page, targetId) {
 
 async function relayWorld(page) {
   const probe =
-    'typeof serve === "function" && typeof chrome?.storage?.local?.get === "function" && location.hostname === "seven.sliccy.ai" ? chrome.runtime.id : null';
+    'typeof serve === "function" && typeof chrome?.runtime?.id === "string" && location.hostname === "seven.sliccy.ai" ? chrome.runtime.id : null';
   for (let round = 0; round < 20; round++) {
     for (let contextId = 1; contextId <= 400; contextId++) {
       const answer = await page
@@ -84,6 +85,63 @@ async function relayWorld(page) {
   throw new Error('relay.js isolated world not found');
 }
 
+const IDB = `(fn) => new Promise((resolve, reject) => { const r = indexedDB.open('slicc-secrets', 2); r.onupgradeneeded = () => { for (const n of ['keys', 'records']) if (!r.result.objectStoreNames.contains(n)) r.result.createObjectStore(n); }; r.onerror = () => reject(r.error); r.onsuccess = () => { const db = r.result; const tx = db.transaction(['keys', 'records'], 'readwrite'); let out; Promise.resolve(fn(tx, (v) => { out = v; })).catch(reject); tx.oncomplete = () => { db.close(); resolve(out); }; tx.onerror = () => reject(tx.error); }; })`;
+
+async function assertRelayCannotReadSecrets(page, sid, control, needles) {
+  const world = await relayWorld(page);
+  const dump = await page.send('Runtime.evaluate', {
+    expression:
+      'chrome.storage.local.get(null).then((items) => ({ items: JSON.stringify(items) }), (e) => ({ error: String(e?.message ?? e) }))',
+    awaitPromise: true,
+    returnByValue: true,
+    contextId: world,
+  });
+  const answer = dump.result.value;
+  if (answer.error !== undefined) {
+    assert.match(
+      answer.error,
+      /Access to storage is not allowed/,
+      'setAccessLevel blocks relay.js'
+    );
+    const trusted = await extEval(
+      page,
+      sid,
+      `chrome.storage.local.get(${JSON.stringify(control.key)})`
+    );
+    assert.equal(
+      trusted.result.value[control.key],
+      control.value,
+      'control: the secrets page still reads a non-secret setting'
+    );
+    const all = await extEval(page, sid, 'chrome.storage.local.get(null)');
+    assertNoSecretRecords(all.result.value, needles);
+    return 'restricted';
+  }
+  const items = JSON.parse(answer.items);
+  assert.equal(items[control.key], control.value, 'control: relay.js reads a non-secret setting');
+  assertNoSecretRecords(items, needles);
+  return 'readable';
+}
+
+function assertNoSecretRecords(items, needles) {
+  const text = JSON.stringify(items);
+  for (const needle of needles) {
+    assert.equal(text.includes(needle), false, `chrome.storage.local still shows ${needle}`);
+  }
+  for (const [key, value] of Object.entries(items)) {
+    assert.equal(
+      key.endsWith('_DOMAINS'),
+      false,
+      `a secret's domains are still in storage.local: ${key}`
+    );
+    assert.equal(
+      typeof value === 'object' && value !== null && 'ct' in value && 'iv' in value,
+      false,
+      `ciphertext is still in storage.local: ${key}`
+    );
+  }
+}
+
 function secretsCall(page, sid, message) {
   return extEval(
     page,
@@ -92,7 +150,7 @@ function secretsCall(page, sid, message) {
   ).then((r) => r.result.value);
 }
 
-test('plaintext canary: migration encrypts 6.248.11 plaintext, relay.js world sees no canary, secrets.list lists it, fetch proxy delivers it upstream (B-SEC2)', async (t) => {
+test('B-SEC2 plaintext canary: migration encrypts 6.248.11 plaintext, relay.js world sees no canary, secrets.list lists it, fetch proxy delivers it upstream', async (t) => {
   const page = await chrome.visit(t, slicc);
   const canaryName = `B8_CANARY_${Date.now()}`;
   const canaryPlaintext = 'super-secret-canary-value-12345';
@@ -102,35 +160,20 @@ test('plaintext canary: migration encrypts 6.248.11 plaintext, relay.js world se
   const planted = await extEval(
     page,
     secSid,
-    `new Promise((resolve, reject) => { chrome.storage.local.set({ ${JSON.stringify(canaryName)}: ${JSON.stringify(canaryPlaintext)}, ${JSON.stringify(`${canaryName}_DOMAINS`)}: "upstream.test" }, () => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : chrome.storage.local.get(${JSON.stringify(canaryName)}, (r) => resolve(r[${JSON.stringify(canaryName)}]))); })`
+    `new Promise((resolve, reject) => { chrome.storage.local.set({ B8_CONTROL_SETTING: "visible", ${JSON.stringify(canaryName)}: ${JSON.stringify(canaryPlaintext)}, ${JSON.stringify(`${canaryName}_DOMAINS`)}: "upstream.test" }, () => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : chrome.storage.local.get(${JSON.stringify(canaryName)}, (r) => resolve(r[${JSON.stringify(canaryName)}]))); })`
   );
   assert.equal(planted.result.value, canaryPlaintext, 'canary must be planted as plaintext');
 
   const triggered = await secretsCall(page, secSid, { type: 'secrets.list' });
   assert.ok(Array.isArray(triggered?.entries), 'secrets.list must answer');
 
-  const world = await relayWorld(page);
-  const dump = await page.send('Runtime.evaluate', {
-    expression:
-      'new Promise((resolve) => chrome.storage.local.get(null, (items) => resolve(JSON.stringify(items))))',
-    awaitPromise: true,
-    returnByValue: true,
-    contextId: world,
-  });
-  assert.equal(dump.exceptionDetails, undefined, 'relay.js world must read chrome.storage.local');
-  const items = JSON.parse(dump.result.value);
-  const stored = items[canaryName];
-  assert.ok(
-    stored && typeof stored.ct === 'string' && typeof stored.iv === 'string',
-    `canary must be stored as {ct, iv}: got ${JSON.stringify(stored)}`
+  const mode = await assertRelayCannotReadSecrets(
+    page,
+    secSid,
+    { key: 'B8_CONTROL_SETTING', value: 'visible' },
+    [canaryName, canaryPlaintext, 'upstream.test']
   );
-  for (const [key, value] of Object.entries(items)) {
-    assert.equal(
-      JSON.stringify(value).includes(canaryPlaintext),
-      false,
-      `relay.js world sees the canary in ${key}`
-    );
-  }
+  t.diagnostic(`relay.js storage.local: ${mode}`);
 
   const listed = await secretsCall(page, secSid, { type: 'secrets.list' });
   assert.ok(
@@ -191,12 +234,12 @@ test('plaintext canary: migration encrypts 6.248.11 plaintext, relay.js world se
   await extEval(
     page,
     secSid,
-    `new Promise((resolve) => { chrome.storage.local.remove([${JSON.stringify(canaryName)}, ${JSON.stringify(`${canaryName}_DOMAINS`)}], resolve); })`
+    `new Promise((resolve) => chrome.runtime.sendMessage({ type: 'secrets.delete', name: ${JSON.stringify(canaryName)} }, () => chrome.storage.local.remove('B8_CONTROL_SETTING', resolve)))`
   );
   await extClose(page, secTid);
 });
 
-test('the secrets page saves through encrypted storage and marks unreadable entries (B-SEC2)', async (t) => {
+test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable entries and offers Re-enter', async (t) => {
   const page = await chrome.visit(t, slicc);
   const name = `B8_PAGE_${Date.now()}`;
   const broken = `${name}_BROKEN`;
@@ -213,7 +256,7 @@ test('the secrets page saves through encrypted storage and marks unreadable entr
   await extEval(
     page,
     sessionId,
-    `new Promise((resolve) => chrome.storage.local.set({ ${JSON.stringify(broken)}: { ct: "AAAA", iv: "AAAAAAAAAAAAAAAA" }, ${JSON.stringify(`${broken}_DOMAINS`)}: "upstream.test" }, resolve))`
+    `(${IDB})((tx) => { tx.objectStore('records').put({ name: ${JSON.stringify(broken)}, value: { ct: 'AAAA', iv: 'AAAAAAAAAAAAAAAA' }, domains: 'upstream.test' }, ${JSON.stringify(broken)}); })`
   );
   await extEval(
     page,
@@ -223,13 +266,15 @@ test('the secrets page saves through encrypted storage and marks unreadable entr
   const stored = await extEval(
     page,
     sessionId,
-    `new Promise((resolve) => { const started = Date.now(); const poll = () => chrome.storage.local.get(${JSON.stringify(name)}, (r) => { const v = r[${JSON.stringify(name)}]; if (v !== undefined || Date.now() - started > 10000) resolve(v ?? null); else setTimeout(poll, 100); }); poll(); })`
+    `(async () => { const started = Date.now(); for (;;) { const rec = await (${IDB})((tx, done) => { const g = tx.objectStore('records').get(${JSON.stringify(name)}); g.onsuccess = () => done(g.result ?? null); }); if (rec || Date.now() - started > 10000) return { rec, local: await chrome.storage.local.get(null) }; await new Promise((r) => setTimeout(r, 100)); } })()`
   );
+  const record = stored.result.value.rec;
   assert.ok(
-    stored.result.value && typeof stored.result.value.ct === 'string',
-    `the page must store {ct, iv}: got ${JSON.stringify(stored.result.value)}`
+    record && typeof record.value?.ct === 'string' && record.domains === 'upstream.test',
+    `the page must store an encrypted record in IndexedDB: got ${JSON.stringify(record)}`
   );
-  assert.equal(JSON.stringify(stored.result.value).includes(value), false);
+  assert.equal(JSON.stringify(record).includes(value), false);
+  assertNoSecretRecords(stored.result.value.local, [name, value]);
   const rows = await extEval(
     page,
     sessionId,
@@ -246,6 +291,19 @@ test('the secrets page saves through encrypted storage and marks unreadable entr
     { name: broken, unreadable: true },
     'the broken ciphertext is listed as unreadable'
   );
+  const reenter = await extEval(
+    page,
+    sessionId,
+    `(() => { const row = document.querySelector('.secret-row[data-name=${JSON.stringify(broken)}]'); const text = row.querySelector('.secret-unreadable').textContent; const button = [...row.querySelectorAll('button')].find((b) => b.textContent === 'Re-enter'); button.click(); return { text, name: document.getElementById('c-name').value, domains: document.getElementById('c-domains').value, value: document.getElementById('c-value').value, pane: document.querySelector('.pane.active')?.id, focused: document.activeElement?.id }; })()`
+  );
+  assert.deepEqual(reenter.result.value, {
+    text: "This value can't be read any more. Enter it again.",
+    name: broken,
+    domains: 'upstream.test',
+    value: '',
+    pane: 'pane-custom',
+    focused: 'c-value',
+  });
   const masked = await extEval(
     page,
     sessionId,
@@ -258,12 +316,12 @@ test('the secrets page saves through encrypted storage and marks unreadable entr
   await extEval(
     page,
     sessionId,
-    `new Promise((resolve) => chrome.storage.local.remove([${JSON.stringify(name)}, ${JSON.stringify(`${name}_DOMAINS`)}, ${JSON.stringify(broken)}, ${JSON.stringify(`${broken}_DOMAINS`)}], resolve))`
+    `new Promise((resolve) => chrome.runtime.sendMessage({ type: 'secrets.delete', name: ${JSON.stringify(name)} }, resolve)).then(() => (${IDB})((tx) => { tx.objectStore('records').delete(${JSON.stringify(broken)}); }))`
   );
   await extClose(page, targetId);
 });
 
-test('content-script senders are refused by six handlers; secrets.html senders succeed (B-SEC1)', async (t) => {
+test('B-SEC1 content-script senders are refused by six handlers; secrets.html senders succeed', async (t) => {
   const page = await chrome.visit(t, slicc);
 
   const contentResults = await page.evaluate(async () => {
@@ -320,7 +378,7 @@ test('content-script senders are refused by six handlers; secrets.html senders s
   await extClose(page, targetId);
 });
 
-test('a navigation to the vault fails before it commits and the session stays (integration)', async (t) => {
+test('B24-1 seven: a navigation to the vault fails before it commits and the session stays', async (t) => {
   const page = await chrome.visit(t, slicc);
   const answer = await page.evaluate(async () => {
     const created = await globalThis.sliccExtension.cdp.send('Target.createTarget', {
@@ -368,7 +426,7 @@ test('a navigation to the vault fails before it commits and the session stays (i
   );
 });
 
-test('six bridge navigation to vault triggers detach (B24-1-tabs-onupdated)', async (t) => {
+test('B24-1 six bridge: a navigation to the vault fails before it commits and the session stays', async (t) => {
   const www = await chrome.visit(t, 'https://www.sliccy.ai/?slicc=leader');
   const answer = await www.evaluate(async (eid) => {
     const port = chrome.runtime.connect(eid, { name: 'slicc.cdp-bridge' });
@@ -458,28 +516,21 @@ test('six bridge navigation to vault triggers detach (B24-1-tabs-onupdated)', as
       sessionId,
     }).catch(() => undefined);
 
-    let detached = false;
-    for (let i = 0; i < 80; i++) {
-      if (events.some((e) => e.method === 'Target.detachedFromTarget')) {
-        detached = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-
+    await new Promise((r) => setTimeout(r, 2500));
+    const detached = events.some((e) => e.method === 'Target.detachedFromTarget');
     const after = await send('Runtime.evaluate', {
-      expression: '1',
+      expression: 'location.href',
       returnByValue: true,
       sessionId,
     });
-    const refused = !!after.error;
-
+    const href = after.result?.result?.value ?? `error ${after.error}`;
     port.disconnect();
-    return { detached, refused };
+    return { detached, href };
   }, extId);
   assert.ok(!answer.error, `bridge test failed: ${JSON.stringify(answer)}`);
-  assert.equal(answer.detached, true, 'bridge must receive Target.detachedFromTarget');
-  assert.equal(answer.refused, true, 'evaluate after detach must be refused');
+  assert.equal(answer.detached, false, 'the session stays');
+  assert.equal(answer.href.startsWith('error'), false, `the session answers: ${answer.href}`);
+  assert.equal(answer.href.startsWith('https://vault.sliccy.ai'), false, 'the vault never commits');
 });
 
 test('webNavigation adds no permission warning over 6.248.11, so an in-place update stays enabled', async (t) => {
@@ -516,4 +567,310 @@ test('webNavigation adds no permission warning over 6.248.11, so an in-place upd
   assert.ok(before.length > 0, `6.248.11 has warnings: ${JSON.stringify(before)}`);
   assert.deepEqual([...after].sort(), [...before].sort(), 'the warning set is unchanged');
   await extClose(page, targetId);
+});
+
+test('B24-3 the legacy offscreen cdp-command path is gone: no answer, nothing attaches; a trusted internal message still works', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const created = await page.evaluate(async () =>
+    globalThis.sliccExtension.cdp.send('Target.createTarget', { url: 'https://other.test/' })
+  );
+  const { targetId } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const sid = await extSession(page, targetId);
+  const answer = await extEval(
+    page,
+    sid,
+    `(async () => {
+      const relayed = [];
+      chrome.runtime.onMessage.addListener((m) => { if (m?.source === 'service-worker') relayed.push(m.payload?.type); });
+      const send = (msg) => new Promise((resolve) => chrome.runtime.sendMessage(msg, (r) => resolve({ response: r ?? null, error: chrome.runtime.lastError?.message ?? null })));
+      const control = await send({ type: 'secrets.list' });
+      const legacy = [];
+      for (const [method, params] of [['Target.getTargets', {}], ['Target.attachToTarget', { targetId: ${JSON.stringify(created.targetId)}, flatten: true }], ['Runtime.evaluate', { expression: '1+1' }]]) {
+        legacy.push(await send({ source: 'offscreen', payload: { type: 'cdp-command', id: method, method, params, sessionId: ${JSON.stringify(created.targetId)} } }));
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+      return { control: Array.isArray(control.response?.entries), legacy, relayed };
+    })()`
+  );
+  const result = answer.result.value;
+  assert.equal(result.control, true, 'secrets.list from secrets.html answers');
+  for (const legacy of result.legacy) {
+    assert.equal(
+      legacy.response,
+      null,
+      `legacy cdp-command must get no answer: ${JSON.stringify(legacy)}`
+    );
+  }
+  assert.deepEqual(result.relayed, [], 'no cdp-response is broadcast');
+  const attach = await page.evaluate(
+    async (tid) =>
+      globalThis.sliccExtension.cdp
+        .send('Target.attachToTarget', { targetId: tid, flatten: true })
+        .then(
+          (r) => r.sessionId,
+          (e) => `error ${e.message}`
+        ),
+    created.targetId
+  );
+  assert.equal(attach, created.targetId, 'the tab was never attached by the legacy path');
+  await extClose(page, created.targetId);
+  await extClose(page, targetId);
+});
+
+test('B-SEC2 in-place migration moves 6.248.11 plaintext and {ct, iv} records into IndexedDB, crash-safely, and relay.js can read none of them', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const stamp = Date.now();
+  const plain = {
+    name: `B8_MIG_PLAIN_${stamp}`,
+    value: 'migrate-plain-value-111',
+    domains: 'plain.example',
+  };
+  const sealed = {
+    name: `B8_MIG_SEALED_${stamp}`,
+    value: 'migrate-sealed-value-222',
+    domains: 'sealed.example',
+  };
+  const first = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const firstSid = await extSession(page, first.targetId);
+  await secretsCall(page, firstSid, {
+    type: 'secrets.set',
+    name: `B8_MIG_WARM_${stamp}`,
+    value: 'warm-up-value-333',
+    domains: ['warm.example'],
+  });
+  const planted = await extEval(
+    page,
+    firstSid,
+    `(async () => {
+      const key = await (${IDB})((tx, done) => { const g = tx.objectStore('keys').get('aes-gcm-secrets'); g.onsuccess = () => done(g.result); });
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(${JSON.stringify(sealed.value)})));
+      const b64 = (bytes) => btoa(String.fromCharCode(...bytes));
+      await chrome.storage.local.set({
+        B8_MIG_SETTING: 'still-here',
+        ${JSON.stringify(plain.name)}: ${JSON.stringify(plain.value)},
+        ${JSON.stringify(`${plain.name}_DOMAINS`)}: ${JSON.stringify(plain.domains)},
+        ${JSON.stringify(sealed.name)}: { ct: b64(ct), iv: b64(iv) },
+        ${JSON.stringify(`${sealed.name}_DOMAINS`)}: ${JSON.stringify(sealed.domains)},
+      });
+      return Object.keys(await chrome.storage.local.get(null));
+    })()`
+  );
+  assert.ok(planted.result.value.includes(sealed.name), 'both formats planted');
+  const second = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const secondSid = await extSession(page, second.targetId);
+  const migrated = await extEval(
+    page,
+    secondSid,
+    `(async () => { const started = Date.now(); for (;;) { const local = await chrome.storage.local.get(null); if (!(${JSON.stringify(plain.name)} in local) && !(${JSON.stringify(sealed.name)} in local)) return local; if (Date.now() - started > 15000) return local; await new Promise((r) => setTimeout(r, 100)); } })()`
+  );
+  assertNoSecretRecords(migrated.result.value, [
+    plain.name,
+    sealed.name,
+    plain.value,
+    sealed.value,
+  ]);
+  assert.equal(migrated.result.value.B8_MIG_SETTING, 'still-here', 'non-secret settings stay put');
+  const values = async (sid) =>
+    (await secretsCall(page, sid, { type: 'secrets.list-with-values-for-pipeline' })).entries;
+  const after = await values(secondSid);
+  for (const want of [plain, sealed]) {
+    const got = after.find((e) => e.name === want.name);
+    assert.equal(got?.value, want.value, `${want.name} keeps its value`);
+    assert.deepEqual(got?.domains, [want.domains], `${want.name} keeps its domains`);
+  }
+  await extEval(
+    page,
+    secondSid,
+    `chrome.storage.local.set({ ${JSON.stringify(plain.name)}: 'stale-after-crash', ${JSON.stringify(`${plain.name}_DOMAINS`)}: 'stale.example' })`
+  );
+  const third = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const thirdSid = await extSession(page, third.targetId);
+  const retried = await extEval(
+    page,
+    thirdSid,
+    `(async () => { const started = Date.now(); for (;;) { const local = await chrome.storage.local.get(null); if (!(${JSON.stringify(plain.name)} in local) || Date.now() - started > 15000) return local; await new Promise((r) => setTimeout(r, 100)); } })()`
+  );
+  assertNoSecretRecords(retried.result.value, [plain.name, 'stale-after-crash']);
+  const kept = (await values(thirdSid)).find((e) => e.name === plain.name);
+  assert.equal(kept?.value, plain.value, 'a rerun after a crash keeps the IndexedDB record');
+  const mode = await assertRelayCannotReadSecrets(
+    page,
+    thirdSid,
+    { key: 'B8_MIG_SETTING', value: 'still-here' },
+    [plain.name, sealed.name, plain.value, sealed.value, plain.domains]
+  );
+  t.diagnostic(`relay.js storage.local: ${mode}`);
+  for (const name of [plain.name, sealed.name, `B8_MIG_WARM_${stamp}`]) {
+    await secretsCall(page, thirdSid, { type: 'secrets.delete', name });
+  }
+  await extEval(page, thirdSid, `chrome.storage.local.remove('B8_MIG_SETTING')`);
+  for (const tab of [first, second, third]) await extClose(page, tab.targetId);
+});
+
+test('B-SEC2 secrets.delete removes an unreadable record by name; a readable record is deleted too (control)', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const stamp = Date.now();
+  const readable = `B8_DEL_OK_${stamp}`;
+  const broken = `B8_DEL_BROKEN_${stamp}`;
+  const { targetId } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
+  const sid = await extSession(page, targetId);
+  const set = await secretsCall(page, sid, {
+    type: 'secrets.set',
+    name: readable,
+    value: 'delete-me-readable-444',
+    domains: ['del.example'],
+  });
+  assert.ok(set?.ok !== false, `secrets.set: ${JSON.stringify(set)}`);
+  await extEval(
+    page,
+    sid,
+    `(${IDB})((tx) => { tx.objectStore('records').put({ name: ${JSON.stringify(broken)}, value: { ct: 'AAAA', iv: 'AAAAAAAAAAAAAAAA' }, domains: 'del.example' }, ${JSON.stringify(broken)}); })`
+  );
+  const record = (name) =>
+    extEval(
+      page,
+      sid,
+      `(${IDB})((tx, done) => { const g = tx.objectStore('records').get(${JSON.stringify(name)}); g.onsuccess = () => done(g.result ?? null); })`
+    ).then((r) => r.result.value);
+  assert.ok(await record(readable), 'the readable record exists');
+  assert.ok(await record(broken), 'the unreadable record exists');
+  const control = await secretsCall(page, sid, { type: 'secrets.delete', name: readable });
+  assert.deepEqual(control, { ok: true, removed: true, fromSession: false });
+  assert.equal(await record(readable), null, 'control: the readable record is gone');
+  const answer = await secretsCall(page, sid, { type: 'secrets.delete', name: broken });
+  assert.deepEqual(answer, { ok: true, removed: true, fromSession: false });
+  assert.equal(await record(broken), null, 'the unreadable record is gone');
+  const again = await secretsCall(page, sid, { type: 'secrets.delete', name: broken });
+  assert.deepEqual(again, { ok: true, removed: false });
+  await extClose(page, targetId);
+});
+
+test('B24-2 six bridge: blob:, filesystem: and view-source: over seven and the vault are refused; ordinary URLs work (control)', async (t) => {
+  const www = await chrome.visit(t, 'https://www.sliccy.ai/?slicc=leader');
+  await www.evaluate(install, 'six-bridge', extId);
+  const answer = await www.evaluate(async () => {
+    const created = await h.attempt('Target.createTarget', { url: 'https://other.test/b24-2' });
+    const targetId = created.result?.targetId;
+    const attached = targetId
+      ? await h.attempt('Target.attachToTarget', { targetId, flatten: true })
+      : { error: 'no target' };
+    const sessionId = attached.result?.sessionId;
+    const navControl = sessionId
+      ? await h.attempt('Page.navigate', { url: 'https://other.test/b24-2-next' }, sessionId)
+      : { error: 'no session' };
+    const wrapped = [
+      'blob:https://vault.sliccy.ai/0b9e',
+      'filesystem:https://vault.sliccy.ai/temporary/x',
+      'view-source:https://vault.sliccy.ai/',
+      'blob:https://seven.sliccy.ai/0b9e',
+      'view-source:https://seven.sliccy.ai/os/',
+      'https://vault.sliccy.ai/',
+      'https://seven.sliccy.ai/',
+    ];
+    const create = {};
+    const navigate = {};
+    for (const url of wrapped) {
+      create[url] = (await h.attempt('Target.createTarget', { url })).error ?? 'created';
+      navigate[url] = sessionId
+        ? ((await h.attempt('Page.navigate', { url }, sessionId)).error ?? 'navigated')
+        : 'no session';
+    }
+    const viewSource = await h.attempt('Target.createTarget', {
+      url: 'view-source:https://other.test/',
+    });
+    if (targetId) await h.attempt('Target.closeTarget', { targetId });
+    if (viewSource.result?.targetId) {
+      await h.attempt('Target.closeTarget', { targetId: viewSource.result.targetId });
+    }
+    return { created, attached, navControl, create, navigate, viewSource };
+  });
+  assert.match(answer.created.result?.targetId ?? '', /^\d+$/, 'control: an ordinary tab opens');
+  assert.ok(answer.attached.result?.sessionId, 'control: and attaches');
+  assert.equal(answer.navControl.error, undefined, 'control: an ordinary navigation works');
+  assert.doesNotMatch(
+    answer.viewSource.error ?? '',
+    /refused/,
+    'control: view-source of an ordinary origin is not refused'
+  );
+  for (const [url, error] of Object.entries(answer.create)) {
+    assert.match(error, /^slicc: refused: /, `createTarget ${url}`);
+  }
+  for (const [url, error] of Object.entries(answer.navigate)) {
+    assert.match(error, /^slicc: refused: /, `Page.navigate ${url}`);
+  }
+});
+
+test('B24-5 discovery and handoff probe and announce an ordinary origin (control) but never fetch from or announce a protected one', async (t) => {
+  const www = await chrome.visit(t, 'https://www.sliccy.ai/?slicc=leader');
+  await www.evaluate(async (id) => {
+    window.b8licks = [];
+    const port = chrome.runtime.connect(id, { name: 'slicc.cdp-bridge' });
+    const channelId = crypto.randomUUID();
+    port.onMessage.addListener((msg) => {
+      if (msg.kind === 'extension.lick' || msg.kind === 'extension.discovery') {
+        window.b8licks.push(msg);
+      }
+    });
+    await new Promise((resolve) => {
+      const wait = (msg) => {
+        if (msg.kind !== 'handshake.welcome') return;
+        port.onMessage.removeListener(wait);
+        resolve();
+      };
+      port.onMessage.addListener(wait);
+      port.postMessage({ bridge: 1, channelId, kind: 'handshake.hello' });
+    });
+  }, extId);
+  const stamp = Date.now();
+  const licks = () => www.evaluate(() => window.b8licks);
+  const until = async (fn, ms = 10000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (await fn()) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return false;
+  };
+  const hits = (host) => chrome.site.seen.filter((r) => r.host === host);
+  await chrome.visit(t, `https://discover.test/linked?n=ctl-${stamp}`);
+  const probed = await until(() =>
+    ['/.well-known/ai-catalog.json', '/llms.txt'].every((path) =>
+      hits('discover.test').some((r) => r.path === path)
+    )
+  );
+  assert.equal(probed, true, 'control: the ordinary origin is probed for its well-known files');
+  const announced = await until(async () => {
+    const got = await licks();
+    return (
+      got.some(
+        (m) =>
+          m.kind === 'extension.lick' && m.target === `https://upstream.test/handoff-ctl-${stamp}`
+      ) &&
+      got.some(
+        (m) => m.kind === 'extension.discovery' && m.discoveryOrigin === 'https://discover.test'
+      )
+    );
+  });
+  assert.equal(announced, true, 'control: its handoff Link and discovery reach the leader');
+  const before = (await licks()).length;
+  const mark = chrome.site.seen.length;
+  await chrome.visit(t, `https://vault.sliccy.ai/linked?n=vault-${stamp}`);
+  await new Promise((r) => setTimeout(r, 4000));
+  const vaultHits = chrome.site.seen.slice(mark).filter((r) => r.host === 'vault.sliccy.ai');
+  assert.ok(
+    vaultHits.some((r) => r.path === '/linked'),
+    'control: the vault page itself loaded with its Link headers'
+  );
+  assert.deepEqual(
+    vaultHits.map((r) => r.path).filter((path) => !['/linked', '/favicon.ico'].includes(path)),
+    [],
+    'nothing is fetched from the vault beyond the page and its favicon'
+  );
+  const later = (await licks()).slice(before);
+  assert.deepEqual(
+    later.filter((m) => JSON.stringify(m).includes('vault')),
+    [],
+    'no handoff or discovery for the vault reaches the leader'
+  );
 });

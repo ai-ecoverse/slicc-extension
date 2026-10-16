@@ -8,6 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -72,6 +73,47 @@ const sha = execFileSync('git', ['-C', sixDir, 'rev-parse', 'HEAD'], {
 }).trim();
 process.stdout.write(`Checked out ${sixRef} (${sha})\n`);
 
+const rootRequire = createRequire(resolve(root, 'package.json'));
+
+const sixBrowsers = JSON.parse(
+  readFileSync(resolve(sixDir, 'packages/chrome-extension/package.json'), 'utf8')
+).dependencies?.['@ai-ecoverse/slicc-browsers'];
+if (sixBrowsers) {
+  const ours = rootRequire('@ai-ecoverse/slicc-browsers/package.json').version;
+  const probe = mkdtempSync(resolve(tmpdir(), 'slicc-six-browsers-'));
+  try {
+    const tarball = execFileSync(
+      'npm',
+      ['pack', `@ai-ecoverse/slicc-browsers@${sixBrowsers}`, '--silent'],
+      {
+        cwd: probe,
+        encoding: 'utf8',
+      }
+    ).trim();
+    execFileSync('tar', ['xzf', tarball], { cwd: probe });
+    const theirRules = JSON.parse(
+      readFileSync(resolve(probe, 'package/catalog.json'), 'utf8')
+    ).protectedOrigins;
+    const ourRules = rootRequire('@ai-ecoverse/slicc-browsers').protectedOrigins;
+    const theirGuard = readFileSync(resolve(probe, 'package/protected.mjs'), 'utf8');
+    const ourGuard = readFileSync(
+      rootRequire.resolve('@ai-ecoverse/slicc-browsers/protected.mjs'),
+      'utf8'
+    );
+    if (JSON.stringify(theirRules) !== JSON.stringify(ourRules) || theirGuard !== ourGuard) {
+      process.stderr.write(
+        `six pins @ai-ecoverse/slicc-browsers@${sixBrowsers}, we pin ${ours}, and their protected rules differ\n`
+      );
+      process.exit(1);
+    }
+    process.stdout.write(
+      `slicc-browsers protected rules identical: six ${sixBrowsers}, ours ${ours}\n`
+    );
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+}
+
 const chromeExtSrc = resolve(sixDir, 'packages/chrome-extension/src');
 const sharedTsIndex = resolve(sixDir, 'packages/shared-ts/src/index.ts');
 
@@ -83,6 +125,9 @@ if (!existsSync(resolve(chromeExtSrc, 'service-worker.ts'))) {
 const aliasPlugin = {
   name: 'slicc-alias',
   setup(build) {
+    build.onResolve({ filter: /^@ai-ecoverse\/slicc-browsers(\/.*)?$/ }, (args) => ({
+      path: rootRequire.resolve(args.path),
+    }));
     build.onResolve({ filter: /^@slicc\/shared-ts$/ }, () => ({
       path: sharedTsIndex,
     }));

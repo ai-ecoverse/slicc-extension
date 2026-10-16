@@ -79,8 +79,10 @@ function subresource(page, kind, dest, tag) {
       );
       const body = await h.evaluate(sessionId, probe);
       off();
+      const alive = await h.evaluate(sessionId, '1 + 1');
+      const detached = h.detached(sessionId);
       await h.close(targetId);
-      return { seen: seen.length > 0, body };
+      return { seen: seen.length > 0, body, alive, detached };
     },
     { ordinary, url, probe: bounded(probes[kind](url)), kind, twoPixels }
   );
@@ -92,11 +94,19 @@ for (const kind of ['fetch', 'xhr', 'image']) {
     const fulfilled = kind === 'image' ? 'width 2' : 'fulfilled';
     const real = (tag) => (kind === 'image' ? 'width 1' : `real-${tag}`);
     const control = await subresource(page, kind, destinations.control, `c-${kind}`);
-    assert.deepEqual(control, { seen: true, body: fulfilled }, 'control');
+    assert.deepEqual(
+      control,
+      { seen: true, body: fulfilled, alive: 2, detached: false },
+      'control'
+    );
     for (const name of ['seven', 'vault']) {
       const tag = `${name}-${kind}`;
       const guarded = await subresource(page, kind, destinations[name], tag);
-      assert.deepEqual(guarded, { seen: false, body: real(tag) }, name);
+      assert.deepEqual(
+        guarded,
+        { seen: false, body: real(tag), alive: 2, detached: false },
+        `${name}: never seen, real body, session alive`
+      );
     }
   });
 }
@@ -134,8 +144,12 @@ function auth(page, dest, tag) {
       );
       const body = await h.evaluate(sessionId, probe(url));
       off();
+      const alive = await h.evaluate(sessionId, '1 + 1');
+      const detached = h.detached(sessionId);
       await h.close(targetId);
       return {
+        alive,
+        detached,
         seen: seen.includes('auth'),
         pausedSeen: seen.includes('paused'),
         authed: body === '200 authed',
@@ -150,13 +164,13 @@ test('C5.auth: authRequired reaches the client for an ordinary origin, never for
   const page = await client(t);
   assert.deepEqual(
     await auth(page, destinations.control, 'c-auth'),
-    { seen: true, pausedSeen: true, authed: true, untouched: false },
+    { alive: 2, detached: false, seen: true, pausedSeen: true, authed: true, untouched: false },
     'control'
   );
   for (const name of ['seven', 'vault']) {
     assert.deepEqual(
       await auth(page, destinations[name], `${name}-auth`),
-      { seen: false, pausedSeen: false, authed: false, untouched: true },
+      { alive: 2, detached: false, seen: false, pausedSeen: false, authed: false, untouched: true },
       name
     );
   }
@@ -210,8 +224,12 @@ function guessed(page, dest, tag) {
       }
       const body = await h.evaluate(sessionId, 'window.__probe');
       off();
+      const alive = await h.evaluate(sessionId, '1 + 1');
+      const detached = h.detached(sessionId);
       await h.close(targetId);
       return {
+        alive,
+        detached,
         candidates: attempts.length > 0,
         fulfilled: body === 'guessed',
         refused:
@@ -230,13 +248,27 @@ test('C5.guessed-id: a client can only answer request ids it was given', async (
   const page = await client(t);
   assert.deepEqual(
     await guessed(page, destinations.control, 'c-guess'),
-    { candidates: true, fulfilled: true, refused: false, answered: false },
+    {
+      alive: 2,
+      detached: false,
+      candidates: true,
+      fulfilled: true,
+      refused: false,
+      answered: false,
+    },
     'control'
   );
   for (const name of ['seven', 'vault']) {
     assert.deepEqual(
       await guessed(page, destinations[name], `${name}-guess`),
-      { candidates: true, fulfilled: false, refused: true, answered: true },
+      {
+        alive: 2,
+        detached: false,
+        candidates: true,
+        fulfilled: false,
+        refused: true,
+        answered: true,
+      },
       name
     );
   }

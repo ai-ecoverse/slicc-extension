@@ -193,5 +193,109 @@
     "sentinel": "listSecretsIncludingUnreadable",
     "label": "subtitle says encrypted at rest",
     "match": 1
+  },
+  {
+    "id": "UX-unreadable-copy",
+    "pr": 3994,
+    "file": "secrets.js",
+    "sentinel": "This value can't be read any more. Enter it again.",
+    "label": "unreadable row copy",
+    "match": 1
+  },
+  {
+    "id": "UX-reenter-button",
+    "pr": 3994,
+    "file": "secrets.js",
+    "sentinel": "This value can't be read any more. Enter it again.",
+    "label": "Re-enter opens Custom secret with name and domains prefilled",
+    "match": 1
+  },
+  {
+    "id": "UX-unreadable-style",
+    "pr": 3994,
+    "file": "secrets.html",
+    "sentinel": "box-shadow: inset 0 0 0 1px var(--danger)",
+    "label": "unreadable row keeps the normal surface, marked by an inset border",
+    "match": 1
+  },
+  {
+    "id": "UX-narrow-layout",
+    "pr": 3994,
+    "file": "secrets.html",
+    "sentinel": "box-shadow: inset 0 0 0 1px var(--danger)",
+    "label": "below 600px: labels above inputs, tabs on one scrolling line, unreadable buttons wrap",
+    "match": 1
+  },
+  {
+    "id": "B-SEC3-sw-open",
+    "pr": "six-secret-store",
+    "upstream": "six follow-up PR pending",
+    "file": "six-sw.js",
+    "sentinel": "_recStore",
+    "label": "IndexedDB opens version 2 with a records store",
+    "match": 1
+  },
+  {
+    "id": "B-SEC3-sw-migrate",
+    "pr": "six-secret-store",
+    "upstream": "six follow-up PR pending",
+    "file": "six-sw.js",
+    "sentinel": "_recStore",
+    "label": "crash-safe migration of plaintext and {ct, iv} records from chrome.storage.local into IndexedDB",
+    "match": 1
+  },
+  {
+    "id": "B-SEC3-sw-adapter",
+    "pr": "six-secret-store",
+    "upstream": "six follow-up PR pending",
+    "file": "six-sw.js",
+    "sentinel": "_recStore",
+    "label": "every secret read and write goes through the IndexedDB record store",
+    "match": 1
+  },
+  {
+    "id": "B-SEC3-page-open",
+    "pr": "six-secret-store",
+    "upstream": "six follow-up PR pending",
+    "file": "secrets.js",
+    "sentinel": "_recStore",
+    "label": "IndexedDB opens version 2 with a records store",
+    "match": 1
+  },
+  {
+    "id": "B-SEC3-page-migrate",
+    "pr": "six-secret-store",
+    "upstream": "six follow-up PR pending",
+    "file": "secrets.js",
+    "sentinel": "_recStore",
+    "label": "crash-safe migration of plaintext and {ct, iv} records from chrome.storage.local into IndexedDB",
+    "match": 1
+  },
+  {
+    "id": "B-SEC3-page-adapter",
+    "pr": "six-secret-store",
+    "upstream": "six follow-up PR pending",
+    "file": "secrets.js",
+    "sentinel": "_recStore",
+    "label": "every secret read and write goes through the IndexedDB record store",
+    "match": 1
+  },
+  {
+    "id": "B-SEC3-page-list",
+    "pr": "six-secret-store",
+    "upstream": "six follow-up PR pending",
+    "file": "secrets.js",
+    "sentinel": "_recStore",
+    "label": "secrets page lists records, unreadable included, from IndexedDB",
+    "match": 1
+  },
+  {
+    "id": "B-SEC3-sw-delete-unreadable",
+    "pr": "six-secret-store",
+    "upstream": "six follow-up PR pending",
+    "file": "six-sw.js",
+    "sentinel": "_recStore",
+    "label": "secrets.delete removes a record by name, readable or not",
+    "match": 1
   }
 ]

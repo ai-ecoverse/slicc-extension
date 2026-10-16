@@ -50,8 +50,30 @@ const onePixel = Buffer.from(
 export async function pages(tls) {
   const html = await readFile(new URL('page/index.html', import.meta.url));
   const probe = await readFile(new URL('page/probe.html', import.meta.url));
-  return listen(tls, (request, response) => {
+  const seen = [];
+  const server = await listen(tls, (request, response) => {
     const { pathname, searchParams } = new URL(request.url, 'https://vault.sliccy.ai');
+    seen.push({
+      host: (request.headers.host ?? '').split(':')[0],
+      path: pathname,
+      search: searchParams.toString(),
+    });
+    if (pathname === '/linked') {
+      const n = searchParams.get('n') ?? '';
+      const link = [
+        `<https://upstream.test/handoff-${n}>; rel="https://www.sliccy.ai/rel/handoff"; title="handoff ${n}"`,
+        `</catalog-${n}.json>; rel="ai-catalog"`,
+      ].join(', ');
+      return response
+        .writeHead(200, { 'content-type': 'text/html; charset=utf-8', link })
+        .end(html);
+    }
+    if (pathname === '/.well-known/ai-catalog.json') {
+      return response.writeHead(200, { 'content-type': 'application/json' }).end('{"apis":[]}');
+    }
+    if (pathname === '/llms.txt') {
+      return response.writeHead(200, { 'content-type': 'text/plain' }).end('# llms');
+    }
     if (pathname === '/redirect') {
       return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();
     }
@@ -95,6 +117,7 @@ export async function pages(tls) {
     const body = pathname === '/probe' ? probe : html;
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
   });
+  return { ...server, seen };
 }
 
 function collect(request) {

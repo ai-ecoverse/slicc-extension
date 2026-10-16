@@ -531,8 +531,8 @@ class Connection {
     const tab = this.tabState(tabId);
     if (!tab) return;
     for (const [requestId, entry] of tab.paused) {
-      if (entry.owner !== sessionId) continue;
-      await this.advance(tabId, requestId, entry);
+      if (entry.owner !== sessionId || entry.claimed) continue;
+      await this.advance(tabId, requestId, entry).catch(() => undefined);
     }
   }
 
@@ -586,18 +586,19 @@ class Connection {
     const [next] = this.candidates(tabId, entry.params, entry.owner);
     if (next !== undefined) {
       entry.owner = next;
+      entry.claimed = false;
       this.post({ method: entry.method, params: entry.params, sessionId: next });
       return;
     }
     tab.paused.delete(requestId);
     if (entry.method === 'Fetch.authRequired') {
-      await this.send(tabId, 'Fetch.continueWithAuth', {
+      await this.answer(tabId, 'Fetch.continueWithAuth', {
         requestId,
         authChallengeResponse: { response: 'Default' },
       });
       return;
     }
-    await this.send(tabId, 'Fetch.continueRequest', { requestId });
+    await this.answer(tabId, 'Fetch.continueRequest', { requestId });
   }
 
   async onPaused(tabId, method, params) {
@@ -688,7 +689,8 @@ class Connection {
     }
     if (FETCH_ANSWERS.has(method) || FETCH_READS.has(method)) {
       const entry = tab.paused.get(textOf(params.requestId));
-      if (!entry || entry.owner !== sessionId) throw new Error(UNSEEN);
+      if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
+      if (FETCH_ANSWERS.has(method)) entry.claimed = true;
     } else if (bodyMethod(method)) {
       const known = tab.requests.get(textOf(requestKey(params)));
       if (known === true) refusal();
@@ -699,6 +701,17 @@ class Connection {
       !this.state.streams.has(textOf(params.handle))
     ) {
       throw new Error(UNSEEN);
+    }
+  }
+
+  async answer(tabId, method, params) {
+    try {
+      return (await this.send(tabId, method, params)) ?? {};
+    } catch (error) {
+      if (/Invalid InterceptionId|not found|No such request/i.test(String(error?.message))) {
+        throw new Error(UNSEEN);
+      }
+      throw error;
     }
   }
 
@@ -739,7 +752,7 @@ class Connection {
         return {};
       }
       tab.paused.delete(requestId);
-      return (await this.send(tabId, method, params)) ?? {};
+      return this.answer(tabId, method, params);
     }
     let forwarded = params;
     if (method === 'Page.addScriptToEvaluateOnNewDocument') {

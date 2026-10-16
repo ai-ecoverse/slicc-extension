@@ -6,7 +6,7 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "node scripts/check-six-version.mjs && node scripts/pack.mjs ${nextRelease.version}",
+        "prepareCmd": "node scripts/check-six-version.mjs && node scripts/check-six-shield.mjs && node scripts/pack.mjs ${nextRelease.version}",
         "generateNotesCmd": "node scripts/six-release-notes.mjs"
       }
     ],
