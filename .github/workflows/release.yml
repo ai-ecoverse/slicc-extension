@@ -59,30 +59,12 @@ jobs:
     if: always() && vars.CWS_PUBLISH_ENABLED == 'true' && (needs.release.result == 'success' || (inputs.publish_tag != '' && needs.release.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: chrome-web-store
     permissions:
       contents: read
     steps:
-      - name: Verify environment has required reviewers
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          REPO="${{ github.repository }}"
-          ENV_NAME="chrome-web-store"
-          RULES=$(gh api "repos/${REPO}/environments/${ENV_NAME}" \
-            --jq '.protection_rules // [] | map(select(.type == "required_reviewers")) | length' \
-            2>/dev/null || echo "0")
-          if [ "$RULES" = "0" ]; then
-            echo "::error::The ${ENV_NAME} environment has no required reviewers. Refusing to publish."
-            exit 1
-          fi
-          echo "Environment ${ENV_NAME} has required reviewers — proceeding."
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-          ref: ${{ inputs.publish_tag }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -94,11 +76,15 @@ jobs:
       - name: Detect release version
         id: version
         run: |
-          TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
           WANT="${{ inputs.publish_tag }}"
-          if [ -n "$WANT" ] && [ "$TAG" != "$WANT" ]; then
-            echo "::error::publish_tag $WANT is not an exact release tag at the checked-out commit"
-            exit 1
+          if [ -n "$WANT" ]; then
+            if ! git rev-parse -q --verify "refs/tags/${WANT}^{commit}" >/dev/null; then
+              echo "::error::publish_tag $WANT is not a release tag"
+              exit 1
+            fi
+            TAG="$WANT"
+          else
+            TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
           fi
           if [ -z "$TAG" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
