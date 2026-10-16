@@ -108,6 +108,10 @@ jobs:
             --pattern 'slicc-extension.zip' \
             --dir artifacts
 
+      - name: Refuse to roll six back
+        if: steps.version.outputs.skip == 'false'
+        run: node scripts/check-six-rollback.mjs artifacts/slicc-extension.zip
+
       - name: Publish to Chrome Web Store
         if: steps.version.outputs.skip == 'false'
         env:
