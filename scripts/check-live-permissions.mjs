@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6,12 +7,12 @@ import {
   extractManifestFromZip,
   fetchCrxManifest,
   fetchLiveVersion,
-} from './check-six-version.mjs';
+  LIVE_UPDATE_XML_URL,
+} from './cws-live.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-export const LIVE_UPDATE_XML_URL =
-  'https://clients2.google.com/service/update2/crx?prodversion=146.0&acceptformat=crx3&x=id%3Dakjjllgokmbgpbdbmafpiefnhidlmbgf%26uc';
+export { LIVE_UPDATE_XML_URL };
 
 export const PERMISSION_FIELDS = ['permissions', 'host_permissions', 'optional_permissions'];
 
@@ -75,11 +76,11 @@ export async function resolveBaseline(opts = {}) {
     liveError = err.message;
   }
   try {
-    const manifest = validateManifest(await (opts.readSix ?? readSixManifest)());
-    return { source: 'six', manifest, liveError };
+    const manifest = validateManifest(await (opts.readUpstream ?? readUpstreamManifest)());
+    return { source: 'upstream', manifest, liveError };
   } catch (err) {
     throw new Error(
-      `live listing manifest unreadable (${liveError}) and pinned six manifest unreadable (${err.message})`
+      `live listing manifest unreadable (${liveError}) and upstream six manifest unreadable (${err.message})`
     );
   }
 }
@@ -110,8 +111,23 @@ export async function checkLivePermissions(release, opts = {}) {
   return { ...result, ok: true };
 }
 
-export function readSixManifest() {
-  return JSON.parse(readFileSync(resolve(root, 'six-import/manifest.json'), 'utf8'));
+export function pinnedManifest(text, upstream) {
+  const pin = upstream?.manifestSha256;
+  if (typeof pin !== 'string' || !/^[0-9a-f]{64}$/.test(pin)) {
+    throw new Error('six/upstream.json pins no manifestSha256');
+  }
+  const actual = createHash('sha256').update(text).digest('hex');
+  if (actual !== pin) {
+    throw new Error(`six/manifest.json sha256 ${actual} is not the pinned ${pin}`);
+  }
+  return JSON.parse(text);
+}
+
+export function readUpstreamManifest() {
+  return pinnedManifest(
+    readFileSync(resolve(root, 'six/manifest.json')),
+    JSON.parse(readFileSync(resolve(root, 'six/upstream.json'), 'utf8'))
+  );
 }
 
 export function readAllowed() {
@@ -134,9 +150,9 @@ if (isMain) {
     process.exit(1);
   }
   const result = await checkLivePermissions(release, { allowed: readAllowed() });
-  if (result.source === 'six') {
+  if (result.source === 'upstream') {
     process.stderr.write(
-      `::warning::PERMISSION GUARD BASELINE IS THE PINNED SIX MANIFEST, NOT THE LIVE LISTING: ${result.liveError}\n`
+      `::warning::PERMISSION GUARD BASELINE IS THE UPSTREAM SIX MANIFEST, NOT THE LIVE LISTING: ${result.liveError}\n`
     );
   }
   if (!result.ok) {

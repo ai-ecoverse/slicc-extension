@@ -9,13 +9,20 @@
         "**/secrets.js",
         "**/capture-popup.js",
         "**/picker-popup.js",
-        "**/cherry-stub.ts",
         "**/secrets.html",
         "**/cws-publish.mjs"
       ],
       "linter": { "enabled": false },
       "formatter": { "enabled": false },
       "assist": { "enabled": false }
+    },
+    {
+      "includes": ["six/cherry/cdp-host-handlers.ts"],
+      "linter": { "rules": { "security": { "noGlobalEval": "off" } } }
+    },
+    {
+      "includes": ["six/extension/secrets-entry.ts"],
+      "linter": { "rules": { "style": { "useNamingConvention": "off" } } }
     }
   ]
 }

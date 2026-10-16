@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
-import { hasSixShield } from '../../scripts/check-six-shield.mjs';
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
 
@@ -17,16 +15,9 @@ const targets = { seven: 'https://seven.sliccy.ai', vault: 'https://vault.sliccy
 
 const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
 const leader = 'https://www.sliccy.ai/?slicc=leader';
-const sixShield = hasSixShield(
-  readFileSync(new URL('../../extension/six-sw.js', import.meta.url), 'utf8')
-);
 const transports = ['seven', 'six-bridge'];
 
 async function client(t, transport = 'seven') {
-  if (transport === 'six-bridge' && !sixShield) {
-    t.skip('six bridge C1-C6: pinned tag lacks slicc#3986');
-    return null;
-  }
   const page = await chrome.visit(t, transport === 'six-bridge' ? leader : slicc);
   await page.evaluate(install, transport, extId);
   return page;
@@ -99,7 +90,6 @@ for (const transport of transports) {
     const name = transport === 'seven' ? target : `${target}-${transport}`;
     test(`${transport} C1 init script then location.href: runs on ${ordinary}, never on ${target}`, async (t) => {
       const page = await client(t, transport);
-      if (!page) return;
       const control = `c1-control-${name}`;
       const opened = await initScriptThenNavigate(page, control, `${ordinary}/landing`);
       assert.equal(await marked(page, opened.sessionId, control), control, 'control marker');
@@ -123,7 +113,6 @@ for (const transport of transports) {
 
     test(`${transport} C2 init script then a 302 chain: runs on ${ordinary}, never on ${target}`, async (t) => {
       const page = await client(t, transport);
-      if (!page) return;
       const control = `c2-control-${name}`;
       const hop = (to) => `${ordinary}/redirect?to=${encodeURIComponent(to)}`;
       const opened = await initScriptThenNavigate(page, control, hop(hop(`${ordinary}/landing`)));
@@ -144,7 +133,6 @@ for (const transport of transports) {
 
     test(`${transport} C3 window.open popup: ${ordinary} popup is attachable, ${target} popup is not`, async (t) => {
       const page = await client(t, transport);
-      if (!page) return;
       const answer = await page.evaluate(
         async ({ start, ordinary, origin, discovery }) => {
           if (discovery) await h.cdp.send('Target.setDiscoverTargets', { discover: true });
@@ -259,7 +247,6 @@ for (const transport of transports) {
 
     test(`${transport} C4 iframe: init script runs in a ${ordinary} iframe, never in a ${target} iframe`, async (t) => {
       const page = await client(t, transport);
-      if (!page) return;
       const control = `c4-control-${name}`;
       const opened = await page.evaluate(
         async ({ tag, start }) => {
@@ -315,7 +302,6 @@ for (const transport of transports) {
 
     test(`${transport} C5 Fetch.enable '*': ${ordinary} documents pause and fulfill, ${target} never reaches the client`, async (t) => {
       const page = await client(t, transport);
-      if (!page) return;
       const answer = await page.evaluate(
         async ({ ordinary, origin }) => {
           const { targetId, sessionId } = await h.open(`${ordinary}/start`);
@@ -401,7 +387,6 @@ for (const transport of transports) {
         'protected cookie planted'
       );
       const page = await client(t, transport);
-      if (!page) return;
       const answer = await page.evaluate(
         async ({ ordinary, origin, name }) => {
           const { targetId, sessionId } = await h.open(`${ordinary}/start`);

@@ -26,7 +26,7 @@ The side panel (`sidepanel.html`) mounts a cherry follower iframe that connects 
 
 ## Six — secrets
 
-The secrets options page (`secrets.html`) manages named secrets with per-domain scoping, S3 profiles, and OAuth extra domains. Secrets are stored in `chrome.storage.local`.
+The secrets options page (`secrets.html`) manages named secrets with per-domain scoping, S3 profiles, and OAuth extra domains. Secrets are encrypted with AES-GCM and kept as records in IndexedDB; older plaintext and `{ct, iv}` entries in `chrome.storage.local` migrate on first access.
 
 ## Adobe sign-in
 
@@ -60,7 +60,13 @@ npm test
 npm run pack
 ```
 
-`npm run build` compiles six's TypeScript source from `six-import/` into `extension/six-sw.js`, `sidepanel.js`, and `secrets.js`. `npm test` runs integration tests. `npm run pack [version]` writes `artifacts/slicc-extension.zip`. The manifest carries the production `key`, so the unpacked extension has Chrome Web Store ID `akjjllgokmbgpbdbmafpiefnhidlmbgf`.
+`npm run build` bundles six's TypeScript source in `six/` into `extension/six-sw.js`, `sidepanel.js`, and `secrets.js` with esbuild. It fetches nothing, and a rebuild is byte-identical. `npm run typecheck` checks `six/`. `npm test` runs integration tests. `npm run pack [version]` writes `artifacts/slicc-extension.zip`. The manifest carries the production `key`, so the unpacked extension has Chrome Web Store ID `akjjllgokmbgpbdbmafpiefnhidlmbgf`.
+
+## Six source
+
+`six/extension/` is slicc's `packages/chrome-extension/src`, `six/shared-ts/` the `packages/shared-ts` modules it reaches, and `six/cherry/` cherry's embed-ui closure, all imported from the slicc commit in [`six/upstream.json`](six/upstream.json) and edited here from then on. [`six/manifest.json`](six/manifest.json) is that release's manifest, the permission baseline when the live listing is unreachable; `six/upstream.json` pins its sha256. `@slicc/shared-ts` and `@ai-ecoverse/cherry` resolve through `paths` in `tsconfig.json`, which esbuild reads too.
+
+Releases roll forward only. Before publishing, `scripts/check-six-floor.mjs` refuses a release based on an older six than the live listing carries. Once the live build comes from `six/`, it refuses legacy `(six vX)` builds and any release that isn't newer than the live one, and `scripts/cws-publish.mjs` checks the version against the store again.
 
 ## Permissions
 

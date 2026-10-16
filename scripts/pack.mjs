@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import {
   cpSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -26,21 +26,20 @@ if (version !== undefined && !valid) {
   throw new Error(`not a Chrome extension version: ${version}`);
 }
 
-const sixRefPath = join(root, '.six-ref');
-const sixTag = existsSync(sixRefPath)
-  ? readFileSync(sixRefPath, 'utf8').trim().split(' ')[0]
-  : null;
-
 cpSync(join(root, 'extension'), stage, {
   recursive: true,
   filter: (path) => !path.includes('_metadata'),
 });
+const sources = readdirSync(stage, { recursive: true }).filter((path) =>
+  /\.(ts|mts|cts|tsx|map)$/.test(path)
+);
+if (sources.length > 0) {
+  rmSync(stage, { recursive: true, force: true });
+  throw new Error(`pack: refusing to ship sources: ${sources.join(', ')}`);
+}
 if (version) {
   const manifest = JSON.parse(readFileSync(join(stage, 'manifest.json'), 'utf8'));
   const stamped = { ...manifest, version };
-  if (sixTag) {
-    stamped.version_name = `${version} (six ${sixTag})`;
-  }
   writeFileSync(join(stage, 'manifest.json'), `${JSON.stringify(stamped, null, 2)}\n`);
 }
 mkdirSync(outDir, { recursive: true });

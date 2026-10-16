@@ -7,9 +7,6 @@ extension/_metadata/
 extension/six-sw.js
 extension/sidepanel.js
 extension/secrets.js
-six-import/
-screenshots/
-.six-ref
 extension/seven.js
 extension/seven-gate.js
 extension/seven-gate-main.js

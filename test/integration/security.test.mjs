@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
+import { pinnedManifest, readUpstreamManifest } from '../../scripts/check-live-permissions.mjs';
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
 
@@ -533,10 +534,17 @@ test('B24-1 six bridge: a navigation to the vault fails before it commits and th
   assert.equal(answer.href.startsWith('https://vault.sliccy.ai'), false, 'the vault never commits');
 });
 
-test('the built manifest adds no permission warning over the pinned six manifest, and the control proves an added permission is caught', async (t) => {
+test('the built manifest adds no permission warning over the upstream six manifest, and the control proves an added permission is caught', async (t) => {
   const read = async (path) => JSON.parse(await readFile(new URL(path, import.meta.url)));
   const built = await read('../../extension/manifest.json');
-  const six = await read('../../six-import/manifest.json');
+  const six = readUpstreamManifest();
+  const upstream = await read('../../six/upstream.json');
+  const text = await readFile(new URL('../../six/manifest.json', import.meta.url));
+  assert.throws(
+    () => pinnedManifest(Buffer.concat([text, Buffer.from(' ')]), upstream),
+    /is not the pinned/,
+    'control: an edited six/manifest.json is refused'
+  );
   const allowed = await read('../../scripts/warning-free-permissions.json');
   const control = { ...built, permissions: [...built.permissions, 'tabGroups'] };
   const withEach = allowed.map((p) => ({ ...six, permissions: [...six.permissions, p] }));

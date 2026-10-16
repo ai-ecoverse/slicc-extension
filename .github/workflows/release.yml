@@ -5,10 +5,6 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      six_ref:
-        description: "Six release tag to build (default: from .six-tag)"
-        required: false
-        type: string
       publish_tag:
         description: "Publish this existing release tag (e.g. v7.4.1) instead of cutting a release"
         required: false
@@ -45,8 +41,6 @@ jobs:
       - run: npm ci
 
       - run: npm run build
-        env:
-          SIX_REF: ${{ inputs.six_ref || '' }}
 
       - run: npm run lint
 
@@ -104,9 +98,11 @@ jobs:
             --pattern 'slicc-extension.zip' \
             --dir artifacts
 
-      - name: Refuse to roll six back
+      - name: Refuse to ship less than the live six
         if: steps.version.outputs.skip == 'false'
-        run: node scripts/check-six-rollback.mjs artifacts/slicc-extension.zip
+        run: |
+          git show "v${{ steps.version.outputs.version }}:six/upstream.json" > artifacts/upstream.json 2>/dev/null || rm -f artifacts/upstream.json
+          node scripts/check-six-floor.mjs artifacts/slicc-extension.zip artifacts/upstream.json
 
       - name: Publish to Chrome Web Store
         if: steps.version.outputs.skip == 'false'
