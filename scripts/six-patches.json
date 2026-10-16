@@ -231,7 +231,7 @@
     "pr": "six-secret-store",
     "upstream": "six follow-up PR pending",
     "file": "six-sw.js",
-    "sentinel": "_secRecordStore",
+    "sentinel": "_recStore",
     "label": "IndexedDB opens version 2 with a records store",
     "match": 1
   },
@@ -240,7 +240,7 @@
     "pr": "six-secret-store",
     "upstream": "six follow-up PR pending",
     "file": "six-sw.js",
-    "sentinel": "_secRecordStore",
+    "sentinel": "_recStore",
     "label": "crash-safe migration of plaintext and {ct, iv} records from chrome.storage.local into IndexedDB",
     "match": 1
   },
@@ -249,7 +249,7 @@
     "pr": "six-secret-store",
     "upstream": "six follow-up PR pending",
     "file": "six-sw.js",
-    "sentinel": "_secRecordStore",
+    "sentinel": "_recStore",
     "label": "every secret read and write goes through the IndexedDB record store",
     "match": 1
   },
@@ -258,7 +258,7 @@
     "pr": "six-secret-store",
     "upstream": "six follow-up PR pending",
     "file": "secrets.js",
-    "sentinel": "_secRecordStore",
+    "sentinel": "_recStore",
     "label": "IndexedDB opens version 2 with a records store",
     "match": 1
   },
@@ -267,7 +267,7 @@
     "pr": "six-secret-store",
     "upstream": "six follow-up PR pending",
     "file": "secrets.js",
-    "sentinel": "_secRecordStore",
+    "sentinel": "_recStore",
     "label": "crash-safe migration of plaintext and {ct, iv} records from chrome.storage.local into IndexedDB",
     "match": 1
   },
@@ -276,7 +276,7 @@
     "pr": "six-secret-store",
     "upstream": "six follow-up PR pending",
     "file": "secrets.js",
-    "sentinel": "_secRecordStore",
+    "sentinel": "_recStore",
     "label": "every secret read and write goes through the IndexedDB record store",
     "match": 1
   },
@@ -285,7 +285,7 @@
     "pr": "six-secret-store",
     "upstream": "six follow-up PR pending",
     "file": "secrets.js",
-    "sentinel": "_secRecordStore",
+    "sentinel": "_recStore",
     "label": "secrets page lists records, unreadable included, from IndexedDB",
     "match": 1
   },
@@ -294,7 +294,7 @@
     "pr": "six-secret-store",
     "upstream": "six follow-up PR pending",
     "file": "six-sw.js",
-    "sentinel": "_secRecordStore",
+    "sentinel": "_recStore",
     "label": "secrets.delete removes a record by name, readable or not",
     "match": 1
   }

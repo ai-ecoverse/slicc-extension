@@ -330,80 +330,75 @@ if (pr3980htmlNeeded) {
   skip(3980, 'secrets.html');
 }
 
-const idbOpen =
-  'function _secOpenDb() { return new Promise(function(resolve, reject) { if (typeof indexedDB === "undefined") { reject(new Error("IndexedDB not available")); return; } var req = indexedDB.open(_secDbName, 2); req.onupgradeneeded = function() { var db = req.result; if (!db.objectStoreNames.contains(_secStoreName)) db.createObjectStore(_secStoreName); if (!db.objectStoreNames.contains(_secRecordStore)) db.createObjectStore(_secRecordStore); }; req.onsuccess = function() { resolve(req.result); }; req.onerror = function() { reject(req.error ?? new Error("IndexedDB open failed")); }; }); }';
-
-const idbRecords = [
-  'var _secRecordStore = "records";',
-  'async function _secTx(mode, fn) { var db = await _secOpenDb(); try { return await new Promise(function(resolve, reject) { var tx = db.transaction(_secRecordStore, mode); var store = tx.objectStore(_secRecordStore); var out; Promise.resolve(fn(store, function(v) { out = v; })).catch(reject); tx.oncomplete = function() { resolve(out); }; tx.onerror = function() { reject(tx.error); }; tx.onabort = function() { reject(tx.error ?? new Error("IndexedDB transaction aborted")); }; }); } finally { db.close(); } }',
-  'function _secAllRecords() { return _secTx("readonly", function(store, done) { var r = store.getAll(); r.onsuccess = function() { done(r.result ?? []); }; }); }',
-  'function _secGetRecord(name) { return _secTx("readonly", function(store, done) { var r = store.get(name); r.onsuccess = function() { done(r.result); }; }); }',
-  'function _secPutRecords(records) { return _secTx("readwrite", function(store) { for (var rec of records) store.put(rec, rec.name); }); }',
-  'function _secDeleteRecords(names) { return _secTx("readwrite", function(store) { for (var n of names) store.delete(n); }); }',
+const recordStore = [
+  'var _recStore = "records";',
+  'async function _recTx(mode, fn) { const db = await openDb(); try { return await new Promise((resolve, reject) => { const tx = db.transaction(_recStore, mode); const store = tx.objectStore(_recStore); let out; try { fn(store, (v) => { out = v; }); } catch (e) { reject(e); } tx.oncomplete = () => resolve(out); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted")); }); } finally { db.close(); } }',
+  'function _recAll() { return _recTx("readonly", (s, done) => { const r = s.getAll(); r.onsuccess = () => done(r.result ?? []); }); }',
+  'function _recGet(name) { return _recTx("readonly", (s, done) => { const r = s.get(name); r.onsuccess = () => done(r.result); }); }',
+  'function _recPut(records) { return _recTx("readwrite", (s) => { for (const rec of records) s.put(rec, rec.name); }); }',
+  'function _recDelete(names) { return _recTx("readwrite", (s) => { for (const n of names) s.delete(n); }); }',
+  'function _recPutIfAbsent(rec) { return _recTx("readwrite", (s, done) => { const g = s.get(rec.name); g.onsuccess = () => { if (g.result) { done(false); return; } s.put(rec, rec.name); done(true); }; }); }',
+  'function _recSame(a, b) { if (typeof a === "string" || typeof b === "string") return a === b; return isEncryptedValue(a) && isEncryptedValue(b) && a.ct === b.ct && a.iv === b.iv; }',
+  'async function _recDecrypt(value) { const dec = await decryptValue(value); return dec === UNREADABLE_SECRET ? void 0 : dec; }',
+  'async function migrateSecretsToEncrypted() { const all = await chrome.storage.local.get(null); const names = Object.keys(all).filter((k) => !k.endsWith(DOMAINS_SUFFIX) && k + DOMAINS_SUFFIX in all && (typeof all[k] === "string" || isEncryptedValue(all[k]))); for (const name of names) { const dk = name + DOMAINS_SUFFIX; const fresh = await chrome.storage.local.get([name, dk]); const value = fresh[name]; if (typeof value !== "string" && !isEncryptedValue(value)) continue; const enc = typeof value === "string" ? await encryptValue(value) : value; const again = await chrome.storage.local.get([name, dk]); if (!_recSame(again[name], value) || again[dk] !== fresh[dk]) continue; await _recPutIfAbsent({ name, value: enc, domains: typeof fresh[dk] === "string" ? fresh[dk] : "" }); const last = await chrome.storage.local.get([name, dk]); if (_recSame(last[name], value) && last[dk] === fresh[dk]) await chrome.storage.local.remove([name, dk]); } }',
 ].join('\n');
 
-const idbMigrate =
-  'function _secSame(a, b) { if (typeof a === "string" || typeof b === "string") return a === b; return _secIsEncrypted(a) && _secIsEncrypted(b) && a.ct === b.ct && a.iv === b.iv; } function _secPutIfAbsent(rec) { return _secTx("readwrite", function(store, done) { var g = store.get(rec.name); g.onsuccess = function() { if (g.result) { done(false); return; } store.put(rec, rec.name); done(true); }; }); } async function _secMigrate() { var all = await chrome.storage.local.get(null); var names = Object.keys(all).filter(function(k) { return !k.endsWith(DOMAINS_SUFFIX) && k + DOMAINS_SUFFIX in all && (typeof all[k] === "string" || _secIsEncrypted(all[k])); }); for (var name of names) { var dk = name + DOMAINS_SUFFIX; var fresh = await chrome.storage.local.get([name, dk]); var value = fresh[name]; if (typeof value !== "string" && !_secIsEncrypted(value)) continue; var enc = typeof value === "string" ? await _secEncrypt(value) : value; var again = await chrome.storage.local.get([name, dk]); if (!_secSame(again[name], value) || again[dk] !== fresh[dk]) continue; var domains = typeof fresh[dk] === "string" ? fresh[dk] : ""; await _secPutIfAbsent({ name: name, value: enc, domains: domains }); var last = await chrome.storage.local.get([name, dk]); if (_secSame(last[name], value) && last[dk] === fresh[dk]) await chrome.storage.local.remove([name, dk]); } }';
+const recordAdapter =
+  'var encryptedStorage = { async get(keys) { await ensureMigrated(); const out = {}; for (const rec of await _recAll()) { const dec = await _recDecrypt(rec.value); if (dec !== void 0) out[rec.name] = dec; out[rec.name + DOMAINS_SUFFIX] = rec.domains ?? ""; } if (keys === null || keys === void 0) return out; const wanted = typeof keys === "string" ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys); const picked = {}; for (const k of wanted) if (k in out) picked[k] = out[k]; return picked; }, async set(items) { await ensureMigrated(); const changes = new Map(); for (const [k, v] of Object.entries(items)) { const isDomains = k.endsWith(DOMAINS_SUFFIX); const base = isDomains ? k.slice(0, -DOMAINS_SUFFIX.length) : k; const c = changes.get(base) ?? {}; if (isDomains) c.domains = typeof v === "string" ? v : ""; else c.value = v; changes.set(base, c); } const records = []; for (const [name, c] of changes) { const rec = (await _recGet(name)) ?? { name, value: void 0, domains: "" }; if ("value" in c) rec.value = typeof c.value === "string" ? await encryptValue(c.value) : c.value; if ("domains" in c) rec.domains = c.domains; if (rec.value !== void 0) records.push(rec); } await _recPut(records); }, async remove(keys) { await ensureMigrated(); const list = typeof keys === "string" ? [keys] : keys; const names = []; const cleared = []; for (const k of list) { if (k.endsWith(DOMAINS_SUFFIX)) cleared.push(k.slice(0, -DOMAINS_SUFFIX.length)); else names.push(k); } const records = []; for (const n of cleared) { if (names.includes(n)) continue; const rec = await _recGet(n); if (rec) { rec.domains = ""; records.push(rec); } } if (records.length) await _recPut(records); if (names.length) await _recDelete(names); } };';
 
-const idbAdapter =
-  'var _encryptedStorage = { async get(keys) { await _secEnsureMigrated(); var out = {}; for (var rec of await _secAllRecords()) { var dec = await _secDecrypt(rec.value); if (dec !== void 0) out[rec.name] = dec; out[rec.name + DOMAINS_SUFFIX] = rec.domains ?? ""; } if (keys === null || keys === void 0) return out; var wanted = typeof keys === "string" ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys); var picked = {}; for (var k of wanted) if (k in out) picked[k] = out[k]; return picked; }, async set(items) { await _secEnsureMigrated(); var changes = new Map(); for (var [k, v] of Object.entries(items)) { var isDomains = k.endsWith(DOMAINS_SUFFIX); var base = isDomains ? k.slice(0, -DOMAINS_SUFFIX.length) : k; var c = changes.get(base) ?? {}; if (isDomains) c.domains = typeof v === "string" ? v : ""; else c.value = v; changes.set(base, c); } var records = []; for (var [name, c] of changes) { var rec = (await _secGetRecord(name)) ?? { name: name, value: void 0, domains: "" }; if ("value" in c) rec.value = typeof c.value === "string" ? await _secEncrypt(c.value) : c.value; if ("domains" in c) rec.domains = c.domains; if (rec.value !== void 0) records.push(rec); } await _secPutRecords(records); }, async remove(keys) { await _secEnsureMigrated(); var list = typeof keys === "string" ? [keys] : keys; var names = []; var cleared = []; for (var k of list) { if (k.endsWith(DOMAINS_SUFFIX)) cleared.push(k.slice(0, -DOMAINS_SUFFIX.length)); else names.push(k); } var records = []; for (var n of cleared) { if (names.includes(n)) continue; var rec = await _secGetRecord(n); if (rec) { rec.domains = ""; records.push(rec); } } if (records.length) await _secPutRecords(records); if (names.length) await _secDeleteRecords(names); } };';
+const recordList =
+  'async function listSecretsIncludingUnreadable() { await ensureMigrated(); const result = []; for (const rec of await _recAll()) { const domains = (rec.domains ?? "").split(",").map((d) => d.trim()).filter(Boolean); result.push({ name: rec.name, domains, unreadable: (await _recDecrypt(rec.value)) === void 0 }); } result.sort((a, b) => a.name.localeCompare(b.name)); return result; }';
 
-const idbList = `async function listSecretsIncludingUnreadable() {
-    await _secEnsureMigrated();
-    var result = [];
-    for (var rec of await _secAllRecords()) {
-      var domains = (rec.domains ?? "").split(",").map(function(d) { return d.trim(); }).filter(Boolean);
-      result.push({ name: rec.name, domains: domains, unreadable: (await _secDecrypt(rec.value)) === void 0 });
-    }
-    result.sort(function(a, b) { return a.name.localeCompare(b.name); });
-    return result;
-  }`;
-
-function idbStore(source, prefix) {
+function recordStoreIn(source, prefix) {
   let out = assertPatch(
     source,
     `${prefix}-open`,
-    /function _secOpenDb\(\) \{[^\n]*\}\n/,
-    `${idbRecords}\n${idbOpen}\n`
+    /(indexedDB\.open\(DB_NAME, )DB_VERSION(\);\s*req\.onupgradeneeded = \(\) => \{\s*const db = req\.result;\s*if \(!db\.objectStoreNames\.contains\(STORE_NAME\)\) \{\s*db\.createObjectStore\(STORE_NAME\);\s*\})/,
+    (_, open, rest) =>
+      `${open}2${rest}\n      if (!db.objectStoreNames.contains("records")) db.createObjectStore("records");`
   );
   out = assertPatch(
     out,
     `${prefix}-migrate`,
-    /async function _secMigrate\(\) \{[^\n]*\}\n/,
-    `${idbMigrate}\n`
+    /async function migrateSecretsToEncrypted\(\) \{[\s\S]*?\n(\s*)var migrationPromise = null;/,
+    `${recordStore}\n$1var migrationPromise = null;`
   );
   out = assertPatch(
     out,
     `${prefix}-adapter`,
-    /var _encryptedStorage = \{[^\n]*\};\n/,
-    `${idbAdapter}\n`
+    /var encryptedStorage = \{ async get\(keys\) \{[\s\S]*?\n\s*\} \};\n/,
+    `${recordAdapter}\n`
   );
   applied.push(`${prefix}-open`, `${prefix}-migrate`, `${prefix}-adapter`);
   return out;
 }
 
-if (!content.includes('_secRecordStore')) {
-  content = idbStore(content, 'B-SEC3-sw');
+if (!pr3980needed && !content.includes('_recStore')) {
+  content = recordStoreIn(content, 'B-SEC3-sw');
   content = assertPatch(
     content,
     'B-SEC3-sw-delete-unreadable',
     /const existing = await listSecrets\(storageLocal\);\s*if \(!existing\.some\(\(e\) => e\.name === name\)\) \{/,
-    'await _secEnsureMigrated();\n      if (!(await _secGetRecord(name))) {'
+    'await ensureMigrated();\n      if (!(await _recGet(name))) {'
   );
   applied.push('B-SEC3-sw-delete-unreadable');
+} else if (pr3980needed) {
+  throw new Error('strip-comments: B-SEC3 needs slicc#3980 in the pinned six tag');
 } else {
   skip('six-secret-store', 'six-sw.js');
 }
 
-if (!secretsJs.includes('_secRecordStore')) {
-  secretsJs = idbStore(secretsJs, 'B-SEC3-page');
+if (!pr3980pageNeeded && !secretsJs.includes('_recStore')) {
+  secretsJs = recordStoreIn(secretsJs, 'B-SEC3-page');
   secretsJs = assertPatch(
     secretsJs,
     'B-SEC3-page-list',
-    /async function listSecretsIncludingUnreadable\(\) \{[\s\S]*?\n {2}\}\n/,
-    `${idbList}\n`
+    /async function listSecretsIncludingUnreadable\(\) \{[\s\S]*?\n\s*return result;\n\s*\}\n/,
+    `${recordList}\n`
   );
   applied.push('B-SEC3-page-list');
+} else if (pr3980pageNeeded) {
+  throw new Error('strip-comments: B-SEC3 needs slicc#3980 in the pinned six tag');
 } else {
   skip('six-secret-store', 'secrets.js');
 }

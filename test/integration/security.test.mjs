@@ -426,7 +426,7 @@ test('B24-1 seven: a navigation to the vault fails before it commits and the ses
   );
 });
 
-test('B24-1 six bridge: a navigation to the vault detaches the session (tabs.onUpdated)', async (t) => {
+test('B24-1 six bridge: a navigation to the vault fails before it commits and the session stays', async (t) => {
   const www = await chrome.visit(t, 'https://www.sliccy.ai/?slicc=leader');
   const answer = await www.evaluate(async (eid) => {
     const port = chrome.runtime.connect(eid, { name: 'slicc.cdp-bridge' });
@@ -516,28 +516,21 @@ test('B24-1 six bridge: a navigation to the vault detaches the session (tabs.onU
       sessionId,
     }).catch(() => undefined);
 
-    let detached = false;
-    for (let i = 0; i < 80; i++) {
-      if (events.some((e) => e.method === 'Target.detachedFromTarget')) {
-        detached = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-
+    await new Promise((r) => setTimeout(r, 2500));
+    const detached = events.some((e) => e.method === 'Target.detachedFromTarget');
     const after = await send('Runtime.evaluate', {
-      expression: '1',
+      expression: 'location.href',
       returnByValue: true,
       sessionId,
     });
-    const refused = !!after.error;
-
+    const href = after.result?.result?.value ?? `error ${after.error}`;
     port.disconnect();
-    return { detached, refused };
+    return { detached, href };
   }, extId);
   assert.ok(!answer.error, `bridge test failed: ${JSON.stringify(answer)}`);
-  assert.equal(answer.detached, true, 'bridge must receive Target.detachedFromTarget');
-  assert.equal(answer.refused, true, 'evaluate after detach must be refused');
+  assert.equal(answer.detached, false, 'the session stays');
+  assert.equal(answer.href.startsWith('error'), false, `the session answers: ${answer.href}`);
+  assert.equal(answer.href.startsWith('https://vault.sliccy.ai'), false, 'the vault never commits');
 });
 
 test('webNavigation adds no permission warning over 6.248.11, so an in-place update stays enabled', async (t) => {

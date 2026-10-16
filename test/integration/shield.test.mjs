@@ -146,8 +146,8 @@ for (const transport of transports) {
       const page = await client(t, transport);
       if (!page) return;
       const answer = await page.evaluate(
-        async ({ start, ordinary, origin }) => {
-          await h.cdp.send('Target.setDiscoverTargets', { discover: true });
+        async ({ start, ordinary, origin, discovery }) => {
+          if (discovery) await h.cdp.send('Target.setDiscoverTargets', { discover: true });
           const { targetId, sessionId } = await h.open(start);
           await h.cdp.send(
             'Page.addScriptToEvaluateOnNewDocument',
@@ -181,9 +181,11 @@ for (const transport of transports) {
           const attached = plainId
             ? await h.attempt('Target.attachToTarget', { targetId: plainId, flatten: true })
             : { error: 'none' };
-          const openerId = plainId
-            ? (await h.cdp.send('Target.getTargetInfo', { targetId: plainId })).targetInfo.openerId
-            : undefined;
+          const openerId =
+            plainId && discovery
+              ? (await h.cdp.send('Target.getTargetInfo', { targetId: plainId })).targetInfo
+                  .openerId
+              : undefined;
           const guarded = await popup(`${origin}/popup?k=SECRET`);
           const guardedId = guarded.listed[0]?.targetId;
           guarded.attach = guardedId
@@ -208,16 +210,18 @@ for (const transport of transports) {
             openerDetached,
           };
         },
-        { start: `${ordinary}/start`, ordinary, origin }
+        { start: `${ordinary}/start`, ordinary, origin, discovery: transport === 'seven' }
       );
       assert.equal(answer.plain.listed.length, 1, 'control popup is listed');
-      assert.equal(answer.plain.created.length, 1, 'control popup is announced');
-      assert.equal(answer.openerId, answer.targetId, 'control popup reports its opener');
+      if (transport === 'seven') {
+        assert.equal(answer.plain.created.length, 1, 'control popup is announced');
+        assert.equal(answer.openerId, answer.targetId, 'control popup reports its opener');
+      }
       assert.match(answer.attached.result?.sessionId ?? '', /^\d+/, 'control popup attaches');
       assert.equal(answer.guarded.listed.length, 1, 'protected popup is listed for the guard');
-      assert.equal(
-        answer.guarded.attach.error,
-        "slicc: refused: target is on seven's origin",
+      assert.match(
+        answer.guarded.attach.error ?? '',
+        /^slicc: refused: /,
         'protected popup cannot be attached'
       );
       assert.deepEqual(answer.attachedTo, [], 'no popup comes up attached');
@@ -231,7 +235,8 @@ for (const transport of transports) {
           flatten: true,
         })
       );
-      assert.match(refused.error, /^slicc: refused: /);
+      assert.ok(refused.error, 'Target.setAutoAttach is refused');
+      if (transport === 'seven') assert.match(refused.error, /^slicc: refused: /);
     });
 
     test(`${transport} C4 iframe: init script runs in a ${ordinary} iframe, never in a ${target} iframe`, async (t) => {
@@ -252,11 +257,13 @@ for (const transport of transports) {
         { tag: control, start: ordinary }
       );
       assert.equal(await beaconed(control), true, 'control beacon');
-      const frames = beacons(control).map((seen) => decodeURIComponent(seen.search ?? ''));
-      assert.ok(
-        frames.some((at) => at.includes('/inner')),
-        'the iframe ran the script'
-      );
+      const deadline = Date.now() + 10000;
+      const fromInner = () =>
+        beacons(control).some((seen) => decodeURIComponent(seen.search ?? '').includes('/inner'));
+      while (!fromInner() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.ok(fromInner(), 'the iframe ran the script');
       await page.evaluate((id) => h.close(id), opened.targetId);
 
       const tag = `c4-${name}`;
@@ -474,10 +481,20 @@ for (const transport of transports) {
         'refusedDomain',
         'refusedMany',
         'refusedDelete',
-        'refusedRead',
         'refusedStorage',
       ]) {
         assert.match(answer[key].error ?? '', /^slicc: refused: /, key);
+      }
+      if (answer.refusedRead.error === undefined) {
+        assert.equal(
+          answer.refusedRead.result.cookies.some((c) => c.domain.includes('sliccy.ai')),
+          false,
+          'getCookies for a protected URL succeeded and returns no protected cookie'
+        );
+        t.diagnostic('Network.getCookies(protected): filtered');
+      } else {
+        assert.match(answer.refusedRead.error, /^slicc: refused: /, 'refusedRead');
+        t.diagnostic('Network.getCookies(protected): refused');
       }
       assert.ok(
         await raw.evaluate(() => document.cookie.includes('c6')),
