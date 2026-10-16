@@ -42,7 +42,7 @@
         "https://mcpcat.sliccy.ai/*"
       ],
       "exclude_globs": ["https://vault-*.sliccy.ai/*"],
-      "js": ["relay.js"],
+      "js": ["seven-gate.js", "relay.js"],
       "run_at": "document_start"
     },
     {
@@ -55,7 +55,7 @@
         "https://mcpcat.sliccy.ai/*"
       ],
       "exclude_globs": ["https://vault-*.sliccy.ai/*"],
-      "js": ["page.js"],
+      "js": ["seven-gate-main.js", "page.js"],
       "run_at": "document_start",
       "world": "MAIN"
     }

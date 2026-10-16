@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch as start } from '@ai-ecoverse/slicc-shared-web/harness';
+import { seven } from '../../extension/seven.js';
 import { certificate, ims, pages, upstream } from './servers.mjs';
 
 export async function launch() {
@@ -17,6 +18,7 @@ export async function launch() {
     `MAP vault-x.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP vault-feature-x.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP get.sliccy.ai 127.0.0.1:${site.port}`,
+    `MAP echo.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP www.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP other.test 127.0.0.1:${site.port}`,
     `MAP discover.test 127.0.0.1:${site.port}`,
@@ -34,12 +36,14 @@ export async function launch() {
   const allowedHosts = new Set(['www.sliccy.ai', 'seven.sliccy.ai']);
   function expectsExtension(hostname) {
     if (allowedHosts.has(hostname)) return true;
-    if (!hostname.endsWith('.sliccy.ai')) return false;
-    const label = hostname.slice(0, -'.sliccy.ai'.length);
+    const domain = `.${seven.domain}`;
+    if (!hostname.endsWith(domain)) return false;
+    const label = hostname.slice(0, -domain.length);
     if (!label) return false;
-    const exL = ['www', 'vault', 'vault-preview', 'get', 'mcpcat'];
-    const exP = ['vault-'];
-    if (exL.includes(label) || exP.some((p) => label.startsWith(p))) return false;
+    const { excludedLabels, excludedLabelPrefixes } = seven;
+    if (excludedLabels.includes(label) || excludedLabelPrefixes.some((p) => label.startsWith(p))) {
+      return false;
+    }
     return true;
   }
 
@@ -63,6 +67,7 @@ export async function launch() {
 
   return {
     site,
+    cdp: chrome.cdp,
     upstream: remote,
     ims: adobe,
     visit,

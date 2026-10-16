@@ -1,10 +1,12 @@
 (() => {
   const _six = ['www.sliccy.ai'];
-  const _exL = ['www', 'vault', 'vault-preview', 'get', 'mcpcat'];
-  const _exP = ['vault-'];
-  const _d = '.sliccy.ai';
+  const _seven = globalThis.__sliccSeven;
+  delete globalThis.__sliccSeven;
+  const _exL = _seven.excludedLabels;
+  const _exP = _seven.excludedLabelPrefixes;
+  const _d = `.${_seven.domain}`;
   const h = location.hostname;
-  if (!h.endsWith(_d) || h === _d.slice(1)) return;
+  if (!h.endsWith(_d)) return;
   const l = h.slice(0, -_d.length);
   if (!l || (!_six.includes(h) && (_exL.includes(l) || _exP.some((p) => l.startsWith(p))))) return;
 

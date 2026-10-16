@@ -10,3 +10,7 @@ extension/secrets.js
 six-import/
 screenshots/
 .six-ref
+extension/seven.js
+extension/seven-gate.js
+extension/seven-gate-main.js
+extension/protected-rules.js
