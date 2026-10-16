@@ -75,14 +75,13 @@ jobs:
 
       - run: npm ci
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ runner.temp }}/six
-          key: six-${{ hashFiles('.six-tag') }}
-
       - run: npm run build
-        env:
-          SIX_CACHE_DIR: ${{ runner.temp }}/six
+
+      - name: Rebuild is byte-identical
+        run: |
+          sha256sum extension/six-sw.js extension/sidepanel.js extension/secrets.js > "$RUNNER_TEMP/bundles.sha256"
+          npm run build
+          sha256sum -c "$RUNNER_TEMP/bundles.sha256"
 
       - run: npm run lint
 
@@ -123,15 +122,7 @@ jobs:
             find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp {} "$DEBS"/ \;
           fi
 
-      - name: Integration tests with coverage, CPU profiles, and screenshots
+      - name: Integration tests with coverage and CPU profiles
         run: npm test
         env:
           NODE_OPTIONS: "--max-old-space-size=4096"
-
-      - name: Upload screenshots
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: screenshots
-          path: screenshots/
-          if-no-files-found: ignore
