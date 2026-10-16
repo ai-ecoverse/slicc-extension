@@ -22,7 +22,7 @@
     "pretest": "playwright-core install --no-shell chromium",
     "test": "node --test --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs test/integration/*.test.mjs",
     "release": "semantic-release",
-    "test:six": "vitest run --config test/unit/six/vitest.config.mjs"
+    "test:six": "vitest run"
   },
   "devDependencies": {
     "@ai-ecoverse/slicc-browsers": "1.7.5",

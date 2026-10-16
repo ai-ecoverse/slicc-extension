@@ -65,12 +65,18 @@ test('six secrets page: a custom secret needs a domain, then saves, lists and de
     'the form clears after a save'
   );
   const remove = `[...document.querySelector('.secret-row[data-name=${JSON.stringify(name)}]').querySelectorAll('button')].find((b) => b.textContent === 'Delete').click()`;
-  await secrets.evaluate(`(() => { window.confirm = () => false; ${remove}; return true; })()`);
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  await secrets.evaluate(
+    `(() => { window.asked = 0; window.confirm = () => { window.asked += 1; return false; }; ${remove}; return true; })()`
+  );
+  assert.equal(await secrets.until('window.asked === 1'), true, 'the delete asks first');
+  await secrets.evaluate(
+    'document.getElementById("list").replaceChildren(); document.getElementById("refreshBtn").click()'
+  );
+  await secrets.until('document.getElementById("list").children.length > 0');
   assert.equal(
     (await rows(secrets)).some((r) => r.name === name),
     true,
-    'declining the confirmation keeps the secret'
+    'declining the confirmation keeps the secret in storage'
   );
   await secrets.evaluate(`(() => { window.confirm = () => true; ${remove}; return true; })()`);
   await secrets.until(
@@ -189,22 +195,24 @@ test('six handoff: a Link handoff header raises one notification and the badge p
     'chrome.notifications.getAll().then((all) => Promise.all(Object.keys(all).map((id) => chrome.notifications.clear(id))))'
   );
   await panel.evaluate('chrome.action.setBadgeText({ text: "" })');
+  const fingerprints =
+    'chrome.storage.session.get("slicc_handoff_notified_fingerprints").then((r) => (r.slicc_handoff_notified_fingerprints ?? []).length)';
+  const before = await panel.evaluate(fingerprints);
   await chrome.visit(t, 'https://ordinary.test/');
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  assert.deepEqual(await handoffs(), [], 'an ordinary page raises no handoff');
-  assert.equal(await panel.evaluate('chrome.action.getBadgeText({})'), '');
   await chrome.visit(t, `https://ordinary.test/linked?n=${n}`);
+  await chrome.visit(t, `https://ordinary.test/linked?n=${n}`);
+  await chrome.visit(t, `https://ordinary.test/linked?n=${n}-later`);
   assert.equal(
-    await panel.until(
-      'chrome.notifications.getAll().then((all) => Object.keys(all).some((id) => id.startsWith("slicc-handoff-")))'
-    ),
+    await panel.until(`${fingerprints}.then((count) => count >= ${before + 2})`),
     true,
-    'the handoff raises a notification'
+    'both distinct handoffs are recorded, so every earlier navigation was handled'
+  );
+  assert.equal(
+    (await handoffs()).length,
+    2,
+    'one notification per distinct handoff: none for the ordinary page, none for the repeat'
   );
   assert.equal(await panel.evaluate('chrome.action.getBadgeText({})'), '!');
-  await chrome.visit(t, `https://ordinary.test/linked?n=${n}`);
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  assert.equal((await handoffs()).length, 1, 'the same handoff does not notify twice');
   await panel.close();
 });
 
