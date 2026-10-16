@@ -64,9 +64,9 @@ npm run pack
 
 ## Six source
 
-`six/extension/` is slicc's `packages/chrome-extension/src`, `six/shared-ts/` the `packages/shared-ts` modules it reaches, and `six/cherry/` cherry's embed-ui closure, all imported from the slicc commit in [`six/upstream.json`](six/upstream.json) and edited here from then on. [`six/manifest.json`](six/manifest.json) is that release's manifest, the permission baseline when the live listing is unreachable. `@slicc/shared-ts` and `@ai-ecoverse/cherry` resolve through `paths` in `tsconfig.json`, which esbuild reads too.
+`six/extension/` is slicc's `packages/chrome-extension/src`, `six/shared-ts/` the `packages/shared-ts` modules it reaches, and `six/cherry/` cherry's embed-ui closure, all imported from the slicc commit in [`six/upstream.json`](six/upstream.json) and edited here from then on. [`six/manifest.json`](six/manifest.json) is that release's manifest, the permission baseline when the live listing is unreachable; `six/upstream.json` pins its sha256. `@slicc/shared-ts` and `@ai-ecoverse/cherry` resolve through `paths` in `tsconfig.json`, which esbuild reads too.
 
-Before publishing, `scripts/check-six-floor.mjs` refuses a release based on an older six than the live listing carries. Once the live build comes from `six/`, the Chrome Web Store version check in `scripts/cws-publish.mjs` decides.
+Releases roll forward only. Before publishing, `scripts/check-six-floor.mjs` refuses a release based on an older six than the live listing carries. Once the live build comes from `six/`, it refuses legacy `(six vX)` builds and any release that isn't newer than the live one, and `scripts/cws-publish.mjs` checks the version against the store again.
 
 ## Permissions
 
