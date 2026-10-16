@@ -114,6 +114,12 @@ if (sixBrowsers) {
   }
 }
 
+mkdirSync(resolve(root, 'six-import'), { recursive: true });
+writeFileSync(
+  resolve(root, 'six-import/manifest.json'),
+  readFileSync(resolve(sixDir, 'packages/chrome-extension/manifest.json'), 'utf8')
+);
+
 const chromeExtSrc = resolve(sixDir, 'packages/chrome-extension/src');
 const sharedTsIndex = resolve(sixDir, 'packages/shared-ts/src/index.ts');
 

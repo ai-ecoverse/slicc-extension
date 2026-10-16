@@ -236,7 +236,25 @@ for (const transport of transports) {
         })
       );
       assert.ok(refused.error, 'Target.setAutoAttach is refused');
-      if (transport === 'seven') assert.match(refused.error, /^slicc: refused: /);
+      if (transport === 'seven') {
+        assert.match(refused.error, /^slicc: refused: /);
+        return;
+      }
+      const shielded = await page.evaluate(async (start) => {
+        const { targetId, sessionId } = await h.open(start);
+        const answer = await h.attempt(
+          'Target.setAutoAttach',
+          { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+          sessionId
+        );
+        await h.close(targetId);
+        return answer;
+      }, `${ordinary}/start`);
+      assert.equal(
+        shielded.error,
+        'slicc: refused: auto-attach is not supported by the extension bridge',
+        'the six shield refuses auto-attach on an attached session'
+      );
     });
 
     test(`${transport} C4 iframe: init script runs in a ${ordinary} iframe, never in a ${target} iframe`, async (t) => {
