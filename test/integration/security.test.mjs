@@ -533,39 +533,47 @@ test('B24-1 six bridge: a navigation to the vault fails before it commits and th
   assert.equal(answer.href.startsWith('https://vault.sliccy.ai'), false, 'the vault never commits');
 });
 
-test('webNavigation adds no permission warning over 6.248.11, so an in-place update stays enabled', async (t) => {
-  const page = await chrome.visit(t, slicc);
-  const current = JSON.parse(
-    await readFile(new URL('../../extension/manifest.json', import.meta.url))
-  );
-  const released = {
-    ...current,
-    permissions: [
-      'debugger',
-      'tabs',
-      'tabGroups',
-      'identity',
-      'storage',
-      'webRequest',
-      'declarativeNetRequestWithHostAccess',
-      'notifications',
-      'sidePanel',
-    ],
-  };
+test('the built manifest adds no permission warning over the pinned six manifest, and the control proves an added permission is caught', async (t) => {
+  const read = async (path) => JSON.parse(await readFile(new URL(path, import.meta.url)));
+  const built = await read('../../extension/manifest.json');
+  const six = await read('../../six-import/manifest.json');
+  const allowed = await read('../../scripts/warning-free-permissions.json');
+  const control = { ...built, permissions: [...built.permissions, 'tabGroups'] };
+  const withEach = allowed.map((p) => ({ ...six, permissions: [...six.permissions, p] }));
+  assert.equal(six.permissions.includes('tabGroups'), false, 'six does not declare tabGroups');
   assert.deepEqual(
-    current.permissions.filter((p) => !released.permissions.includes(p)),
-    ['webNavigation']
+    built.permissions.filter((p) => !six.permissions.includes(p)).sort(),
+    [...allowed].sort(),
+    'the allowlist is exactly the permissions the built manifest adds over six'
   );
+  for (const field of ['host_permissions', 'optional_permissions']) {
+    const have = six[field] ?? [];
+    assert.deepEqual(
+      (built[field] ?? []).filter((p) => !have.includes(p)),
+      [],
+      `${field} adds nothing over six`
+    );
+  }
+  const page = await chrome.visit(t, slicc);
   const { targetId } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
   const sid = await extSession(page, targetId);
+  const manifests = [six, control, built, ...withEach].map((m) => JSON.stringify(m));
   const warnings = await extEval(
     page,
     sid,
-    `Promise.all([${JSON.stringify(JSON.stringify(released))}, ${JSON.stringify(JSON.stringify(current))}].map((m) => chrome.management.getPermissionWarningsByManifest(m)))`
+    `Promise.all(${JSON.stringify(manifests)}.map((m) => chrome.management.getPermissionWarningsByManifest(m)))`
   );
-  const [before, after] = warnings.result.value;
-  assert.ok(before.length > 0, `6.248.11 has warnings: ${JSON.stringify(before)}`);
-  assert.deepEqual([...after].sort(), [...before].sort(), 'the warning set is unchanged');
+  const [base, controlled, current, ...each] = warnings.result.value;
+  const added = (w) => w.filter((x) => !base.includes(x));
+  assert.ok(base.length > 0, `six has warnings: ${JSON.stringify(base)}`);
+  assert.ok(
+    added(controlled).length > 0,
+    `control: tabGroups adds a warning: ${JSON.stringify(controlled)}`
+  );
+  allowed.forEach((p, i) => {
+    assert.deepEqual(added(each[i]), [], `${p} alone adds no warning over six`);
+  });
+  assert.deepEqual(added(current), [], 'the built manifest adds no warning over six');
   await extClose(page, targetId);
 });
 

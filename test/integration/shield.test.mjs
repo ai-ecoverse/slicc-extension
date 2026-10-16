@@ -237,6 +237,11 @@ for (const transport of transports) {
       );
       assert.ok(refused.error, 'Target.setAutoAttach is refused');
       if (transport === 'seven') assert.match(refused.error, /^slicc: refused: /);
+      else
+        assert.equal(
+          refused.error,
+          'slicc: refused: auto-attach is not supported by the extension bridge'
+        );
     });
 
     test(`${transport} C4 iframe: init script runs in a ${ordinary} iframe, never in a ${target} iframe`, async (t) => {
