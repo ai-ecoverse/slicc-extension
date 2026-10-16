@@ -1,5 +1,6 @@
 {
   "repo": "ai-ecoverse/slicc",
   "tag": "v6.249.3",
-  "sha": "ec4be9efe39af907c75d49305dce39c603cd38b9"
+  "sha": "ec4be9efe39af907c75d49305dce39c603cd38b9",
+  "manifestSha256": "c4de2f43e0013a8d179f9644eab08be116223d8769b8d50f99dd7a4c1ca0f1bf"
 }

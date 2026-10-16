@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -110,8 +111,23 @@ export async function checkLivePermissions(release, opts = {}) {
   return { ...result, ok: true };
 }
 
+export function pinnedManifest(text, upstream) {
+  const pin = upstream?.manifestSha256;
+  if (typeof pin !== 'string' || !/^[0-9a-f]{64}$/.test(pin)) {
+    throw new Error('six/upstream.json pins no manifestSha256');
+  }
+  const actual = createHash('sha256').update(text).digest('hex');
+  if (actual !== pin) {
+    throw new Error(`six/manifest.json sha256 ${actual} is not the pinned ${pin}`);
+  }
+  return JSON.parse(text);
+}
+
 export function readUpstreamManifest() {
-  return JSON.parse(readFileSync(resolve(root, 'six/manifest.json'), 'utf8'));
+  return pinnedManifest(
+    readFileSync(resolve(root, 'six/manifest.json')),
+    JSON.parse(readFileSync(resolve(root, 'six/upstream.json'), 'utf8'))
+  );
 }
 
 export function readAllowed() {

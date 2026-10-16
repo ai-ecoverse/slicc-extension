@@ -85,6 +85,8 @@ jobs:
 
       - run: npm run lint
 
+      - run: npm run typecheck
+
       - name: Chromium version and root
         id: chromium
         run: |

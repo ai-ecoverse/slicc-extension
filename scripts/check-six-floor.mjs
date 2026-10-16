@@ -46,22 +46,44 @@ export async function checkSixFloor(manifest, upstream, opts = {}) {
   } catch (err) {
     return { ok: false, error: `${err.message}. Failing closed.` };
   }
+  const legacy = extractSixTagFromVersionName(manifest?.version_name) !== null;
   let live;
   try {
     live = await liveSix(opts);
   } catch (err) {
     return { ok: false, floor, error: `live version unreadable: ${err.message}. Failing closed.` };
   }
-  if (live.six !== null && compareVersions(floor, live.six) < 0) {
+  const seen = { floor, live: live.six, liveVersion: live.crxVersion };
+  if (live.six === null) {
+    if (legacy) {
+      return {
+        ...seen,
+        ok: false,
+        error: `the live build ${live.crxVersion} comes from six/, and this release is a legacy build tagged six ${floor}, which predates it; refusing to roll back`,
+      };
+    }
+    if (compareVersions(manifest?.version ?? '0', live.crxVersion) <= 0) {
+      return {
+        ...seen,
+        ok: false,
+        error: `release ${manifest?.version} is not newer than the live build ${live.crxVersion}, which comes from six/; refusing to roll back`,
+      };
+    }
     return {
+      ...seen,
+      ok: true,
+      decidedBy: 'version',
+      notice: `the live build ${live.crxVersion} comes from six/, so no six floor applies; release ${manifest.version} passes only because it is newer, and cws-publish.mjs checks that again against the store before publishing`,
+    };
+  }
+  if (compareVersions(floor, live.six) < 0) {
+    return {
+      ...seen,
       ok: false,
-      floor,
-      live: live.six,
-      liveVersion: live.crxVersion,
       error: `release is based on six ${floor}, older than the live six ${live.six} (live build ${live.crxVersion}); refusing to ship less than the live listing has`,
     };
   }
-  return { ok: true, floor, live: live.six, liveVersion: live.crxVersion };
+  return { ...seen, ok: true, decidedBy: 'floor' };
 }
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
@@ -82,11 +104,14 @@ if (isMain) {
     upstream = null;
   }
   const result = await checkSixFloor(manifest, upstream);
+  if (result.notice) process.stdout.write(`::notice title=Six floor guard::${result.notice}\n`);
   if (!result.ok) {
     process.stderr.write(`GUARD FAILED: ${result.error}\n`);
     process.exit(1);
   }
   process.stdout.write(
-    `Six floor guard passed: release based on six ${result.floor}, live six ${result.live ?? 'none (live build is from local source)'} (live build ${result.liveVersion})\n`
+    result.decidedBy === 'version'
+      ? `Six floor guard passed on version alone: release ${manifest.version} is newer than the live build ${result.liveVersion}\n`
+      : `Six floor guard passed: release based on six ${result.floor}, live six ${result.live} (live build ${result.liveVersion})\n`
   );
 }
