@@ -15,6 +15,7 @@
   "scripts": {
     "prepare": "lefthook install",
     "lint": "slicc-lint",
+    "typecheck": "tsc -p tsconfig.json",
     "format": "biome check --write .",
     "build": "node scripts/build-seven.mjs && node scripts/build-six.mjs && node scripts/strip-comments.mjs",
     "pack": "node scripts/build-seven.mjs && node scripts/build-six.mjs && node scripts/strip-comments.mjs && node scripts/pack.mjs",
@@ -28,9 +29,11 @@
     "@biomejs/biome": "2.5.15",
     "@semantic-release/exec": "7.1.0",
     "esbuild": "0.28.2",
+    "html2canvas-pro": "2.5.2",
     "lefthook": "2.2.1",
     "playwright-core": "1.64.0",
-    "semantic-release": "25.0.9"
+    "semantic-release": "25.0.9",
+    "typescript": "7.0.2"
   },
   "allowScripts": {
     "esbuild@0.28.2": true
