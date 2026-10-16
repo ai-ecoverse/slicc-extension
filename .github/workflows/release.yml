@@ -9,6 +9,10 @@ on:
         description: "Six release tag to build (default: from .six-tag)"
         required: false
         type: string
+      publish_tag:
+        description: "Publish this existing release tag (e.g. v7.4.1) instead of cutting a release"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -19,7 +23,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: inputs.publish_tag == '' && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     env:
@@ -32,6 +36,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
+          ref: ${{ inputs.publish_tag }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -52,7 +57,7 @@ jobs:
 
   publish:
     needs: release
-    if: vars.CWS_PUBLISH_ENABLED == 'true'
+    if: always() && vars.CWS_PUBLISH_ENABLED == 'true' && (needs.release.result == 'success' || (inputs.publish_tag != '' && needs.release.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: chrome-web-store
@@ -90,6 +95,11 @@ jobs:
         id: version
         run: |
           TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
+          WANT="${{ inputs.publish_tag }}"
+          if [ -n "$WANT" ] && [ "$TAG" != "$WANT" ]; then
+            echo "::error::publish_tag $WANT is not an exact release tag at the checked-out commit"
+            exit 1
+          fi
           if [ -z "$TAG" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
