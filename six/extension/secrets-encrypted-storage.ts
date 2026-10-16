@@ -1,5 +1,9 @@
+import { DOMAINS_SUFFIX } from '@slicc/shared-ts';
+import type { SecretsStorageItems, StorageArea } from './secrets-storage.js';
+
 const DB_NAME = 'slicc-secrets';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+const RECORD_STORE = 'records';
 const STORE_NAME = 'keys';
 const KEY_ID = 'aes-gcm-secrets';
 
@@ -17,6 +21,7 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
+      if (!db.objectStoreNames.contains(RECORD_STORE)) db.createObjectStore(RECORD_STORE);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error ?? new Error('IndexedDB open failed'));
@@ -118,33 +123,119 @@ export async function decryptValue(
   }
 }
 
-import { DOMAINS_SUFFIX } from '@slicc/shared-ts';
+interface SecretRecord {
+  name: string;
+  value: EncryptedValue | string | undefined;
+  domains: string;
+}
 
-export async function migrateSecretsToEncrypted(): Promise<void> {
-  const all = await chrome.storage.local.get(null);
-  const candidates: string[] = [];
-  for (const [key, value] of Object.entries(all)) {
-    if (typeof value !== 'string') continue;
-    if (key.endsWith(DOMAINS_SUFFIX)) continue;
-    if (!(key + DOMAINS_SUFFIX in all)) continue;
-    candidates.push(key);
-  }
+type StoredValue = EncryptedValue | string;
 
-  for (const key of candidates) {
-    const fresh = await chrome.storage.local.get(key);
-    const value = fresh[key];
-    if (typeof value !== 'string') continue;
-    const encrypted = await encryptValue(value);
-    const again = (await chrome.storage.local.get(key))[key];
-    if (again !== value) continue;
-    await chrome.storage.local.set({ [key]: encrypted });
+async function recordTx<T>(
+  mode: IDBTransactionMode,
+  fn: (store: IDBObjectStore, done: (value: T) => void) => void
+): Promise<T> {
+  const db = await openDb();
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const tx = db.transaction(RECORD_STORE, mode);
+      const store = tx.objectStore(RECORD_STORE);
+      let out: T;
+      try {
+        fn(store, (v) => {
+          out = v;
+        });
+      } catch (e) {
+        reject(e);
+      }
+      tx.oncomplete = () => resolve(out);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'));
+    });
+  } finally {
+    db.close();
   }
 }
 
-import type { SecretsStorageItems, StorageArea } from './secrets-storage.js';
+function allRecords(): Promise<SecretRecord[]> {
+  return recordTx('readonly', (s, done) => {
+    const r = s.getAll();
+    r.onsuccess = () => done((r.result as SecretRecord[] | undefined) ?? []);
+  });
+}
+
+export function getRecord(name: string): Promise<SecretRecord | undefined> {
+  return recordTx('readonly', (s, done) => {
+    const r = s.get(name);
+    r.onsuccess = () => done(r.result as SecretRecord | undefined);
+  });
+}
+
+function putRecords(records: SecretRecord[]): Promise<void> {
+  return recordTx('readwrite', (s) => {
+    for (const rec of records) s.put(rec, rec.name);
+  });
+}
+
+function deleteRecords(names: string[]): Promise<void> {
+  return recordTx('readwrite', (s) => {
+    for (const n of names) s.delete(n);
+  });
+}
+
+function putRecordIfAbsent(rec: SecretRecord): Promise<boolean> {
+  return recordTx('readwrite', (s, done) => {
+    const g = s.get(rec.name);
+    g.onsuccess = () => {
+      if (g.result) {
+        done(false);
+        return;
+      }
+      s.put(rec, rec.name);
+      done(true);
+    };
+  });
+}
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if (typeof a === 'string' || typeof b === 'string') return a === b;
+  return isEncryptedValue(a) && isEncryptedValue(b) && a.ct === b.ct && a.iv === b.iv;
+}
+
+async function decryptRecord(value: SecretRecord['value']): Promise<string | undefined> {
+  const dec = await decryptValue(value as EncryptedValue);
+  return dec === UNREADABLE_SECRET ? undefined : dec;
+}
+
+export async function migrateSecretsToEncrypted(): Promise<void> {
+  const all = await chrome.storage.local.get(null);
+  const names = Object.keys(all).filter(
+    (k) =>
+      !k.endsWith(DOMAINS_SUFFIX) &&
+      k + DOMAINS_SUFFIX in all &&
+      (typeof all[k] === 'string' || isEncryptedValue(all[k]))
+  );
+  for (const name of names) {
+    const dk = name + DOMAINS_SUFFIX;
+    const fresh = await chrome.storage.local.get([name, dk]);
+    const value = fresh[name];
+    if (typeof value !== 'string' && !isEncryptedValue(value)) continue;
+    const enc: StoredValue = typeof value === 'string' ? await encryptValue(value) : value;
+    const again = await chrome.storage.local.get([name, dk]);
+    if (!sameValue(again[name], value) || again[dk] !== fresh[dk]) continue;
+    await putRecordIfAbsent({
+      name,
+      value: enc,
+      domains: typeof fresh[dk] === 'string' ? fresh[dk] : '',
+    });
+    const last = await chrome.storage.local.get([name, dk]);
+    if (sameValue(last[name], value) && last[dk] === fresh[dk])
+      await chrome.storage.local.remove([name, dk]);
+  }
+}
 
 let migrationPromise: Promise<void> | null = null;
-function ensureMigrated(): Promise<void> {
+export function ensureMigrated(): Promise<void> {
   if (!migrationPromise) {
     migrationPromise = migrateSecretsToEncrypted().catch((err) => {
       migrationPromise = null;
@@ -158,46 +249,71 @@ function ensureMigrated(): Promise<void> {
 export const encryptedStorage: StorageArea = {
   async get(keys?: null | string | string[]): Promise<SecretsStorageItems> {
     await ensureMigrated();
-    const raw = await chrome.storage.local.get(keys);
-    const result: SecretsStorageItems = {};
-    for (const [key, value] of Object.entries(raw)) {
-      if (isEncryptedValue(value)) {
-        const decrypted = await decryptValue(value);
-        if (decrypted === UNREADABLE_SECRET) {
-          continue;
-        }
-        result[key] = decrypted;
-      } else {
-        result[key] = value;
-      }
+    const out: SecretsStorageItems = {};
+    for (const rec of await allRecords()) {
+      const dec = await decryptRecord(rec.value);
+      if (dec !== undefined) out[rec.name] = dec;
+      out[rec.name + DOMAINS_SUFFIX] = rec.domains ?? '';
     }
-    return result;
+    if (keys === null || keys === undefined) return out;
+    const wanted =
+      typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys);
+    const picked: SecretsStorageItems = {};
+    for (const k of wanted) if (k in out) picked[k] = out[k];
+    return picked;
   },
 
   async set(items: SecretsStorageItems): Promise<void> {
     await ensureMigrated();
-    const encrypted: SecretsStorageItems = {};
-    for (const [key, value] of Object.entries(items)) {
-      if (typeof value === 'string' && !key.endsWith(DOMAINS_SUFFIX)) {
-        encrypted[key] = await encryptValue(value);
-      } else {
-        encrypted[key] = value;
-      }
+    const changes = new Map<string, { value?: unknown; domains?: string }>();
+    for (const [k, v] of Object.entries(items)) {
+      const isDomains = k.endsWith(DOMAINS_SUFFIX);
+      const base = isDomains ? k.slice(0, -DOMAINS_SUFFIX.length) : k;
+      const c = changes.get(base) ?? {};
+      if (isDomains) c.domains = typeof v === 'string' ? v : '';
+      else c.value = v;
+      changes.set(base, c);
     }
-    await chrome.storage.local.set(encrypted);
+    const records: SecretRecord[] = [];
+    for (const [name, c] of changes) {
+      const rec: SecretRecord = (await getRecord(name)) ?? { name, value: undefined, domains: '' };
+      if ('value' in c)
+        rec.value =
+          typeof c.value === 'string'
+            ? await encryptValue(c.value)
+            : (c.value as SecretRecord['value']);
+      if ('domains' in c) rec.domains = c.domains as string;
+      if (rec.value !== undefined) records.push(rec);
+    }
+    await putRecords(records);
   },
 
   async remove(keys: string | string[]): Promise<void> {
     await ensureMigrated();
-    await chrome.storage.local.remove(keys);
+    const list = typeof keys === 'string' ? [keys] : keys;
+    const names: string[] = [];
+    const cleared: string[] = [];
+    for (const k of list) {
+      if (k.endsWith(DOMAINS_SUFFIX)) cleared.push(k.slice(0, -DOMAINS_SUFFIX.length));
+      else names.push(k);
+    }
+    const records: SecretRecord[] = [];
+    for (const n of cleared) {
+      if (names.includes(n)) continue;
+      const rec = await getRecord(n);
+      if (rec) {
+        rec.domains = '';
+        records.push(rec);
+      }
+    }
+    if (records.length) await putRecords(records);
+    if (names.length) await deleteRecords(names);
   },
 };
 
 export function isValueEncrypted(value: unknown): boolean {
   return isEncryptedValue(value);
 }
-
-import { pairEnvEntriesToSecrets } from '@slicc/shared-ts';
 
 export interface UnreadableSecretEntry {
   name: string;
@@ -209,39 +325,18 @@ export async function listSecretsIncludingUnreadable(): Promise<
   Array<{ name: string; domains: string[]; unreadable: boolean }>
 > {
   await ensureMigrated();
-  const raw = await chrome.storage.local.get(null);
-  const readable: Array<{ key: string; value: string }> = [];
-  const unreadableNames = new Set<string>();
-
-  for (const [key, value] of Object.entries(raw)) {
-    if (key.endsWith(DOMAINS_SUFFIX)) {
-      if (typeof value === 'string') readable.push({ key, value });
-      continue;
-    }
-    if (isEncryptedValue(value)) {
-      const decrypted = await decryptValue(value);
-      if (decrypted === UNREADABLE_SECRET) {
-        unreadableNames.add(key);
-      } else {
-        readable.push({ key, value: decrypted });
-      }
-    } else if (typeof value === 'string') {
-      readable.push({ key, value });
-    }
+  const result: Array<{ name: string; domains: string[]; unreadable: boolean }> = [];
+  for (const rec of await allRecords()) {
+    const domains = (rec.domains ?? '')
+      .split(',')
+      .map((d) => d.trim())
+      .filter(Boolean);
+    result.push({
+      name: rec.name,
+      domains,
+      unreadable: (await decryptRecord(rec.value)) === undefined,
+    });
   }
-
-  const paired = pairEnvEntriesToSecrets(readable);
-  const result: Array<{ name: string; domains: string[]; unreadable: boolean }> = paired.map(
-    (e) => ({ name: e.name, domains: e.domains, unreadable: false })
-  );
-
-  for (const name of unreadableNames) {
-    const domainsKey = name + DOMAINS_SUFFIX;
-    const domainsRaw = raw[domainsKey];
-    const domains = typeof domainsRaw === 'string' ? domainsRaw.split(',').filter(Boolean) : [];
-    result.push({ name, domains, unreadable: true });
-  }
-
   result.sort((a, b) => a.name.localeCompare(b.name));
   return result;
 }

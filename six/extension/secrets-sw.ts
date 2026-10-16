@@ -17,7 +17,7 @@ import { readOrCreateSwSessionId } from './sw-session-id.js';
 
 const sessionSecretStore = new SessionSecretStore();
 
-import { encryptedStorage } from './secrets-encrypted-storage.js';
+import { encryptedStorage, ensureMigrated, getRecord } from './secrets-encrypted-storage.js';
 
 const storageLocal: StorageArea = encryptedStorage;
 
@@ -165,8 +165,8 @@ function runSecretsDelete(msg: unknown, sendResponse: SendResponse): boolean {
         sendResponse({ ok: true, removed: true, fromSession: true });
         return;
       }
-      const existing = await listSecrets(storageLocal);
-      if (!existing.some((e) => e.name === name)) {
+      await ensureMigrated();
+      if (!(await getRecord(name))) {
         sendResponse({ ok: true, removed: false });
         return;
       }
