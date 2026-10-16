@@ -817,3 +817,109 @@ test('C5 Network events and bodies of protected requests never reach the client;
   assert.match(answer.unseen.error, /^slicc: refused: /);
   assert.equal(answer.leaked, 0, 'no Network event mentions the vault');
 });
+
+test('C5 an answered pause cannot be answered again, and a pause Chrome dropped cannot be answered', async (t) => {
+  const page = await client(t);
+  const answer = await page.evaluate(async (ordinary) => {
+    const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+    const paused = [];
+    const off = h.cdp.on((e) => {
+      if (e.method === 'Fetch.requestPaused' && e.sessionId === sessionId) paused.push(e.params);
+    });
+    await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/data*' }] }, sessionId);
+    const pausedFor = (n) =>
+      h.until(async () => paused.find((p) => p.request.url.includes(`n=${n}`)));
+    const fetchIn = (n) =>
+      h.evaluate(
+        sessionId,
+        `window.__r${n} = fetch('${ordinary}/data?n=${n}').then((r) => r.text(), () => 'error'); true`
+      );
+    const result = (n) => h.evaluate(sessionId, `window.__r${n}`);
+    await fetchIn('continue');
+    const first = await pausedFor('continue');
+    const control = await h.attempt(
+      'Fetch.continueRequest',
+      { requestId: first.requestId },
+      sessionId
+    );
+    const again = await h.attempt(
+      'Fetch.continueRequest',
+      { requestId: first.requestId },
+      sessionId
+    );
+    const thenFulfill = await h.attempt(
+      'Fetch.fulfillRequest',
+      { requestId: first.requestId, responseCode: 200, body: btoa('late') },
+      sessionId
+    );
+    const continued = await result('continue');
+    await fetchIn('fulfill');
+    const second = await pausedFor('fulfill');
+    const fulfilled = await h.attempt(
+      'Fetch.fulfillRequest',
+      {
+        requestId: second.requestId,
+        responseCode: 200,
+        responseHeaders: [{ name: 'access-control-allow-origin', value: '*' }],
+        body: btoa('fulfilled-once'),
+      },
+      sessionId
+    );
+    const refulfilled = await h.attempt(
+      'Fetch.fulfillRequest',
+      { requestId: second.requestId, responseCode: 200, body: btoa('twice') },
+      sessionId
+    );
+    const failed = await h.attempt(
+      'Fetch.failRequest',
+      { requestId: second.requestId, errorReason: 'Failed' },
+      sessionId
+    );
+    const body = await result('fulfill');
+    await h.evaluate(
+      sessionId,
+      `window.__abort = new AbortController(); window.__rdropped = fetch('${ordinary}/data?n=dropped', { signal: window.__abort.signal }).then((r) => r.text(), (e) => 'aborted'); true`
+    );
+    const third = await pausedFor('dropped');
+    await h.evaluate(sessionId, 'window.__abort.abort(); true');
+    await h.sleep(1000);
+    const dropped = await h.attempt(
+      'Fetch.continueRequest',
+      { requestId: third.requestId },
+      sessionId
+    );
+    const alive = await h.evaluate(sessionId, '1 + 1');
+    off();
+    await h.close(targetId);
+    return {
+      control,
+      again,
+      thenFulfill,
+      continued,
+      fulfilled,
+      refulfilled,
+      failed,
+      body,
+      dropped,
+      alive,
+    };
+  }, ordinary);
+  assert.equal(answer.control.error, undefined, 'control: the first continue works');
+  assert.equal(answer.continued, 'real-continue', 'control: the continued request completes');
+  assert.match(answer.again.error ?? '', /^slicc: refused: /, 'a second continue is refused');
+  assert.match(
+    answer.thenFulfill.error ?? '',
+    /^slicc: refused: /,
+    'a fulfill after continue is refused'
+  );
+  assert.equal(answer.fulfilled.error, undefined, 'control: the first fulfill works');
+  assert.equal(answer.body, 'fulfilled-once', 'control: the fulfilled body arrives once');
+  assert.match(answer.refulfilled.error ?? '', /^slicc: refused: /, 'a second fulfill is refused');
+  assert.match(answer.failed.error ?? '', /^slicc: refused: /, 'a fail after fulfill is refused');
+  assert.match(
+    answer.dropped.error ?? '',
+    /^slicc: refused: /,
+    'a pause Chrome dropped is refused'
+  );
+  assert.equal(answer.alive, 2, 'the session still answers');
+});
