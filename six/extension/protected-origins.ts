@@ -3,13 +3,17 @@ import { protectedOrigins } from '@ai-ecoverse/slicc-browsers/protected.mjs';
 
 const guard = protectedOrigins(catalog.protectedOrigins) as {
   url: (text: string) => boolean;
-  target: (opts: { url: string; previous?: boolean; opener?: string }) => boolean;
+  target: (opts: { url: string; previous?: boolean; opener?: string; type?: string }) => boolean;
+  cookieDomain: (domain: string) => boolean;
+  storageKey: (key: string) => boolean;
 };
 
 export const PROTECTED_RULES: {
   domains: readonly string[];
   hosts: readonly string[];
   schemes: readonly string[];
+  protectedSchemes: readonly string[];
+  schemeExceptions: readonly string[];
   refusal: string;
 } = catalog.protectedOrigins;
 
@@ -23,9 +27,24 @@ export function isProtectedUrl(rawUrl: string | undefined): boolean {
 export function isProtectedTarget(
   url: string,
   previous = false,
-  opener?: 'protected' | 'unprotected' | 'unknown'
+  opener?: 'protected' | 'unprotected' | 'unknown',
+  type?: string
 ): boolean {
-  return guard.target({ url, previous, opener });
+  return guard.target({ url, previous, opener, type });
+}
+
+export function isProtectedTargetType(type: unknown): boolean {
+  return (
+    typeof type === 'string' && guard.target({ url: 'about:blank', opener: 'unprotected', type })
+  );
+}
+
+export function isProtectedCookieDomain(domain: string): boolean {
+  return guard.cookieDomain(domain);
+}
+
+export function isProtectedStorageKey(key: string): boolean {
+  return guard.storageKey(key);
 }
 
 type OpenerState = 'protected' | 'unprotected' | 'unknown' | undefined;

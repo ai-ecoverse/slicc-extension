@@ -773,8 +773,8 @@ async function cdpAttachToTarget(
 ): Promise<BridgeTargetAttachResult> {
   const targetId = readTargetIdParam(params);
   const tabId = parseInt(targetId, 10);
-  if (!Number.isFinite(tabId) || tabId <= 0) {
-    throw new Error(`Invalid targetId: ${targetId}`);
+  if (!Number.isFinite(tabId) || tabId <= 0 || String(tabId) !== targetId) {
+    throw new Error(`slicc: refused: Invalid targetId: ${targetId} is not a tab`);
   }
   if (await isProtectedTab(await deps.getTab(tabId), deps.getTab)) {
     throw new Error(PROTECTED_REFUSAL);

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,6 +75,10 @@ function main() {
   writeFileSync(
     join(ext, 'protected-rules.js'),
     `export const protectedRules = ${JSON.stringify(catalog.protectedOrigins)};\n`
+  );
+  copyFileSync(
+    require.resolve('@ai-ecoverse/slicc-browsers/protected.mjs'),
+    join(ext, 'protected.mjs')
   );
   process.stdout.write(
     `seven from @ai-ecoverse/slicc-browsers@${version}: excluded ${seven.excludedLabels.join(', ')}; prefixes ${seven.excludedLabelPrefixes.join(', ')}\n`

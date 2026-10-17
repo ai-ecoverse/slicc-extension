@@ -1,24 +1,14 @@
 export const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
 
-function send(page, method, params, sessionId) {
-  return page.evaluate(
-    async (opts) => globalThis.sliccExtension.cdp.send(opts.method, opts.params, opts.sessionId),
-    { method, params, sessionId }
-  );
-}
-
 export async function openExtensionPage(page, path) {
-  const { targetId } = await send(page, 'Target.createTarget', {
-    url: `chrome-extension://${extId}/${path}`,
-  });
-  const { sessionId } = await send(page, 'Target.attachToTarget', { targetId, flatten: true });
+  const tab = await page.tab();
+  const url = `chrome-extension://${extId}/${path}`;
+  await tab.send('Page.navigate', { url });
+  await tab.until((href) => location.href === href && document.readyState === 'complete', url);
+  const raw = (expression) =>
+    tab.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
   const evaluate = async (expression) => {
-    const answer = await send(
-      page,
-      'Runtime.evaluate',
-      { expression, awaitPromise: true, returnByValue: true },
-      sessionId
-    );
+    const answer = await raw(expression);
     if (answer.exceptionDetails) {
       throw new Error(
         `${path}: ${answer.exceptionDetails.exception?.description ?? answer.exceptionDetails.text}`
@@ -26,12 +16,8 @@ export async function openExtensionPage(page, path) {
     }
     return answer.result.value;
   };
-  for (let i = 0; i < 100; i++) {
-    const ready = await evaluate('document.readyState === "complete"').catch(() => false);
-    if (ready) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
   return {
+    raw,
     evaluate,
     until: async (expression, ms = 10000) => {
       const deadline = Date.now() + ms;
@@ -41,7 +27,7 @@ export async function openExtensionPage(page, path) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     },
-    close: () => send(page, 'Target.closeTarget', { targetId }).catch(() => undefined),
+    close: () => tab.close().catch(() => undefined),
   };
 }
 
