@@ -227,6 +227,7 @@ jobs:
           merge-multiple: true
 
       - name: GUARD-PASS per transport
+        shell: bash
         run: npm run test:guard-summary | tee -a "$GITHUB_STEP_SUMMARY"
 
       - if: always()
