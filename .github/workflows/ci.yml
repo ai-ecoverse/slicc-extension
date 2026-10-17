@@ -58,7 +58,7 @@ jobs:
             if (context.eventName === 'push' && context.ref === 'refs/heads/main') return await pick(pool, 'push to main');
             await pick(hosted, context.eventName);
 
-  ci:
+  integration:
     needs: runner
     runs-on: ${{ needs.runner.outputs.runner }}
     timeout-minutes: 15
@@ -128,3 +128,123 @@ jobs:
         run: npm test
         env:
           NODE_OPTIONS: "--max-old-space-size=4096"
+
+  guard:
+    needs: runner
+    runs-on: ${{ needs.runner.outputs.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        transport: [seven, six-bridge]
+        variant: [prompt, lagging]
+    env:
+      LEFTHOOK: "0"
+      npm_config_cache: ${{ github.workspace }}/../npm-cache
+      GUARD_TRANSPORT: ${{ matrix.transport }}
+      GUARD_VARIANT: ${{ matrix.variant }}
+      GUARD_PARALLEL: "4"
+      GUARD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Chromium version and root
+        id: chromium
+        run: |
+          echo "playwright=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; then
+            echo "root=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.chromium.outputs.playwright }}
+
+      - id: apt
+        if: steps.chromium.outputs.root == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/apt
+          key: apt-${{ steps.chromium.outputs.image }}-playwright-${{ steps.chromium.outputs.playwright }}
+
+      - name: Chromium system dependencies
+        if: steps.chromium.outputs.root == 'true'
+        env:
+          DEBS: ${{ runner.temp }}/apt
+        run: |
+          if ls "$DEBS"/*.deb >/dev/null 2>&1; then
+            sudo dpkg -i "$DEBS"/*.deb
+          else
+            sudo rm -f /var/cache/apt/archives/*.deb
+            npx playwright-core install-deps chromium
+            mkdir -p "$DEBS"
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp {} "$DEBS"/ \;
+          fi
+
+      - name: Guard vectors on ${{ matrix.transport }}, ${{ matrix.variant }}
+        run: npm run test:guard
+
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: guard-${{ matrix.transport }}-${{ matrix.variant }}
+          path: artifacts/guard/
+          if-no-files-found: error
+
+  guard-summary:
+    needs: [runner, guard]
+    if: always() && needs.runner.result == 'success'
+    runs-on: ${{ needs.runner.outputs.runner }}
+    timeout-minutes: 5
+    env:
+      LEFTHOOK: "0"
+      npm_config_cache: ${{ github.workspace }}/../npm-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: guard-*
+          path: artifacts/guard/
+          merge-multiple: true
+
+      - name: GUARD-PASS per transport
+        run: npm run test:guard-summary | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: guard-rows
+          path: artifacts/guard/
+
+  ci:
+    needs: [integration, guard-summary]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Integration and guard vectors passed
+        env:
+          INTEGRATION: ${{ needs.integration.result }}
+          GUARD: ${{ needs.guard-summary.result }}
+        run: |
+          echo "integration: $INTEGRATION, guard-summary: $GUARD"
+          [ "$INTEGRATION" = success ] && [ "$GUARD" = success ]
