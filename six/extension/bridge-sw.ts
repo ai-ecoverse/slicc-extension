@@ -87,7 +87,26 @@ function readTargetIdParam(params: CDPPayload, label = 'targetId'): string {
 
 function readCreateTargetUrl(params: CDPPayload): string {
   const url = params['url'];
-  return typeof url === 'string' ? url : 'about:blank';
+  return typeof url === 'string' && url !== '' ? url : 'about:blank';
+}
+
+export const RELATIVE_REFUSAL =
+  "slicc: refused: a relative url would open one of the extension's own pages";
+
+function exactTabId(targetId: string): number {
+  const tabId = parseInt(targetId, 10);
+  if (!Number.isFinite(tabId) || tabId <= 0 || String(tabId) !== targetId) {
+    throw new Error(`slicc: refused: Invalid targetId: ${targetId} is not a tab`);
+  }
+  return tabId;
+}
+
+async function guardedTab(params: CDPPayload, deps: BridgeSwDeps): Promise<number> {
+  const tabId = exactTabId(readTargetIdParam(params));
+  if (await isProtectedTab(await deps.getTab(tabId), deps.getTab)) {
+    throw new Error(PROTECTED_REFUSAL);
+  }
+  return tabId;
 }
 
 const LEADER_TAB_ID_KEY = 'slicc_leader_tab_id';
@@ -722,6 +741,13 @@ async function dispatchCdpCommand(
   if (method === 'Target.detachFromTarget') return cdpDetachFromTarget(params ?? {}, state, deps);
   if (method === 'Target.createTarget') return cdpCreateTarget(params ?? {}, deps);
   if (method === 'Target.closeTarget') return cdpCloseTarget(params ?? {}, state, deps);
+  if (
+    method === 'Target.getTargetInfo' &&
+    sessionId === undefined &&
+    params?.['targetId'] !== undefined
+  ) {
+    return cdpGetTargetInfo(params ?? {}, deps);
+  }
   if (method === 'Browser.getWindowForTarget') {
     return cdpGetWindowForTarget(params ?? {}, deps);
   }
@@ -772,13 +798,7 @@ async function cdpAttachToTarget(
   deps: BridgeSwDeps
 ): Promise<BridgeTargetAttachResult> {
   const targetId = readTargetIdParam(params);
-  const tabId = parseInt(targetId, 10);
-  if (!Number.isFinite(tabId) || tabId <= 0 || String(tabId) !== targetId) {
-    throw new Error(`slicc: refused: Invalid targetId: ${targetId} is not a tab`);
-  }
-  if (await isProtectedTab(await deps.getTab(tabId), deps.getTab)) {
-    throw new Error(PROTECTED_REFUSAL);
-  }
+  const tabId = await guardedTab(params, deps);
   if (!state.ownedTabs.has(tabId)) {
     const attachedByThisPort = await deps.attachDebugger(tabId);
     if (attachedByThisPort) state.ownedTabs.add(tabId);
@@ -843,12 +863,12 @@ async function cdpCreateTarget(
   deps: BridgeSwDeps
 ): Promise<BridgeTargetCreateResult> {
   const url = readCreateTargetUrl(params);
+  if (!URL.canParse(url)) throw new Error(RELATIVE_REFUSAL);
   if (isProtectedTarget(url)) {
     throw new Error(PROTECTED_REFUSAL);
   }
   if (params['newWindow'] !== true) {
-    const tabId = await deps.createTab(url);
-    return { targetId: String(tabId) };
+    return openedTarget(await deps.createTab(url), deps);
   }
   const state = readOptionalWindowState(params['windowState']);
   const opts: BridgeCreateWindowOptions = {
@@ -863,7 +883,33 @@ async function cdpCreateTarget(
     if (state) opts.state = state;
   }
   const created = await deps.createWindow(opts);
-  return { targetId: String(created.tabId) };
+  return openedTarget(created.tabId, deps);
+}
+
+async function openedTarget(tabId: number, deps: BridgeSwDeps): Promise<BridgeTargetCreateResult> {
+  const tab = await deps.getTab(tabId);
+  if (isProtectedUrl(tab?.pendingUrl) || isProtectedUrl(tab?.url)) {
+    await deps.removeTab(tabId).catch(() => {});
+    throw new Error(PROTECTED_REFUSAL);
+  }
+  return { targetId: String(tabId) };
+}
+
+async function cdpGetTargetInfo(params: CDPPayload, deps: BridgeSwDeps): Promise<CDPPayload> {
+  const targetId = readTargetIdParam(params);
+  const tabId = exactTabId(targetId);
+  const tab = await deps.getTab(tabId);
+  if (!tab) throw new Error(`No target with given id found: ${targetId}`);
+  const info = {
+    targetId,
+    type: 'page',
+    title: tab.title ?? '',
+    url: tab.url || tab.pendingUrl || '',
+    attached: false,
+    canAccessOpener: false,
+  };
+  const hidden = await isProtectedTab(tab, deps.getTab);
+  return { targetInfo: hidden ? redacted(info) : info };
 }
 
 async function cdpGetWindowForTarget(
@@ -871,10 +917,7 @@ async function cdpGetWindowForTarget(
   deps: BridgeSwDeps
 ): Promise<BridgeGetWindowForTargetResult> {
   const targetId = readTargetIdParam(params);
-  const tabId = parseInt(targetId, 10);
-  if (!Number.isFinite(tabId) || tabId <= 0) {
-    throw new Error(`Invalid targetId: ${targetId}`);
-  }
+  const tabId = await guardedTab(params, deps);
   const tab = await deps.getTab(tabId);
   if (!tab || typeof tab.windowId !== 'number') {
     throw new Error(`No window for targetId: ${targetId}`);
@@ -975,11 +1018,7 @@ async function cdpCloseTarget(
   state: PortState,
   deps: BridgeSwDeps
 ): Promise<BridgeTargetCloseResult> {
-  const targetId = readTargetIdParam(params);
-  const tabId = parseInt(targetId, 10);
-  if (!Number.isFinite(tabId) || tabId <= 0) {
-    throw new Error(`Invalid targetId: ${targetId}`);
-  }
+  const tabId = await guardedTab(params, deps);
   for (const [sid, tid] of state.sessionToTab) {
     if (tid === tabId) state.sessionToTab.delete(sid);
   }

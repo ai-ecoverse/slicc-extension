@@ -120,6 +120,8 @@ export const GUARD_FETCH_PATTERN: CDPPayload = {
   requestStage: 'Request',
 };
 
+const NAVIGATES = new Set(['Page.navigate', 'Network.loadNetworkResource']);
+
 function isObj(value: unknown): value is CDPPayload {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -144,7 +146,7 @@ export function urlProtected(text: string): boolean {
 }
 
 export function mentions(value: unknown): boolean {
-  if (typeof value === 'string') return value.includes(':') && urlProtected(value);
+  if (typeof value === 'string') return value.includes('://') && urlProtected(value);
   if (Array.isArray(value)) return value.some(mentions);
   if (isObj(value)) return Object.values(value).some(mentions);
   return false;
@@ -441,6 +443,9 @@ export class TabShield {
     ) {
       refuse("browser-wide permissions would reach seven's origin");
     }
+    if (method === 'Target.getTargetInfo' && params['targetId'] !== undefined) {
+      refuse('Target.getTargetInfo of another target is not supported on a page session');
+    }
     if (method === 'Target.setAutoAttach' && params['autoAttach'] === true) {
       refuse('auto-attach is not supported by the extension bridge');
     }
@@ -456,6 +461,9 @@ export class TabShield {
     }
     const url = str(params['url']);
     if (url && urlProtected(url)) refuse(PROTECTED_RULES.refusal);
+    if (NAVIGATES.has(method) && url !== undefined && url !== '' && !URL.canParse(url)) {
+      refuse("a relative url would open one of the extension's own pages");
+    }
   }
 
   private admitFrame(params: CDPPayload): void {

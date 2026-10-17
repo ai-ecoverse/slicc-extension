@@ -6,6 +6,7 @@ import { seven } from '../../extension/seven.js';
 import { certificate, ims, pages, upstream } from './servers.mjs';
 
 export async function launch() {
+  await rm(new URL('../../extension/_metadata', import.meta.url), { recursive: true, force: true });
   const dir = await mkdtemp(join(tmpdir(), 'slicc-extension-'));
   const tls = await certificate(dir);
   const site = await pages(tls);
@@ -29,7 +30,12 @@ export async function launch() {
   const chrome = await start({
     roots: [['/', 'test/integration/page/']],
     extensions: ['extension/'],
-    args: ['--ignore-certificate-errors', `--host-resolver-rules=${rules}`],
+    args: [
+      '--ignore-certificate-errors',
+      `--host-resolver-rules=${rules}`,
+      '--use-fake-device-for-media-stream',
+      '--use-fake-ui-for-media-stream',
+    ],
   });
   const opened = new WeakMap();
 

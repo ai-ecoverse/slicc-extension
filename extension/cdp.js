@@ -53,6 +53,22 @@ function refusal() {
   throw new Error(protectedRules.refusal);
 }
 
+const RELATIVE = "slicc: refused: a relative url would open one of the extension's own pages";
+const NAVIGATES = new Set(['Page.navigate', 'Network.loadNetworkResource']);
+
+function relative(url) {
+  return typeof url === 'string' && url !== '' && !URL.canParse(url);
+}
+
+function redactedUrl(url) {
+  try {
+    const origin = new URL(url).origin;
+    return origin && origin !== 'null' ? origin : 'about:blank';
+  } catch {
+    return 'about:blank';
+  }
+}
+
 function blocked(url, opener, previous = false) {
   return guard.target({ url: textOf(url), opener, previous });
 }
@@ -325,14 +341,14 @@ class Connection {
 
   info(raw) {
     const tab = this.view(raw);
+    const hidden =
+      urlProtected(guard, textOf(tab.url)) || urlProtected(guard, textOf(tab.pendingUrl));
+    const url = tab.url || tab.pendingUrl || '';
     const out = {
       targetId: String(tab.id),
       type: 'page',
-      title:
-        urlProtected(guard, textOf(tab.url)) || urlProtected(guard, textOf(tab.pendingUrl))
-          ? ''
-          : (tab.title ?? ''),
-      url: tab.url || tab.pendingUrl || '',
+      title: hidden ? '' : (tab.title ?? ''),
+      url: hidden && !/^https?:/i.test(url) ? redactedUrl(url) : url,
       attached: this.sessionsOf(tab.id).length > 0,
       canAccessOpener: false,
     };
@@ -429,6 +445,7 @@ class Connection {
 
   async create(params) {
     const url = typeof params.url === 'string' ? params.url : '';
+    if (relative(url)) throw new Error(RELATIVE);
     if (guard.target({ url })) refusal();
     if (params.newWindow === true) {
       const created = await this.api.windows.create({
@@ -439,7 +456,7 @@ class Connection {
       const tabId = created?.tabs?.[0]?.id;
       if (typeof tabId !== 'number')
         throw new Error('chrome.windows.create did not return a tab id');
-      return { targetId: String(tabId) };
+      return this.opened(created.tabs[0]);
     }
     const tab = await bounded(
       this.api.tabs.create({ url: url || 'about:blank', active: false }),
@@ -447,6 +464,15 @@ class Connection {
       'Target.createTarget'
     );
     if (typeof tab?.id !== 'number') throw new Error('chrome.tabs.create did not return a tab id');
+    return this.opened(tab);
+  }
+
+  async opened(tab) {
+    const landed = [textOf(tab.pendingUrl), textOf(tab.url)];
+    if (landed.some((url) => url && guard.url(url))) {
+      await this.api.tabs.remove(tab.id).catch(() => undefined);
+      refusal();
+    }
     return { targetId: String(tab.id) };
   }
 
@@ -675,6 +701,7 @@ class Connection {
     } else if (urlProtected(guard, textOf(params.url))) {
       refusal();
     }
+    if (NAVIGATES.has(method) && relative(params.url)) throw new Error(RELATIVE);
     if (method === 'Network.getCookies' && cookieRefused(guard, { urls: params.urls })) {
       throw new Error(COOKIES);
     }
@@ -823,7 +850,7 @@ class Connection {
 
   mentions(value, depth = 0) {
     if (depth > 12) return false;
-    if (typeof value === 'string') return value.includes(':') && urlProtected(guard, value);
+    if (typeof value === 'string') return value.includes('://') && urlProtected(guard, value);
     if (Array.isArray(value)) return value.some((item) => this.mentions(item, depth + 1));
     if (value !== null && typeof value === 'object') {
       return Object.values(value).some((item) => this.mentions(item, depth + 1));

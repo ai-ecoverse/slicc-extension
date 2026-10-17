@@ -6,11 +6,24 @@ const dot = document.getElementById("dot");
 const label = document.getElementById("label");
 const hint = document.getElementById("hint");
 const action = document.getElementById("action");
-const request = parseRequest();
+let request = null;
 let settled = false;
-function parseRequest() {
+function claimRequest() {
+  const claim = new URLSearchParams(location.search).get("claim");
+  if (!claim) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: "capture-claim", claim }, (answer) => {
+        void chrome.runtime.lastError;
+        resolve(typeof answer?.req === "string" ? answer.req : null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+function parseRequest(raw) {
   try {
-    const raw = new URLSearchParams(location.search).get("req");
     if (!raw) return null;
     let b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
     while (b64.length % 4) b64 += "=";
@@ -91,7 +104,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   return false;
 });
 window.addEventListener("pagehide", () => {
-  if (settled) return;
+  if (settled || !request) return;
   settled = true;
   send({
     source: "capture-popup",
@@ -100,13 +113,18 @@ window.addEventListener("pagehide", () => {
     error: "capture cancelled"
   });
 });
-if (!request) {
-  fail("invalid capture request");
-} else if (request.kind === "screen") {
-  setupScreenButton();
-} else {
-  runCameraCapture();
-}
+claimRequest().then((raw) => {
+  request = parseRequest(raw);
+  if (!request) {
+    settled = true;
+    setStatus("invalid capture request", true);
+    hint.textContent = "";
+  } else if (request.kind === "screen") {
+    setupScreenButton();
+  } else {
+    runCameraCapture();
+  }
+});
 function setupScreenButton() {
   setStatus("Screen capture ready");
   hint.textContent = "Click below, then choose a screen, window, or tab to capture.";

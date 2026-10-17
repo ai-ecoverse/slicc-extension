@@ -249,9 +249,15 @@ export function initScriptPrefix(rules) {
   const any = JSON.stringify(rules.anySchemes.map((s) => `${s}:`));
   const privileged = JSON.stringify(rules.protectedSchemes.map((s) => `${s}:`));
   const exceptions = JSON.stringify(rules.schemeExceptions);
+  const web = JSON.stringify(rules.schemes.map((s) => `${s}:`));
   return (
     `if ((function () { var p = location.protocol; if (${any}.indexOf(p) >= 0) return true; ` +
     `if (${privileged}.indexOf(p) >= 0 && ${exceptions}.indexOf(p + "//" + location.hostname.toLowerCase()) < 0) return true; ` +
+    'try { var o = new URL(self.origin), s = o.protocol, oh = o.hostname.toLowerCase().replace(/\\.$/, ""); ' +
+    `if (${any}.indexOf(s) >= 0) return true; ` +
+    `if (${privileged}.indexOf(s) >= 0 && ${exceptions}.indexOf(s + "//" + oh) < 0) return true; ` +
+    `if (${web}.indexOf(s) >= 0 && (${hosts}.indexOf(oh) >= 0 || ${domains}.some(function (d) { return oh === d || oh.slice(-d.length - 1) === "." + d; }))) return true; ` +
+    '} catch (e) {} ' +
     'var h = ("" + (document.domain || location.hostname || "")).toLowerCase(); ' +
     'if (h.slice(-1) === ".") h = h.slice(0, -1); if (h === "") return false; ' +
     `if (${hosts}.indexOf(h) >= 0) return true; ` +

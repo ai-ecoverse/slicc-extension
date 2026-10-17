@@ -33,6 +33,7 @@ async function launchWithExtension(extensionDir) {
 }
 
 test('extension pages load without console errors', async () => {
+  await rm(join(root, 'extension', '_metadata'), { recursive: true, force: true });
   const { browser, dir } = await launchWithExtension(join(root, 'extension'));
   try {
     for (const pageName of extPages) {
