@@ -7,7 +7,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@slicc/shared-ts': at('six/shared-ts/index.ts'),
-      '@ai-ecoverse/cherry/embed-ui': at('six/cherry/embed-ui.ts'),
     },
   },
   define: { __SLICC_EXT_DEV__: 'false' },

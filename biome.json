@@ -17,10 +17,6 @@
       "assist": { "enabled": false }
     },
     {
-      "includes": ["six/cherry/cdp-host-handlers.ts"],
-      "linter": { "rules": { "security": { "noGlobalEval": "off" } } }
-    },
-    {
       "includes": ["six/extension/secrets-entry.ts"],
       "linter": { "rules": { "style": { "useNamingConvention": "off" } } }
     }
