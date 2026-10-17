@@ -11,6 +11,7 @@ import {
   fetchLiveVersion,
   LIVE_UPDATE_XML_URL,
 } from './cws-live.mjs';
+import { isMain } from './is-main.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -86,8 +87,7 @@ export async function checkSixFloor(manifest, upstream, opts = {}) {
   return { ...seen, ok: true, decidedBy: 'floor' };
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
-if (isMain) {
+if (isMain(import.meta.url)) {
   const zip = resolve(process.argv[2] ?? resolve(root, 'artifacts/slicc-extension.zip'));
   const upstreamPath = resolve(process.argv[3] ?? resolve(root, 'six/upstream.json'));
   let manifest;
@@ -111,7 +111,7 @@ if (isMain) {
   }
   process.stdout.write(
     result.decidedBy === 'version'
-      ? `Six floor guard passed on version alone: release ${manifest.version} is newer than the live build ${result.liveVersion}\n`
-      : `Six floor guard passed: release based on six ${result.floor}, live six ${result.live} (live build ${result.liveVersion})\n`
+      ? `six-floor: PASS on version alone: release ${manifest.version} is newer than the live build ${result.liveVersion}\n`
+      : `six-floor: PASS release based on six ${result.floor}, live six ${result.live} (live build ${result.liveVersion})\n`
   );
 }
