@@ -173,7 +173,6 @@ function cookieProtected(guard, cookie) {
 export function cookieRefused(guard, params) {
   const p = params ?? {};
   if (Array.isArray(p.cookies)) return p.cookies.some((cookie) => cookieProtected(guard, cookie));
-  if (Array.isArray(p.urls) && p.urls.some((u) => siteProtected(guard, u))) return true;
   return cookieProtected(guard, p);
 }
 

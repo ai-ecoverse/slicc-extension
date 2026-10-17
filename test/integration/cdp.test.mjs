@@ -1291,7 +1291,6 @@ test('shield refuses protected cookie writes and filters protected cookies from 
     ['Network.deleteCookies', { name: 'x', url: 'https://seven.sliccy.ai/' }],
     ['Storage.setCookies', { cookies: [{ name: 'x', value: '1', domain: 'vault.sliccy.ai' }] }],
     ['Page.deleteCookie', { cookieName: 'x', url: 'https://vault.sliccy.ai/' }],
-    ['Network.getCookies', { urls: ['https://vault.sliccy.ai/'] }],
   ]) {
     const answer = await command(cdp, connection, { id: id++, method, params, sessionId: '8' });
     assert.match(answer.error ?? '', /^slicc: refused: /, `${method} ${JSON.stringify(params)}`);
@@ -1306,6 +1305,19 @@ test('shield refuses protected cookie writes and filters protected cookies from 
   for (const method of ['Network.getCookies', 'Network.getAllCookies', 'Storage.getCookies']) {
     const read = await command(cdp, connection, { id: id++, method, params: {}, sessionId: '8' });
     assert.deepEqual(read.result.cookies, [{ name: 'ok', domain: 'other.test' }], method);
+  }
+  for (const urls of [
+    ['https://vault.sliccy.ai/'],
+    ['https://vault.sliccy.ai/', 'https://seven.sliccy.ai/', 'https://other.test/'],
+  ]) {
+    const read = await command(cdp, connection, {
+      id: id++,
+      method: 'Network.getCookies',
+      params: { urls },
+      sessionId: '8',
+    });
+    assert.equal(read.error, undefined, `readers filter, never refuse: ${urls}`);
+    assert.deepEqual(read.result.cookies, [{ name: 'ok', domain: 'other.test' }], `${urls}`);
   }
   cdp.close();
 });
