@@ -368,6 +368,69 @@ test('B24-1 seven: a navigation to the vault fails before it commits and the ses
   );
 });
 
+test('B24-1 seven: an ordinary request paused before a navigation to the vault can still be continued', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const answer = await page.evaluate(async () => {
+    const cdp = globalThis.sliccExtension.cdp;
+    const events = [];
+    cdp.on((event) => events.push(event));
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const created = await cdp.send('Target.createTarget', { url: 'https://other.test/' });
+    const { sessionId } = await cdp.send('Target.attachToTarget', {
+      targetId: created.targetId,
+      flatten: true,
+    });
+    const run = (expression) =>
+      cdp.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId).then(
+        (r) => r.result?.value,
+        (error) => `error ${error.message}`
+      );
+    for (let i = 0; i < 200 && (await run('document.readyState')) !== 'complete'; i++) {
+      await sleep(50);
+    }
+    await cdp.send(
+      'Fetch.enable',
+      { patterns: [{ urlPattern: 'https://upstream.test/held*' }] },
+      sessionId
+    );
+    await run('navigator.sendBeacon("https://upstream.test/held?n=1", "x")');
+    let paused;
+    for (let i = 0; i < 200 && !paused; i++) {
+      await sleep(50);
+      paused = events.find((event) => event.method === 'Fetch.requestPaused');
+    }
+    await run('location.href = "https://vault.sliccy.ai/held"');
+    const continued = await cdp
+      .send('Fetch.continueRequest', { requestId: paused?.params.requestId }, sessionId)
+      .then(
+        () => 'continued',
+        (error) => error.message
+      );
+    let href = '';
+    for (let i = 0; i < 200 && href !== 'chrome-error://chromewebdata/'; i++) {
+      if (i > 0) await sleep(50);
+      href = await run('location.href');
+    }
+    await cdp.send('Target.closeTarget', { targetId: created.targetId }).catch(() => undefined);
+    return { paused: paused?.params.request.url, continued, href };
+  });
+  assert.equal(answer.paused, 'https://upstream.test/held?n=1', 'the ordinary beacon is paused');
+  assert.equal(answer.continued, 'continued', 'the paused ordinary request is continued');
+  assert.equal(answer.href, 'chrome-error://chromewebdata/', 'the vault navigation fails');
+  for (let i = 0; i < 100 && !chrome.upstream.seen.some((s) => s.path === '/held'); i++) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(
+    chrome.upstream.seen.some((s) => s.path === '/held'),
+    'the beacon reaches upstream'
+  );
+  assert.equal(
+    chrome.site.seen.some((s) => s.host === 'vault.sliccy.ai' && s.path === '/held'),
+    false,
+    'the vault is never served'
+  );
+});
+
 test('B24-1 six bridge: a navigation to the vault fails before it commits and the session stays', async (t) => {
   const www = await chrome.visit(t, 'https://www.sliccy.ai/?slicc=leader');
   const answer = await www.evaluate(async (eid) => {

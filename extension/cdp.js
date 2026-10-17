@@ -702,9 +702,6 @@ class Connection {
       refusal();
     }
     if (NAVIGATES.has(method) && relative(params.url)) throw new Error(RELATIVE);
-    if (method === 'Network.getCookies' && cookieRefused(guard, { urls: params.urls })) {
-      throw new Error(COOKIES);
-    }
     if (namesProtectedStorage(guard, params)) refusal();
     if (this.frameProtected(tab, params.frameId)) refusal();
     if (this.contextProtected(tab, params)) refusal();
@@ -739,6 +736,21 @@ class Connection {
     }
   }
 
+  async admit(tabId, tab, method, params, sessionId) {
+    const view = await this.read(tabId);
+    try {
+      return await demandTab(this.api, view);
+    } catch (error) {
+      if (!this.held(tab, method, params, sessionId)) throw error;
+      return demandTab(this.api, { ...view, pendingUrl: '' });
+    }
+  }
+
+  held(tab, method, params, sessionId) {
+    if (!FETCH_ANSWERS.has(method) && !FETCH_READS.has(method)) return false;
+    return tab?.paused.get(textOf(params?.requestId))?.owner === sessionId;
+  }
+
   async answer(tabId, method, params) {
     try {
       return (await this.send(tabId, method, params)) ?? {};
@@ -760,7 +772,7 @@ class Connection {
     }
     const { tabId } = session;
     const tab = this.tabState(tabId);
-    const seen = await demandTab(this.api, await this.read(tabId));
+    const seen = await this.admit(tabId, tab, method, params, sessionId);
     tab.pageUrl = seen.url;
     if (method.startsWith('Target.')) {
       throw new Error(`slicc: refused: ${method} is not supported on a page session`);
