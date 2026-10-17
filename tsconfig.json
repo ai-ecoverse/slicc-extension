@@ -13,9 +13,7 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
     "paths": {
-      "@slicc/shared-ts": ["./six/shared-ts/index.ts"],
-      "@ai-ecoverse/cherry": ["./six/cherry/index.ts"],
-      "@ai-ecoverse/cherry/embed-ui": ["./six/cherry/embed-ui.ts"]
+      "@slicc/shared-ts": ["./six/shared-ts/index.ts"]
     }
   },
   "include": ["six/**/*.ts"]
