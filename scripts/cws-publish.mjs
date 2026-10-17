@@ -1,3 +1,4 @@
+import { isMain } from './is-main.mjs';
 import { createSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
@@ -275,11 +276,14 @@ export async function publishRelease(opts = {}) {
   };
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
-if (isMain) {
+if (isMain(import.meta.url)) {
   publishRelease().then(
     (result) => {
-      if (!result) process.stdout.write('Chrome Web Store publish skipped.\n');
+      if (!result) {
+        process.stdout.write('cws-publish: SKIP no publish was made\n');
+        return;
+      }
+      process.stdout.write('cws-publish: PASS\n');
     },
     (err) => {
       process.stderr.write(`${err.message}\n`);

@@ -9,6 +9,7 @@ import {
   fetchLiveVersion,
   LIVE_UPDATE_XML_URL,
 } from './cws-live.mjs';
+import { isMain } from './is-main.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -140,8 +141,7 @@ export async function readReleaseManifest() {
   return extractManifestFromZip(readFileSync(zip));
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
-if (isMain) {
+if (isMain(import.meta.url)) {
   let release;
   try {
     release = await readReleaseManifest();
@@ -160,6 +160,6 @@ if (isMain) {
     process.exit(1);
   }
   process.stdout.write(
-    `Permission guard passed against the ${result.source} baseline ${result.baselineVersion}\n`
+    `live-permissions: PASS against the ${result.source} baseline ${result.baselineVersion}\n`
   );
 }
