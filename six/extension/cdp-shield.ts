@@ -1,5 +1,12 @@
 import type { CDPPayload } from '@slicc/shared-ts';
-import { isProtectedTarget, isProtectedUrl, PROTECTED_RULES } from './protected-origins.js';
+import {
+  isProtectedCookieDomain,
+  isProtectedStorageKey,
+  isProtectedTarget,
+  isProtectedTargetType,
+  isProtectedUrl,
+  PROTECTED_RULES,
+} from './protected-origins.js';
 
 const ORIGIN_KEYS = new Set([
   'origin',
@@ -113,6 +120,8 @@ export const GUARD_FETCH_PATTERN: CDPPayload = {
   requestStage: 'Request',
 };
 
+const NAVIGATES = new Set(['Page.navigate', 'Network.loadNetworkResource']);
+
 function isObj(value: unknown): value is CDPPayload {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -137,25 +146,18 @@ export function urlProtected(text: string): boolean {
 }
 
 export function mentions(value: unknown): boolean {
-  if (typeof value === 'string') return value.includes(':') && urlProtected(value);
+  if (typeof value === 'string') return value.includes('://') && urlProtected(value);
   if (Array.isArray(value)) return value.some(mentions);
   if (isObj(value)) return Object.values(value).some(mentions);
   return false;
-}
-
-function storageKeyProtected(key: string): boolean {
-  const [first, ...rest] = key.split('^');
-  return [first, ...rest.filter((p) => p.startsWith('0')).map((p) => p.slice(1))].some(
-    urlProtected
-  );
 }
 
 function storageEntryProtected(key: string, item: unknown): boolean {
   if (FREE_FORM.has(key)) return false;
   if (typeof item !== 'string') return namesProtectedStorage(item);
   if (ORIGIN_KEYS.has(key) && urlProtected(item)) return true;
-  if (key === 'storageKey') return storageKeyProtected(item);
-  if (key === 'cacheId') return storageKeyProtected(item.split('|')[0] ?? '');
+  if (key === 'storageKey') return isProtectedStorageKey(item);
+  if (key === 'cacheId') return isProtectedStorageKey(item.split('|')[0] ?? '');
   return false;
 }
 
@@ -173,27 +175,16 @@ function hostOf(text: string): string | undefined {
   }
 }
 
-function cookieDomainProtected(domain: string): boolean {
-  let d = domain.toLowerCase();
-  if (d.startsWith('.')) d = d.slice(1);
-  if (d.endsWith('.')) d = d.slice(0, -1);
-  if (d === '') return false;
-  const under = (host: string, parent: string): boolean =>
-    host === parent || host.endsWith(`.${parent}`);
-  if (PROTECTED_RULES.domains.some((x) => under(d, x))) return true;
-  return [...PROTECTED_RULES.domains, ...PROTECTED_RULES.hosts].some((h) => under(h, d));
-}
-
 function siteProtected(site: string): boolean {
   if (urlProtected(site)) return true;
   const host = hostOf(site);
-  return host !== undefined && cookieDomainProtected(host);
+  return host !== undefined && isProtectedCookieDomain(host);
 }
 
 function cookieProtected(cookie: unknown): boolean {
   if (!isObj(cookie)) return false;
   const domain = str(cookie['domain']);
-  if (domain && cookieDomainProtected(domain)) return true;
+  if (domain && isProtectedCookieDomain(domain)) return true;
   const url = str(cookie['url']);
   if (url && siteProtected(url)) return true;
   const partition = cookie['partitionKey'];
@@ -262,11 +253,15 @@ export function initScriptGuard(): string {
     s: PROTECTED_RULES.schemes,
     h: PROTECTED_RULES.hosts,
     d: PROTECTED_RULES.domains,
+    p: PROTECTED_RULES.protectedSchemes,
+    x: PROTECTED_RULES.schemeExceptions,
   });
   const refusal = JSON.stringify(PROTECTED_RULES.refusal);
   return (
-    `if((function(r,o){try{var u=new URL(o),h=u.hostname.toLowerCase().replace(/\\.$/,''),` +
-    `s=u.protocol.slice(0,-1);return r.s.indexOf(s)>=0&&(r.h.indexOf(h)>=0||r.d.some(function(d){` +
+    `if((function(r,o){function q(s,h){return r.p.indexOf(s)>=0&&r.x.indexOf(s+'://'+h)<0}` +
+    `var l=self.location;if(l&&q(l.protocol.slice(0,-1),l.hostname.toLowerCase()))return true;` +
+    `try{var u=new URL(o),h=u.hostname.toLowerCase().replace(/\\.$/,''),` +
+    `s=u.protocol.slice(0,-1);return q(s,h)||r.s.indexOf(s)>=0&&(r.h.indexOf(h)>=0||r.d.some(function(d){` +
     `return h===d||h.slice(-d.length-1)==='.'+d}))}catch(e){return false}})(${rules},self.origin))` +
     `throw new Error(${refusal});\n`
   );
@@ -448,6 +443,9 @@ export class TabShield {
     ) {
       refuse("browser-wide permissions would reach seven's origin");
     }
+    if (method === 'Target.getTargetInfo' && params['targetId'] !== undefined) {
+      refuse('Target.getTargetInfo of another target is not supported on a page session');
+    }
     if (method === 'Target.setAutoAttach' && params['autoAttach'] === true) {
       refuse('auto-attach is not supported by the extension bridge');
     }
@@ -463,6 +461,9 @@ export class TabShield {
     }
     const url = str(params['url']);
     if (url && urlProtected(url)) refuse(PROTECTED_RULES.refusal);
+    if (NAVIGATES.has(method) && url !== undefined && url !== '' && !URL.canParse(url)) {
+      refuse("a relative url would open one of the extension's own pages");
+    }
   }
 
   private admitFrame(params: CDPPayload): void {
@@ -527,6 +528,7 @@ export class TabShield {
     if (method === 'Page.getNavigationHistory') redactHistory(result);
     if (method === 'Target.getTargetInfo' && isObj(result['targetInfo'])) {
       const info = result['targetInfo'];
+      if (isProtectedTargetType(info['type'])) refuse(PROTECTED_RULES.refusal);
       if (isProtectedTarget(str(info['url']) ?? '', false, 'unknown'))
         result['targetInfo'] = redacted(info);
     }
@@ -539,7 +541,10 @@ export class TabShield {
     if (method === 'Fetch.authRequired') return this.onAuth(p);
     this.track(p);
     this.watchCommit(method, p);
-    if (method.startsWith('Target.')) return [this.redactTarget(method, p)];
+    if (method.startsWith('Target.')) {
+      if (isObj(p['targetInfo']) && isProtectedTargetType(p['targetInfo']['type'])) return [];
+      return [this.redactTarget(method, p)];
+    }
     return this.deliver({ method, params: p });
   }
 

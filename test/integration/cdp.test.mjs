@@ -5,6 +5,7 @@ import { listen } from '../../extension/cdp.js';
 import { protectedOrigins } from '../../extension/protected.mjs';
 import { protectedRules } from '../../extension/protected-rules.js';
 import { launch } from './chrome.mjs';
+import { openExtensionPage } from './extension-page.mjs';
 
 const refused = "slicc: refused: target is on seven's origin";
 
@@ -640,36 +641,15 @@ test('pending url, opener, and a later navigation stay off protected origins', a
   cdp.close();
 });
 
-const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
-
-function sevenTab(page) {
-  return page.evaluate(async (id) => {
-    const cdp = globalThis.sliccExtension.cdp;
-    const { targetId } = await cdp.send('Target.createTarget', {
-      url: `chrome-extension://${id}/secrets.html`,
-    });
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-    let found;
-    for (let i = 0; i < 40 && !found; i++) {
-      try {
-        const r = await cdp.send(
-          'Runtime.evaluate',
-          {
-            expression:
-              'chrome.tabs.query({}).then((tabs) => tabs.filter((tab) => (tab.url || "").startsWith("https://seven.sliccy.ai/")).map((tab) => String(tab.id)))',
-            awaitPromise: true,
-            returnByValue: true,
-          },
-          sessionId
-        );
-        found = r.result?.value?.[0];
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
-    await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined);
-    return found;
-  }, extId);
+async function sevenTab(page) {
+  const ext = await openExtensionPage(page, 'secrets.html');
+  try {
+    return await ext.until(
+      'chrome.tabs.query({}).then((tabs) => tabs.filter((tab) => (tab.url || "").startsWith("https://seven.sliccy.ai/")).map((tab) => String(tab.id))[0])'
+    );
+  } finally {
+    await ext.close();
+  }
 }
 
 let chrome;
