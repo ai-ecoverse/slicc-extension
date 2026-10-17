@@ -57,6 +57,12 @@ function blocked(url, opener, previous = false) {
   return guard.target({ url: textOf(url), opener, previous });
 }
 
+function uiType(type) {
+  return (
+    typeof type === 'string' && guard.target({ url: 'about:blank', opener: 'unprotected', type })
+  );
+}
+
 async function readTab(api, tabId) {
   try {
     const tab = await api.tabs.get(tabId);
@@ -185,7 +191,7 @@ function readTargetId(params) {
 function tabFrom(targetId) {
   const tabId = Number.parseInt(targetId, 10);
   if (!Number.isFinite(tabId) || tabId <= 0 || String(tabId) !== targetId) {
-    throw new Error(`Invalid targetId: ${targetId}`);
+    throw new Error(`slicc: refused: Invalid targetId: ${targetId} is not a tab`);
   }
   return tabId;
 }
@@ -881,8 +887,9 @@ class Connection {
 
   watchChild(tabId, method, p) {
     const url = textOf(p.targetInfo?.url);
+    const hidden = urlProtected(guard, url) || uiType(p.targetInfo?.type);
     if (method === 'Target.attachedToTarget') {
-      if (urlProtected(guard, url)) {
+      if (hidden) {
         void this.api.debugger
           .sendCommand({ tabId }, 'Target.detachFromTarget', { sessionId: textOf(p.sessionId) })
           .catch(() => undefined);
@@ -895,7 +902,7 @@ class Connection {
         .catch(() => undefined);
       return;
     }
-    if (method === 'Target.targetInfoChanged' && urlProtected(guard, url)) {
+    if (method === 'Target.targetInfoChanged' && hidden) {
       void this.api.debugger
         .sendCommand({ tabId }, 'Target.detachFromTarget', {
           targetId: textOf(p.targetInfo?.targetId),

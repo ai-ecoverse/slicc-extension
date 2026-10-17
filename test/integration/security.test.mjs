@@ -4,6 +4,7 @@ import { after, before, test } from 'node:test';
 import { pinnedManifest, readUpstreamManifest } from '../../scripts/check-live-permissions.mjs';
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
+import { openExtensionPage } from './extension-page.mjs';
 
 let chrome;
 before(async () => {
@@ -15,51 +16,12 @@ const slicc = 'https://seven.sliccy.ai/';
 const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
 const refused = "slicc: refused: target is on seven's origin";
 
-function extPage(page, url) {
-  return page.evaluate(
-    async (u) => globalThis.sliccExtension.cdp.send('Target.createTarget', { url: u }),
-    url
-  );
+function extTab(page, url) {
+  return openExtensionPage(page, url.slice(`chrome-extension://${extId}/`.length));
 }
 
-async function extSession(page, targetId) {
-  const { sessionId } = await page.evaluate(
-    async (tid) =>
-      globalThis.sliccExtension.cdp.send('Target.attachToTarget', {
-        targetId: tid,
-        flatten: true,
-      }),
-    targetId
-  );
-  for (let i = 0; i < 40; i++) {
-    try {
-      const r = await page.evaluate(
-        async (sid) =>
-          globalThis.sliccExtension.cdp.send(
-            'Runtime.evaluate',
-            { expression: '1+1', returnByValue: true },
-            sid
-          ),
-        sessionId
-      );
-      if (r?.result?.value === 2) break;
-    } catch {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
-  return sessionId;
-}
-
-function extEval(page, sessionId, expression) {
-  return page.evaluate(
-    async (opts) =>
-      globalThis.sliccExtension.cdp.send(
-        'Runtime.evaluate',
-        { expression: opts.expr, awaitPromise: true, returnByValue: true },
-        opts.sid
-      ),
-    { sid: sessionId, expr: expression }
-  );
+function extEval(tab, expression) {
+  return tab.raw(expression);
 }
 
 function extClose(page, targetId) {
@@ -104,17 +66,13 @@ async function assertRelayCannotReadSecrets(page, sid, control, needles) {
       /Access to storage is not allowed/,
       'setAccessLevel blocks relay.js'
     );
-    const trusted = await extEval(
-      page,
-      sid,
-      `chrome.storage.local.get(${JSON.stringify(control.key)})`
-    );
+    const trusted = await extEval(sid, `chrome.storage.local.get(${JSON.stringify(control.key)})`);
     assert.equal(
       trusted.result.value[control.key],
       control.value,
       'control: the secrets page still reads a non-secret setting'
     );
-    const all = await extEval(page, sid, 'chrome.storage.local.get(null)');
+    const all = await extEval(sid, 'chrome.storage.local.get(null)');
     assertNoSecretRecords(all.result.value, needles);
     return 'restricted';
   }
@@ -145,7 +103,6 @@ function assertNoSecretRecords(items, needles) {
 
 function secretsCall(page, sid, message) {
   return extEval(
-    page,
     sid,
     `new Promise((resolve, reject) => { chrome.runtime.sendMessage(${JSON.stringify(message)}, (r) => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : resolve(r)); })`
   ).then((r) => r.result.value);
@@ -155,11 +112,9 @@ test('B-SEC2 plaintext canary: migration encrypts 6.248.11 plaintext, relay.js w
   const page = await chrome.visit(t, slicc);
   const canaryName = `B8_CANARY_${Date.now()}`;
   const canaryPlaintext = 'super-secret-canary-value-12345';
-  const { targetId: secTid } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
-  const secSid = await extSession(page, secTid);
+  const secSid = await extTab(page, `chrome-extension://${extId}/secrets.html`);
 
   const planted = await extEval(
-    page,
     secSid,
     `new Promise((resolve, reject) => { chrome.storage.local.set({ B8_CONTROL_SETTING: "visible", ${JSON.stringify(canaryName)}: ${JSON.stringify(canaryPlaintext)}, ${JSON.stringify(`${canaryName}_DOMAINS`)}: "upstream.test" }, () => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : chrome.storage.local.get(${JSON.stringify(canaryName)}, (r) => resolve(r[${JSON.stringify(canaryName)}]))); })`
   );
@@ -233,11 +188,10 @@ test('B-SEC2 plaintext canary: migration encrypts 6.248.11 plaintext, relay.js w
   );
 
   await extEval(
-    page,
     secSid,
     `new Promise((resolve) => chrome.runtime.sendMessage({ type: 'secrets.delete', name: ${JSON.stringify(canaryName)} }, () => chrome.storage.local.remove('B8_CONTROL_SETTING', resolve)))`
   );
-  await extClose(page, secTid);
+  await secSid.close();
 });
 
 test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable entries and offers Re-enter', async (t) => {
@@ -245,27 +199,20 @@ test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable 
   const name = `B8_PAGE_${Date.now()}`;
   const broken = `${name}_BROKEN`;
   const value = 'page-saved-plaintext-67890';
-  const { targetId, sessionId } = await (async () => {
-    const created = await extPage(page, `chrome-extension://${extId}/secrets.html`);
-    return { targetId: created.targetId, sessionId: await extSession(page, created.targetId) };
-  })();
+  const sessionId = await extTab(page, `chrome-extension://${extId}/secrets.html`);
   await extEval(
-    page,
     sessionId,
     `new Promise((resolve) => { const wait = () => document.readyState === "complete" ? resolve(true) : setTimeout(wait, 50); wait(); })`
   );
   await extEval(
-    page,
     sessionId,
     `(${IDB})((tx) => { tx.objectStore('records').put({ name: ${JSON.stringify(broken)}, value: { ct: 'AAAA', iv: 'AAAAAAAAAAAAAAAA' }, domains: 'upstream.test' }, ${JSON.stringify(broken)}); })`
   );
   await extEval(
-    page,
     sessionId,
     `(() => { document.querySelector('[data-pane="custom"]')?.click(); document.getElementById("c-name").value = ${JSON.stringify(name)}; document.getElementById("c-value").value = ${JSON.stringify(value)}; document.getElementById("c-domains").value = "upstream.test"; document.getElementById("c-save").click(); return true; })()`
   );
   const stored = await extEval(
-    page,
     sessionId,
     `(async () => { const started = Date.now(); for (;;) { const rec = await (${IDB})((tx, done) => { const g = tx.objectStore('records').get(${JSON.stringify(name)}); g.onsuccess = () => done(g.result ?? null); }); if (rec || Date.now() - started > 10000) return { rec, local: await chrome.storage.local.get(null) }; await new Promise((r) => setTimeout(r, 100)); } })()`
   );
@@ -277,7 +224,6 @@ test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable 
   assert.equal(JSON.stringify(record).includes(value), false);
   assertNoSecretRecords(stored.result.value.local, [name, value]);
   const rows = await extEval(
-    page,
     sessionId,
     `new Promise((resolve) => { document.getElementById("refreshBtn").click(); const started = Date.now(); const poll = () => { const found = [...document.querySelectorAll(".secret-row")].map((row) => ({ name: row.dataset.name, unreadable: row.classList.contains("secret-row-unreadable") })); if (found.some((r) => r.name === ${JSON.stringify(broken)}) || Date.now() - started > 10000) resolve(found); else setTimeout(poll, 100); }; poll(); })`
   );
@@ -293,7 +239,6 @@ test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable 
     'the broken ciphertext is listed as unreadable'
   );
   const reenter = await extEval(
-    page,
     sessionId,
     `(() => { const row = document.querySelector('.secret-row[data-name=${JSON.stringify(broken)}]'); const text = row.querySelector('.secret-unreadable').textContent; const button = [...row.querySelectorAll('button')].find((b) => b.textContent === 'Re-enter'); button.click(); return { text, name: document.getElementById('c-name').value, domains: document.getElementById('c-domains').value, value: document.getElementById('c-value').value, pane: document.querySelector('.pane.active')?.id, focused: document.activeElement?.id }; })()`
   );
@@ -306,7 +251,6 @@ test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable 
     focused: 'c-value',
   });
   const masked = await extEval(
-    page,
     sessionId,
     `new Promise((resolve) => chrome.runtime.sendMessage({ type: "secrets.list-masked-entries" }, resolve))`
   );
@@ -315,11 +259,10 @@ test('B-SEC2 the secrets page saves through encrypted storage, marks unreadable 
     'the pipeline decrypts the page-saved secret'
   );
   await extEval(
-    page,
     sessionId,
     `new Promise((resolve) => chrome.runtime.sendMessage({ type: 'secrets.delete', name: ${JSON.stringify(name)} }, resolve)).then(() => (${IDB})((tx) => { tx.objectStore('records').delete(${JSON.stringify(broken)}); }))`
   );
-  await extClose(page, targetId);
+  await sessionId.close();
 });
 
 test('B-SEC1 content-script senders are refused by six handlers; secrets.html senders succeed', async (t) => {
@@ -363,11 +306,9 @@ test('B-SEC1 content-script senders are refused by six handlers; secrets.html se
     );
   }
 
-  const { targetId } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
-  const sid = await extSession(page, targetId);
+  const sid = await extTab(page, `chrome-extension://${extId}/secrets.html`);
 
   const extList = await extEval(
-    page,
     sid,
     `new Promise((resolve, reject) => { chrome.runtime.sendMessage({ type: "secrets.list" }, (r) => chrome.runtime.lastError ? reject(chrome.runtime.lastError) : resolve(r)); })`
   );
@@ -376,7 +317,7 @@ test('B-SEC1 content-script senders are refused by six handlers; secrets.html se
     'secrets.list from secrets.html must return entries'
   );
 
-  await extClose(page, targetId);
+  await sid.close();
 });
 
 test('B24-1 seven: a navigation to the vault fails before it commits and the session stays', async (t) => {
@@ -563,11 +504,9 @@ test('the built manifest adds no permission warning over the upstream six manife
     );
   }
   const page = await chrome.visit(t, slicc);
-  const { targetId } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
-  const sid = await extSession(page, targetId);
+  const sid = await extTab(page, `chrome-extension://${extId}/secrets.html`);
   const manifests = [six, control, built, ...withEach].map((m) => JSON.stringify(m));
   const warnings = await extEval(
-    page,
     sid,
     `Promise.all(${JSON.stringify(manifests)}.map((m) => chrome.management.getPermissionWarningsByManifest(m)))`
   );
@@ -582,7 +521,7 @@ test('the built manifest adds no permission warning over the upstream six manife
     assert.deepEqual(added(each[i]), [], `${p} alone adds no warning over six`);
   });
   assert.deepEqual(added(current), [], 'the built manifest adds no warning over six');
-  await extClose(page, targetId);
+  await sid.close();
 });
 
 test('B24-3 the legacy offscreen cdp-command path is gone: no answer, nothing attaches; a trusted internal message still works', async (t) => {
@@ -590,10 +529,8 @@ test('B24-3 the legacy offscreen cdp-command path is gone: no answer, nothing at
   const created = await page.evaluate(async () =>
     globalThis.sliccExtension.cdp.send('Target.createTarget', { url: 'https://other.test/' })
   );
-  const { targetId } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
-  const sid = await extSession(page, targetId);
+  const sid = await extTab(page, `chrome-extension://${extId}/secrets.html`);
   const answer = await extEval(
-    page,
     sid,
     `(async () => {
       const relayed = [];
@@ -630,7 +567,7 @@ test('B24-3 the legacy offscreen cdp-command path is gone: no answer, nothing at
   );
   assert.equal(attach, created.targetId, 'the tab was never attached by the legacy path');
   await extClose(page, created.targetId);
-  await extClose(page, targetId);
+  await sid.close();
 });
 
 test('B-SEC2 in-place migration moves 6.248.11 plaintext and {ct, iv} records into IndexedDB, crash-safely, and relay.js can read none of them', async (t) => {
@@ -646,8 +583,7 @@ test('B-SEC2 in-place migration moves 6.248.11 plaintext and {ct, iv} records in
     value: 'migrate-sealed-value-222',
     domains: 'sealed.example',
   };
-  const first = await extPage(page, `chrome-extension://${extId}/secrets.html`);
-  const firstSid = await extSession(page, first.targetId);
+  const firstSid = await extTab(page, `chrome-extension://${extId}/secrets.html`);
   await secretsCall(page, firstSid, {
     type: 'secrets.set',
     name: `B8_MIG_WARM_${stamp}`,
@@ -655,7 +591,6 @@ test('B-SEC2 in-place migration moves 6.248.11 plaintext and {ct, iv} records in
     domains: ['warm.example'],
   });
   const planted = await extEval(
-    page,
     firstSid,
     `(async () => {
       const key = await (${IDB})((tx, done) => { const g = tx.objectStore('keys').get('aes-gcm-secrets'); g.onsuccess = () => done(g.result); });
@@ -673,10 +608,8 @@ test('B-SEC2 in-place migration moves 6.248.11 plaintext and {ct, iv} records in
     })()`
   );
   assert.ok(planted.result.value.includes(sealed.name), 'both formats planted');
-  const second = await extPage(page, `chrome-extension://${extId}/secrets.html`);
-  const secondSid = await extSession(page, second.targetId);
+  const secondSid = await extTab(page, `chrome-extension://${extId}/secrets.html`);
   const migrated = await extEval(
-    page,
     secondSid,
     `(async () => { const started = Date.now(); for (;;) { const local = await chrome.storage.local.get(null); if (!(${JSON.stringify(plain.name)} in local) && !(${JSON.stringify(sealed.name)} in local)) return local; if (Date.now() - started > 15000) return local; await new Promise((r) => setTimeout(r, 100)); } })()`
   );
@@ -696,14 +629,11 @@ test('B-SEC2 in-place migration moves 6.248.11 plaintext and {ct, iv} records in
     assert.deepEqual(got?.domains, [want.domains], `${want.name} keeps its domains`);
   }
   await extEval(
-    page,
     secondSid,
     `chrome.storage.local.set({ ${JSON.stringify(plain.name)}: 'stale-after-crash', ${JSON.stringify(`${plain.name}_DOMAINS`)}: 'stale.example' })`
   );
-  const third = await extPage(page, `chrome-extension://${extId}/secrets.html`);
-  const thirdSid = await extSession(page, third.targetId);
+  const thirdSid = await extTab(page, `chrome-extension://${extId}/secrets.html`);
   const retried = await extEval(
-    page,
     thirdSid,
     `(async () => { const started = Date.now(); for (;;) { const local = await chrome.storage.local.get(null); if (!(${JSON.stringify(plain.name)} in local) || Date.now() - started > 15000) return local; await new Promise((r) => setTimeout(r, 100)); } })()`
   );
@@ -720,8 +650,8 @@ test('B-SEC2 in-place migration moves 6.248.11 plaintext and {ct, iv} records in
   for (const name of [plain.name, sealed.name, `B8_MIG_WARM_${stamp}`]) {
     await secretsCall(page, thirdSid, { type: 'secrets.delete', name });
   }
-  await extEval(page, thirdSid, `chrome.storage.local.remove('B8_MIG_SETTING')`);
-  for (const tab of [first, second, third]) await extClose(page, tab.targetId);
+  await extEval(thirdSid, `chrome.storage.local.remove('B8_MIG_SETTING')`);
+  for (const tab of [firstSid, secondSid, thirdSid]) await tab.close();
 });
 
 test('B-SEC2 secrets.delete removes an unreadable record by name; a readable record is deleted too (control)', async (t) => {
@@ -729,8 +659,7 @@ test('B-SEC2 secrets.delete removes an unreadable record by name; a readable rec
   const stamp = Date.now();
   const readable = `B8_DEL_OK_${stamp}`;
   const broken = `B8_DEL_BROKEN_${stamp}`;
-  const { targetId } = await extPage(page, `chrome-extension://${extId}/secrets.html`);
-  const sid = await extSession(page, targetId);
+  const sid = await extTab(page, `chrome-extension://${extId}/secrets.html`);
   const set = await secretsCall(page, sid, {
     type: 'secrets.set',
     name: readable,
@@ -739,13 +668,11 @@ test('B-SEC2 secrets.delete removes an unreadable record by name; a readable rec
   });
   assert.ok(set?.ok !== false, `secrets.set: ${JSON.stringify(set)}`);
   await extEval(
-    page,
     sid,
     `(${IDB})((tx) => { tx.objectStore('records').put({ name: ${JSON.stringify(broken)}, value: { ct: 'AAAA', iv: 'AAAAAAAAAAAAAAAA' }, domains: 'del.example' }, ${JSON.stringify(broken)}); })`
   );
   const record = (name) =>
     extEval(
-      page,
       sid,
       `(${IDB})((tx, done) => { const g = tx.objectStore('records').get(${JSON.stringify(name)}); g.onsuccess = () => done(g.result ?? null); })`
     ).then((r) => r.result.value);
@@ -759,7 +686,7 @@ test('B-SEC2 secrets.delete removes an unreadable record by name; a readable rec
   assert.equal(await record(broken), null, 'the unreadable record is gone');
   const again = await secretsCall(page, sid, { type: 'secrets.delete', name: broken });
   assert.deepEqual(again, { ok: true, removed: false });
-  await extClose(page, targetId);
+  await sid.close();
 });
 
 test('B24-2 six bridge: blob:, filesystem: and view-source: over seven and the vault are refused; ordinary URLs work (control)', async (t) => {
