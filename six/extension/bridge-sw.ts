@@ -876,7 +876,8 @@ async function cdpCreateTarget(
   const opts: BridgeCreateWindowOptions = {
     url,
     type: params['decorated'] === false ? 'popup' : 'normal',
-    focused: params['background'] === false,
+    focused:
+      typeof params['focus'] === 'boolean' ? params['focus'] : params['background'] === false,
   };
   if (state && state !== 'normal') {
     opts.state = state;

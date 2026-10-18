@@ -160,11 +160,7 @@ for (const transport of ['seven', 'six-bridge']) {
     await page.evaluate(install, transport, extId);
     const sw = await worker();
     const opened = [];
-    t.after(async () => {
-      for (const targetId of opened) {
-        await chrome.cdp.send('Target.closeTarget', { targetId }).catch(() => undefined);
-      }
-    });
+    t.after(() => sw(`chrome.tabs.remove(${JSON.stringify(opened.map(Number))}).then(() => true)`));
     const seven = await placement(sw, url);
     await raise(sw, seven.tabId);
     await front(sw, page, url, `${transport} control`);
