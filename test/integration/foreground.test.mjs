@@ -108,6 +108,16 @@ async function ok(page, method, params, sessionId, label = '') {
   return answer.result;
 }
 
+async function step(page, method, params, sessionId, label, visible) {
+  if (visible) return ok(page, method, params, sessionId, label);
+  const answer = await drive(page, method, params, sessionId);
+  assert.ok(
+    answer.result || answer.error === `${method} timed out`,
+    `${label} ${method}: ${answer.error}`
+  );
+  return answer.result;
+}
+
 async function exercise(sw, page, url, label, created, visible) {
   await front(sw, page, url, `${label} createTarget`);
   const { sessionId } = await ok(page, 'Target.attachToTarget', {
@@ -124,31 +134,32 @@ async function exercise(sw, page, url, label, created, visible) {
   );
   assert.equal(evaluated, ordinary);
   await front(sw, page, url, `${label} evaluate`);
-  const shot = await drive(page, 'Page.captureScreenshot', { format: 'png' }, sessionId);
-  if (visible) assert.ok(shot.result?.bytes > 0, `${label}: the screenshot has pixels`);
-  else assert.ok(shot.result?.bytes > 0 || shot.error === 'Page.captureScreenshot timed out');
+  const shot = await step(
+    page,
+    'Page.captureScreenshot',
+    { format: 'png' },
+    sessionId,
+    label,
+    visible
+  );
+  if (visible) assert.ok(shot.bytes > 0, `${label}: the screenshot has pixels`);
   await front(sw, page, url, `${label} captureScreenshot`);
-  const pointer = visible
-    ? ['mouseMoved', 'mousePressed', 'mouseReleased']
-    : ['mousePressed', 'mouseReleased'];
-  for (const type of pointer) {
-    await ok(
+  for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+    await step(
       page,
       'Input.dispatchMouseEvent',
       { type, x: 20, y: 20, button: type === 'mouseMoved' ? 'none' : 'left', clickCount: 1 },
       sessionId,
-      label
+      label,
+      visible
     );
   }
-  await ok(
-    page,
-    'Input.dispatchKeyEvent',
-    { type: 'keyDown', key: 'a', text: 'a' },
-    sessionId,
-    label
-  );
-  await ok(page, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a' }, sessionId, label);
-  await ok(page, 'Input.insertText', { text: 'slicc' }, sessionId, label);
+  const keys = [
+    ['Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', text: 'a' }],
+    ['Input.dispatchKeyEvent', { type: 'keyUp', key: 'a' }],
+    ['Input.insertText', { text: 'slicc' }],
+  ];
+  for (const [method, params] of keys) await step(page, method, params, sessionId, label, visible);
   await front(sw, page, url, `${label} input`);
   return sessionId;
 }
@@ -160,7 +171,11 @@ for (const transport of ['seven', 'six-bridge']) {
     await page.evaluate(install, transport, extId);
     const sw = await worker();
     const opened = [];
-    t.after(() => sw(`chrome.tabs.remove(${JSON.stringify(opened.map(Number))}).then(() => true)`));
+    t.after(() =>
+      sw(
+        `Promise.allSettled(${JSON.stringify(opened.map(Number))}.map((id) => chrome.tabs.remove(id))).then(() => true)`
+      )
+    );
     const seven = await placement(sw, url);
     await raise(sw, seven.tabId);
     await front(sw, page, url, `${transport} control`);
