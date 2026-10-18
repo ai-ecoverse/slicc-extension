@@ -125,6 +125,49 @@ export const GUARD_FETCH_PATTERN: CDPPayload = {
 
 const NAVIGATES = new Set(['Page.navigate', 'Network.loadNetworkResource']);
 
+export const ABOUT_OTHER = 'slicc: refused: about: urls other than about:blank do not open';
+export const ABOUT_STUCK = 'slicc: refused: the page did not open about:blank itself';
+const ABOUT_WORLD = 'slicc-navigate';
+export const ABOUT_WRAPPED =
+  'slicc: refused: view-source and other wrappers of about: urls do not open';
+
+export function wrapsAbout(url: unknown, inner: readonly string[]): boolean {
+  let text = url;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (typeof text !== 'string' || !URL.canParse(text)) return false;
+    const parsed = new URL(text);
+    const scheme = parsed.protocol.slice(0, -1);
+    if (scheme === 'about') return depth > 0;
+    if (!inner.includes(scheme)) return false;
+    text = parsed.href.slice(parsed.protocol.length);
+  }
+  return true;
+}
+
+export function aboutUrl(url: unknown): URL | undefined {
+  if (typeof url !== 'string' || !URL.canParse(url)) return undefined;
+  const parsed = new URL(url);
+  return parsed.protocol === 'about:' ? parsed : undefined;
+}
+
+export function frameIn(tree: unknown, frameId: string | undefined): CDPPayload | undefined {
+  const pending: unknown[] = [tree];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!isObj(node)) continue;
+    const frame = node['frame'];
+    if (isObj(frame) && (frameId ? frame['id'] === frameId : frame['parentId'] === undefined)) {
+      return frame;
+    }
+    if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
+  }
+  return undefined;
+}
+
+export function sameDocument(current: string, next: string): boolean {
+  return next.includes('#') && current.split('#')[0] === next.split('#')[0];
+}
+
 function isObj(value: unknown): value is CDPPayload {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -365,7 +408,10 @@ export class TabShield {
 
   private async inventoryFrames(): Promise<void> {
     const tree = await this.send('Page.getFrameTree', {});
-    const pending: unknown[] = [tree['frameTree']];
+    const root = tree['frameTree'];
+    const main = isObj(root) && isObj(root['frame']) ? str(root['frame']['id']) : undefined;
+    if (!main) refuse(PROTECTED_RULES.refusal);
+    const pending: unknown[] = [root];
     while (pending.length > 0) {
       const node = pending.pop();
       if (!isObj(node)) continue;
@@ -375,6 +421,7 @@ export class TabShield {
       const id = str(frame['id']);
       if (id) this.frames.set(id, [url, origin]);
       if (urlProtected(url) || urlProtected(origin)) refuse(PROTECTED_RULES.refusal);
+      if (await this.inheritedProtected(frame)) refuse(PROTECTED_RULES.refusal);
       if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
     }
   }
@@ -406,6 +453,8 @@ export class TabShield {
     const input = params ?? {};
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     await this.admit(method, input);
+    const about = method === 'Page.navigate' ? aboutUrl(input['url']) : undefined;
+    if (about) return this.openBlank(input, about);
     const rewritten = this.rewrite(method, input);
     if (rewritten === null) return {};
     const settles = FETCH_SETTLES.has(method);
@@ -431,6 +480,75 @@ export class TabShield {
     }
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     return this.after(method, result ?? {});
+  }
+
+  private async frameOf(frameId: string | undefined): Promise<CDPPayload | undefined> {
+    const tree = await this.send('Page.getFrameTree', {});
+    return frameIn(tree['frameTree'], frameId);
+  }
+
+  private async documentOrigin(frameId: string): Promise<string> {
+    const world = await this.send('Page.createIsolatedWorld', { frameId, worldName: ABOUT_WORLD });
+    const answer = await this.send('Runtime.evaluate', {
+      expression: 'self.origin',
+      contextId: world['executionContextId'],
+      returnByValue: true,
+    });
+    const result = answer['result'];
+    const origin = isObj(result) ? str(result['value']) : undefined;
+    if (answer['exceptionDetails'] !== undefined || origin === undefined) {
+      throw new Error('no origin');
+    }
+    return origin;
+  }
+
+  private async inheritedProtected(frame: CDPPayload): Promise<boolean> {
+    const frameId = str(frame['id']) ?? '';
+    let current: CDPPayload | undefined = frame;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const url = str(current['url']) ?? '';
+      if (urlProtected(url) || urlProtected(str(current['securityOrigin']) ?? '')) return true;
+      if (url !== '' && !url.startsWith('about:')) return false;
+      try {
+        return urlProtected(await this.documentOrigin(frameId));
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      current = await this.frameOf(frameId).catch(() => undefined);
+      if (!current) return true;
+    }
+    return true;
+  }
+
+  private async openBlank(params: CDPPayload, about: URL): Promise<CDPPayload> {
+    if (about.pathname !== 'blank') refuse(ABOUT_OTHER);
+    const url = about.href;
+    const before = await this.frameOf(str(params['frameId']));
+    if (!before) throw new Error('No frame with given id found');
+    const frameId = str(before['id']) ?? '';
+    const world = await this.send('Page.createIsolatedWorld', { frameId, worldName: ABOUT_WORLD });
+    const ran = await this.send('Runtime.evaluate', {
+      expression: `location.assign(${JSON.stringify(url)})`,
+      contextId: world['executionContextId'],
+    });
+    if (ran['exceptionDetails'] !== undefined) refuse(ABOUT_STUCK);
+    const current = `${str(before['url']) ?? ''}${str(before['urlFragment']) ?? ''}`;
+    if (sameDocument(current, url)) return { frameId };
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const now = await this.frameOf(frameId);
+      if (!now || now['loaderId'] === before['loaderId']) continue;
+      if (
+        this.blockedFlag ||
+        urlProtected(str(now['securityOrigin']) ?? '') ||
+        (await this.inheritedProtected(now))
+      ) {
+        refuse(PROTECTED_RULES.refusal);
+      }
+      return { frameId, loaderId: now['loaderId'], isDownload: false };
+    }
+    refuse(ABOUT_STUCK);
   }
 
   private async admit(method: string, params: CDPPayload): Promise<void> {
@@ -471,6 +589,9 @@ export class TabShield {
     if (url && urlProtected(url)) refuse(PROTECTED_RULES.refusal);
     if (NAVIGATES.has(method) && url !== undefined && url !== '' && !URL.canParse(url)) {
       refuse("a relative url would open one of the extension's own pages");
+    }
+    if (NAVIGATES.has(method) && wrapsAbout(url, PROTECTED_RULES.innerSchemes)) {
+      refuse(ABOUT_WRAPPED);
     }
   }
 

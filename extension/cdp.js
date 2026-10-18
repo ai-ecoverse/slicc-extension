@@ -13,12 +13,19 @@ import { protectedOrigins } from './protected.mjs';
 import { protectedRules } from './protected-rules.js';
 import { seven } from './seven.js';
 import {
+  ABOUT_OTHER,
+  ABOUT_STUCK,
+  ABOUT_WORLD,
+  ABOUT_WRAPPED,
+  aboutUrl,
+  assignExpression,
   bodyMethod,
   COOKIES,
   cookieReader,
   cookieRefused,
   cookieSetter,
   dropProtectedCookies,
+  frameIn,
   initScriptPrefix,
   namesProtectedStorage,
   patternMatches,
@@ -26,9 +33,11 @@ import {
   refusedOutright,
   requestKey,
   requestUrl,
+  sameDocument,
   stripProtectedCookies,
   UNSEEN,
   urlProtected,
+  wrapsAbout,
 } from './shield.js';
 
 const guard = protectedOrigins(protectedRules);
@@ -447,6 +456,7 @@ class Connection {
   async create(params) {
     const url = typeof params.url === 'string' ? params.url : '';
     if (relative(url)) throw new Error(RELATIVE);
+    if (wrapsAbout(url, protectedRules.innerSchemes)) throw new Error(ABOUT_WRAPPED);
     if (guard.target({ url })) refusal();
     if (params.newWindow === true) {
       const created = await this.api.windows.create({
@@ -502,13 +512,101 @@ class Connection {
     return { success: true };
   }
 
-  async mainFrameOf(tabId) {
+  async inventory(tabId, tab) {
+    let tree;
     try {
-      const tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
-      return textOf(tree?.frameTree?.frame?.id);
+      tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
     } catch {
-      return '';
+      return false;
     }
+    const main = tree?.frameTree?.frame;
+    if (!main || typeof main.id !== 'string' || main.id === '') return false;
+    if (this.protectedOrigin(textOf(main.securityOrigin))) return false;
+    if (await this.inheritedProtected(tabId, main)) return false;
+    if (!tab.mainFrameId) tab.mainFrameId = main.id;
+    const pending = [...(tree.frameTree.childFrames ?? [])];
+    while (pending.length > 0) {
+      const node = pending.pop();
+      const frame = node?.frame;
+      if (typeof frame?.id === 'string' && (await this.inheritedProtected(tabId, frame))) {
+        tab.frames.set(frame.id, true);
+      }
+      if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
+    }
+    return true;
+  }
+
+  async frameOf(tabId, frameId) {
+    const tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
+    return frameIn(tree?.frameTree, frameId);
+  }
+
+  async documentOrigin(tabId, frameId) {
+    const world = await bounded(
+      this.send(tabId, 'Page.createIsolatedWorld', { frameId, worldName: ABOUT_WORLD }),
+      5000,
+      'origin'
+    );
+    const answer = await bounded(
+      this.send(tabId, 'Runtime.evaluate', {
+        expression: 'self.origin',
+        contextId: world?.executionContextId,
+        returnByValue: true,
+      }),
+      5000,
+      'origin'
+    );
+    const origin = answer?.result?.value;
+    if (answer?.exceptionDetails || typeof origin !== 'string') throw new Error('no origin');
+    return origin;
+  }
+
+  async inheritedProtected(tabId, frame) {
+    let current = frame;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const url = textOf(current?.url);
+      if (this.protectedOrigin(textOf(current?.securityOrigin)) || urlProtected(guard, url)) {
+        return true;
+      }
+      if (url !== '' && !url.startsWith('about:')) return false;
+      try {
+        return this.protectedOrigin(await this.documentOrigin(tabId, textOf(current.id)));
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      current = await this.frameOf(tabId, textOf(frame.id)).catch(() => undefined);
+      if (!current) return true;
+    }
+    return true;
+  }
+
+  async openBlank(tabId, params, about) {
+    if (about.pathname !== 'blank') throw new Error(ABOUT_OTHER);
+    const url = about.href;
+    const before = await this.frameOf(tabId, textOf(params.frameId));
+    if (!before) throw new Error('No frame with given id found');
+    const world = await this.send(tabId, 'Page.createIsolatedWorld', {
+      frameId: before.id,
+      worldName: ABOUT_WORLD,
+    });
+    const ran = await this.send(tabId, 'Runtime.evaluate', {
+      expression: assignExpression(url),
+      contextId: world?.executionContextId,
+    });
+    if (ran?.exceptionDetails) throw new Error(ABOUT_STUCK);
+    if (sameDocument(`${textOf(before.url)}${textOf(before.urlFragment)}`, url)) {
+      return { frameId: before.id };
+    }
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const now = await this.frameOf(tabId, before.id);
+      if (!now || now.loaderId === before.loaderId) continue;
+      if (this.protectedOrigin(textOf(now.securityOrigin))) refusal();
+      if (await this.inheritedProtected(tabId, now)) refusal();
+      return { frameId: before.id, loaderId: now.loaderId, isDownload: false };
+    }
+    throw new Error(ABOUT_STUCK);
   }
 
   async attach(params) {
@@ -540,8 +638,11 @@ class Connection {
         await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
         throw error;
       }
-      const main = await this.mainFrameOf(tabId);
-      if (main && !tab.mainFrameId) tab.mainFrameId = main;
+      if (!(await this.inventory(tabId, tab))) {
+        this.forget(tabId);
+        await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+        refusal();
+      }
       await bounded(
         this.send(tabId, 'Target.setAutoAttach', {
           autoAttach: true,
@@ -703,6 +804,9 @@ class Connection {
       refusal();
     }
     if (NAVIGATES.has(method) && relative(params.url)) throw new Error(RELATIVE);
+    if (NAVIGATES.has(method) && wrapsAbout(params.url, protectedRules.innerSchemes)) {
+      throw new Error(ABOUT_WRAPPED);
+    }
     if (namesProtectedStorage(guard, params)) refusal();
     if (this.frameProtected(tab, params.frameId)) refusal();
     if (this.contextProtected(tab, params)) refusal();
@@ -810,6 +914,8 @@ class Connection {
     if (method === 'Page.addScriptToEvaluateOnNewDocument') {
       forwarded = { ...params, source: prefix + textOf(params.source) };
     }
+    const about = method === 'Page.navigate' ? aboutUrl(params.url) : undefined;
+    if (about) return this.openBlank(tabId, params, about);
     if (method === 'Page.bringToFront') await activate(this.api, tabId);
     let result =
       (await this.send(tabId, method, message.params === undefined ? undefined : forwarded)) ?? {};

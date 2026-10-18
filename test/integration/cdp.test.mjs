@@ -34,6 +34,8 @@ function port(name, url, id = extensionId) {
   };
 }
 
+const plainTree = { frameTree: { frame: { id: 'MAIN', url: 'https://other.test/' } } };
+
 function fakeChrome() {
   const eventListeners = new Set();
   const detachListeners = new Set();
@@ -130,6 +132,7 @@ function fakeChrome() {
       },
       sendCommand(target, method, params) {
         api.sent.push({ tabId: target.tabId, method, params });
+        if (method === 'Page.getFrameTree') return Promise.resolve(plainTree);
         return Promise.resolve({ value: 2 });
       },
       onEvent: {
@@ -485,14 +488,266 @@ test('open, attach and navigate refuse seven and the vault', async () => {
   });
   assert.equal(navigated.error, refused);
   assert.equal(user(api).length, 0);
-  const blank = await command(cdp, connection, {
+  const plain = await command(cdp, connection, {
     id: 45,
     method: 'Page.navigate',
-    params: { url: 'about:blank' },
+    params: { url: 'https://example.test/next' },
     sessionId: '11',
   });
-  assert.deepEqual(blank.result, { value: 2 });
+  assert.deepEqual(plain.result, { value: 2 });
   assert.equal(user(api).at(-1).method, 'Page.navigate');
+  cdp.close();
+});
+
+function blankChrome(document = 'null') {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'about:blank' }]]);
+  let loader = 'L1';
+  let main = 'about:blank';
+  api.debugger.sendCommand = (target, method, params) => {
+    api.sent.push({ tabId: target.tabId, method, params });
+    if (method === 'Page.getFrameTree') {
+      return Promise.resolve({
+        frameTree: {
+          frame: { id: 'MAIN', url: main, loaderId: loader, securityOrigin: '://' },
+          childFrames: [{ frame: { id: 'CHILD', parentId: 'MAIN', url: 'https://other.test/' } }],
+        },
+      });
+    }
+    if (method === 'Page.createIsolatedWorld') return Promise.resolve({ executionContextId: 5 });
+    if (method === 'Runtime.evaluate' && params.expression === 'self.origin') {
+      return Promise.resolve({ result: { type: 'string', value: document } });
+    }
+    if (method === 'Runtime.evaluate' && params.expression.startsWith('location.assign(')) {
+      loader = 'L2';
+      main = JSON.parse(params.expression.slice(16, -1));
+    }
+    return Promise.resolve({});
+  };
+  return { connection, api, cdp };
+}
+
+test('Page.navigate to about:blank is opened by the page itself, never by the extension', async () => {
+  const { connection, api, cdp } = blankChrome();
+  const attached = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.deepEqual(attached.result, { sessionId: '8' });
+  const control = await command(cdp, connection, {
+    id: 2,
+    method: 'Page.navigate',
+    params: { url: 'https://other.test/' },
+    sessionId: '8',
+  });
+  assert.deepEqual(control.result, {});
+  assert.equal(api.sent.filter((s) => s.method === 'Page.navigate').length, 1);
+  const blank = await command(cdp, connection, {
+    id: 3,
+    method: 'Page.navigate',
+    params: { url: 'about:blank' },
+    sessionId: '8',
+  });
+  assert.deepEqual(blank.result, { frameId: 'MAIN', loaderId: 'L2', isDownload: false });
+  assert.equal(api.sent.filter((s) => s.method === 'Page.navigate').length, 1);
+  const assigned = api.sent.filter(
+    (s) => s.method === 'Runtime.evaluate' && s.params.expression.startsWith('location.assign(')
+  );
+  assert.deepEqual(assigned.at(-1).params, {
+    expression: 'location.assign("about:blank")',
+    contextId: 5,
+  });
+  const fragment = await command(cdp, connection, {
+    id: 4,
+    method: 'Page.navigate',
+    params: { url: 'about:blank#x' },
+    sessionId: '8',
+  });
+  assert.deepEqual(fragment.result, { frameId: 'MAIN' });
+  for (const [id, url] of [
+    [5, 'about:srcdoc'],
+    [6, 'about:BLANK'],
+  ]) {
+    const other = await command(cdp, connection, {
+      id,
+      method: 'Page.navigate',
+      params: { url },
+      sessionId: '8',
+    });
+    assert.match(other.error, /^slicc: refused: /, url);
+  }
+  const missing = await command(cdp, connection, {
+    id: 7,
+    method: 'Page.navigate',
+    params: { url: 'about:blank', frameId: 'NOPE' },
+    sessionId: '8',
+  });
+  assert.equal(missing.error, 'No frame with given id found');
+  assert.equal(api.sent.filter((s) => s.method === 'Page.navigate').length, 1);
+  assert.equal(connection.posted.filter((m) => m.method === 'Target.detachedFromTarget').length, 0);
+  cdp.close();
+});
+
+test('an about:blank document on the extension origin is refused at attach, after an opaque control', async () => {
+  const control = blankChrome();
+  const opaque = await command(control.cdp, control.connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.deepEqual(opaque.result, { sessionId: '8' });
+  control.cdp.close();
+  const { connection, api, cdp } = blankChrome(`chrome-extension://${extensionId}`);
+  for (const id of [1, 2]) {
+    const refusedAttach = await command(cdp, connection, {
+      id,
+      method: 'Target.attachToTarget',
+      params: { targetId: '8', flatten: true },
+    });
+    assert.equal(refusedAttach.error, refused);
+  }
+  assert.deepEqual(api.detached, [8, 8]);
+  assert.equal(connection.posted.filter((m) => m.method === 'Target.detachedFromTarget').length, 0);
+  cdp.close();
+});
+
+test('attach fails closed when the frame tree or the main-frame origin cannot be read, after a control', async () => {
+  const cases = [
+    ['control', () => Promise.resolve(plainTree), true],
+    [
+      'commits while probed',
+      (() => {
+        let reads = 0;
+        return () =>
+          Promise.resolve(
+            reads++ === 0 ? { frameTree: { frame: { id: 'MAIN', url: 'about:blank' } } } : plainTree
+          );
+      })(),
+      true,
+    ],
+    ['rejects', () => Promise.reject(new Error('Page.getFrameTree failed')), false],
+    ['hangs', () => new Promise(() => undefined), false],
+    ['empty', () => Promise.resolve({}), false],
+    [
+      'blank without origin',
+      () => Promise.resolve({ frameTree: { frame: { id: 'MAIN', url: 'about:blank' } } }),
+      false,
+    ],
+  ];
+  for (const [label, tree, attaches] of cases) {
+    const { connection, api, cdp } = open();
+    api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+    api.debugger.sendCommand = (target, method, params) => {
+      api.sent.push({ tabId: target.tabId, method, params });
+      if (method === 'Page.getFrameTree') return tree();
+      return Promise.resolve({});
+    };
+    const answer = await command(cdp, connection, {
+      id: 1,
+      method: 'Target.attachToTarget',
+      params: { targetId: '8', flatten: true },
+    });
+    if (attaches) {
+      assert.deepEqual(answer.result, { sessionId: '8' }, label);
+      assert.deepEqual(api.detached, [], label);
+    } else {
+      assert.equal(answer.error, refused, label);
+      assert.deepEqual(api.detached, [8], label);
+    }
+    assert.equal(
+      connection.posted.filter((m) => m.method === 'Target.detachedFromTarget').length,
+      0,
+      label
+    );
+    cdp.close();
+  }
+});
+
+test('a child about: frame whose origin cannot be read is treated as protected', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  api.debugger.sendCommand = (target, method, params) => {
+    api.sent.push({ tabId: target.tabId, method, params });
+    if (method === 'Page.getFrameTree') {
+      return Promise.resolve({
+        frameTree: {
+          frame: { id: 'MAIN', url: 'https://other.test/' },
+          childFrames: [{ frame: { id: 'AD', parentId: 'MAIN', url: 'about:blank' } }],
+        },
+      });
+    }
+    return Promise.resolve({});
+  };
+  const attached = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.deepEqual(attached.result, { sessionId: '8' });
+  const main = await command(cdp, connection, {
+    id: 2,
+    method: 'Runtime.evaluate',
+    params: { expression: '1' },
+    sessionId: '8',
+  });
+  assert.equal(main.error, undefined);
+  const child = await command(cdp, connection, {
+    id: 3,
+    method: 'Page.createIsolatedWorld',
+    params: { frameId: 'AD' },
+    sessionId: '8',
+  });
+  assert.equal(child.error, refused);
+  cdp.close();
+});
+
+test('view-source and other wrappers of about: urls are refused before forwarding, after a control', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  const control = await command(cdp, connection, {
+    id: 2,
+    method: 'Page.navigate',
+    params: { url: 'view-source:https://other.test/' },
+    sessionId: '8',
+  });
+  assert.deepEqual(control.result, { value: 2 });
+  let id = 3;
+  for (const url of [
+    'view-source:about:blank',
+    ' VIEW-SOURCE:about:blank#x',
+    'view-source:view-source:about:srcdoc',
+    'blob:about:blank',
+    'filesystem:about:blank',
+  ]) {
+    const answer = await command(cdp, connection, {
+      id: id++,
+      method: 'Page.navigate',
+      params: { url },
+      sessionId: '8',
+    });
+    assert.equal(
+      answer.error,
+      'slicc: refused: view-source and other wrappers of about: urls do not open',
+      url
+    );
+  }
+  const created = await command(cdp, connection, {
+    id: id++,
+    method: 'Target.createTarget',
+    params: { url: 'view-source:about:blank' },
+  });
+  assert.equal(
+    created.error,
+    'slicc: refused: view-source and other wrappers of about: urls do not open'
+  );
+  assert.equal(api.created.length, 0);
+  assert.equal(api.sent.filter((s) => s.method === 'Page.navigate').length, 1);
   cdp.close();
 });
 
@@ -1047,6 +1302,7 @@ test('concurrent dispatch: awaitPromise evaluate does not deadlock with Fetch.co
   const evalPromise = new Promise((resolve) => {
     api.debugger.sendCommand = (target, method, params) => {
       api.sent.push({ tabId: target.tabId, method, params });
+      if (method === 'Page.getFrameTree') return Promise.resolve(plainTree);
       if (method === 'Runtime.evaluate') {
         return new Promise((r) => {
           setTimeout(() => {
@@ -1338,6 +1594,7 @@ test('shield refuses protected cookie writes and filters protected cookies from 
   api.locations = new Map([[8, { url: 'https://other.test/' }]]);
   api.debugger.sendCommand = (target, method, params) => {
     api.sent.push({ tabId: target.tabId, method, params });
+    if (method === 'Page.getFrameTree') return Promise.resolve(plainTree);
     if (method.endsWith('Cookies')) {
       return Promise.resolve({
         cookies: [

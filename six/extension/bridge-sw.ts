@@ -12,13 +12,14 @@ import {
   SLICC_HOSTED_ORIGIN,
   type TargetInfo,
 } from '@slicc/shared-ts';
-import { redacted, TabShield } from './cdp-shield.js';
+import { ABOUT_WRAPPED, redacted, TabShield, wrapsAbout } from './cdp-shield.js';
 import { tabHasProtectedFrame } from './protected-frames-sw.js';
 import {
   isProtectedTab,
   isProtectedTarget,
   isProtectedUrl,
   PROTECTED_REFUSAL,
+  PROTECTED_RULES,
 } from './protected-origins.js';
 
 interface BridgeTargetAttachResult extends CDPPayload {
@@ -864,6 +865,7 @@ async function cdpCreateTarget(
 ): Promise<BridgeTargetCreateResult> {
   const url = readCreateTargetUrl(params);
   if (!URL.canParse(url)) throw new Error(RELATIVE_REFUSAL);
+  if (wrapsAbout(url, PROTECTED_RULES.innerSchemes)) throw new Error(ABOUT_WRAPPED);
   if (isProtectedTarget(url)) {
     throw new Error(PROTECTED_REFUSAL);
   }
