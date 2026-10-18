@@ -615,6 +615,17 @@ test('an about:blank document on the extension origin is refused at attach, afte
 test('attach fails closed when the frame tree or the main-frame origin cannot be read, after a control', async () => {
   const cases = [
     ['control', () => Promise.resolve(plainTree), true],
+    [
+      'commits while probed',
+      (() => {
+        let reads = 0;
+        return () =>
+          Promise.resolve(
+            reads++ === 0 ? { frameTree: { frame: { id: 'MAIN', url: 'about:blank' } } } : plainTree
+          );
+      })(),
+      true,
+    ],
     ['rejects', () => Promise.reject(new Error('Page.getFrameTree failed')), false],
     ['hangs', () => new Promise(() => undefined), false],
     ['empty', () => Promise.resolve({}), false],

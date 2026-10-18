@@ -562,13 +562,22 @@ class Connection {
   }
 
   async inheritedProtected(tabId, frame) {
-    const url = textOf(frame?.url);
-    if (url !== '' && !url.startsWith('about:')) return false;
-    try {
-      return this.protectedOrigin(await this.documentOrigin(tabId, textOf(frame.id)));
-    } catch {
-      return true;
+    let current = frame;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const url = textOf(current?.url);
+      if (this.protectedOrigin(textOf(current?.securityOrigin)) || urlProtected(guard, url)) {
+        return true;
+      }
+      if (url !== '' && !url.startsWith('about:')) return false;
+      try {
+        return this.protectedOrigin(await this.documentOrigin(tabId, textOf(current.id)));
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      current = await this.frameOf(tabId, textOf(frame.id)).catch(() => undefined);
+      if (!current) return true;
     }
+    return true;
   }
 
   async openBlank(tabId, params, about) {

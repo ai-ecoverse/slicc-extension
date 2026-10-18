@@ -503,13 +503,21 @@ export class TabShield {
   }
 
   private async inheritedProtected(frame: CDPPayload): Promise<boolean> {
-    const url = str(frame['url']) ?? '';
-    if (url !== '' && !url.startsWith('about:')) return false;
-    try {
-      return urlProtected(await this.documentOrigin(str(frame['id']) ?? ''));
-    } catch {
-      return true;
+    const frameId = str(frame['id']) ?? '';
+    let current: CDPPayload | undefined = frame;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const url = str(current['url']) ?? '';
+      if (urlProtected(url) || urlProtected(str(current['securityOrigin']) ?? '')) return true;
+      if (url !== '' && !url.startsWith('about:')) return false;
+      try {
+        return urlProtected(await this.documentOrigin(frameId));
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      current = await this.frameOf(frameId).catch(() => undefined);
+      if (!current) return true;
     }
+    return true;
   }
 
   private async openBlank(params: CDPPayload, about: URL): Promise<CDPPayload> {
