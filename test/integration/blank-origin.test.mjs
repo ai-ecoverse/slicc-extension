@@ -81,6 +81,7 @@ async function flow(page, start) {
     ['about:blank#x', 'Page.navigate', { url: 'about:blank#x' }],
     ['ABOUT:blank', 'Page.navigate', { url: ' ABOUT:blank' }],
     ['about:BLANK', 'Page.navigate', { url: 'about:BLANK' }],
+    ['view-source:about:blank', 'Page.navigate', { url: 'view-source:about:blank' }],
     ['about:srcdoc', 'Page.navigate', { url: 'about:srcdoc' }],
     ['about:blank?x', 'Page.navigate', { url: 'about:blank?x' }],
     ['ordinary', 'Page.navigate', { url: ordinary }, ordinary],
@@ -181,6 +182,11 @@ for (const transport of transports) {
       assert.equal(fragment.answer.result?.frameId, fragment.frameId, JSON.stringify(fragment));
       assert.equal(fragment.answer.result?.loaderId, undefined);
       assert.equal(fragment.origin, first);
+      assert.equal(
+        step('view-source:about:blank').answer.error,
+        'slicc: refused: view-source and other wrappers of about: urls do not open'
+      );
+      assert.equal(step('view-source:about:blank').raw, first);
       for (const label of ['about:srcdoc', 'about:BLANK']) {
         assert.equal(
           step(label).answer.error,
@@ -287,5 +293,85 @@ for (const transport of transports) {
       assert.ok(String(each.error).startsWith(refused), JSON.stringify(run));
     assert.equal(run.detaches, 0);
     assert.equal(await rawOrigin(raw), extension);
+  });
+
+  test(`${transport} view-source of about:blank is refused before forwarding, after a view-source control`, async (t) => {
+    const page = await client(t, transport);
+    const control = 'https://ordinary.test/doc?n=view-source-control';
+    const run = await page.evaluate(async (control) => {
+      const created = await h.cdp.send('Target.createTarget', { url: 'about:blank' });
+      const { sessionId } = await h.cdp.send('Target.attachToTarget', {
+        targetId: created.targetId,
+        flatten: true,
+      });
+      const tree = await h.cdp.send('Page.getFrameTree', {}, sessionId);
+      const wrapped = await h.attempt(
+        'Page.navigate',
+        { url: 'view-source:about:blank' },
+        sessionId
+      );
+      const nested = await h.attempt(
+        'Page.navigate',
+        { url: ' VIEW-SOURCE:view-source:about:blank#x' },
+        sessionId
+      );
+      const opened = await h.attempt('Target.createTarget', { url: 'view-source:about:blank' });
+      await h.sleep(500);
+      const origin = await h.evaluate(sessionId, 'self.origin');
+      const viewed = await h.attempt('Page.navigate', { url: `view-source:${control}` }, sessionId);
+      await h.sleep(800);
+      return {
+        targetId: created.targetId,
+        frameId: tree.frameTree.frame.id,
+        wrapped,
+        nested,
+        opened,
+        origin,
+        viewed,
+        detached: h.detached(sessionId),
+      };
+    }, control);
+    const refusal = 'slicc: refused: view-source and other wrappers of about: urls do not open';
+    assert.equal(run.wrapped.error, refusal, JSON.stringify(run));
+    assert.equal(run.nested.error, refusal, JSON.stringify(run));
+    assert.equal(run.opened.error, refusal, JSON.stringify(run));
+    assert.equal(run.origin, 'null');
+    assert.equal(typeof run.viewed.result?.loaderId, 'string', JSON.stringify(run));
+    assert.equal(run.viewed.result?.errorText, undefined, JSON.stringify(run));
+    assert.equal(await rawOrigin(run.frameId), 'https://ordinary.test');
+    await page.evaluate((id) => h.close(id), run.targetId);
+  });
+
+  test(`${transport} an ordinary page with sandboxed about:blank iframes still attaches and answers`, async (t) => {
+    const page = await client(t, transport);
+    const url = 'https://ordinary.test/doc?n=sandboxed-children';
+    const run = await page.evaluate(async (url) => {
+      const created = await h.cdp.send('Target.createTarget', { url });
+      const first = await h.cdp.send('Target.attachToTarget', {
+        targetId: created.targetId,
+        flatten: true,
+      });
+      await h.until(
+        async () => (await h.evaluate(first.sessionId, 'document.readyState')) === 'complete'
+      );
+      const made = await h.evaluate(
+        first.sessionId,
+        `Promise.all(['', 'allow-scripts', 'allow-same-origin', 'allow-scripts allow-same-origin'].map((flags) => new Promise((resolve) => { const f = document.createElement('iframe'); f.setAttribute('sandbox', flags); f.onload = () => resolve(flags); f.src = 'about:blank'; document.body.append(f); }))).then((all) => all.length)`
+      );
+      await h.cdp.send('Target.detachFromTarget', { sessionId: first.sessionId });
+      const again = await h.attempt('Target.attachToTarget', {
+        targetId: created.targetId,
+        flatten: true,
+      });
+      const sessionId = again.result?.sessionId;
+      const reply = sessionId
+        ? await h.evaluate(sessionId, 'document.querySelectorAll("iframe").length')
+        : undefined;
+      await h.close(created.targetId);
+      return { made, again, reply };
+    }, url);
+    assert.equal(run.made, 4, JSON.stringify(run));
+    assert.equal(typeof run.again.result?.sessionId, 'string', JSON.stringify(run));
+    assert.equal(run.reply, 4, JSON.stringify(run));
   });
 }

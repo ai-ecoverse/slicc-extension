@@ -128,6 +128,21 @@ const NAVIGATES = new Set(['Page.navigate', 'Network.loadNetworkResource']);
 export const ABOUT_OTHER = 'slicc: refused: about: urls other than about:blank do not open';
 export const ABOUT_STUCK = 'slicc: refused: the page did not open about:blank itself';
 const ABOUT_WORLD = 'slicc-navigate';
+export const ABOUT_WRAPPED =
+  'slicc: refused: view-source and other wrappers of about: urls do not open';
+
+export function wrapsAbout(url: unknown, inner: readonly string[]): boolean {
+  let text = url;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (typeof text !== 'string' || !URL.canParse(text)) return false;
+    const parsed = new URL(text);
+    const scheme = parsed.protocol.slice(0, -1);
+    if (scheme === 'about') return depth > 0;
+    if (!inner.includes(scheme)) return false;
+    text = parsed.href.slice(parsed.protocol.length);
+  }
+  return true;
+}
 
 export function aboutUrl(url: unknown): URL | undefined {
   if (typeof url !== 'string' || !URL.canParse(url)) return undefined;
@@ -393,7 +408,10 @@ export class TabShield {
 
   private async inventoryFrames(): Promise<void> {
     const tree = await this.send('Page.getFrameTree', {});
-    const pending: unknown[] = [tree['frameTree']];
+    const root = tree['frameTree'];
+    const main = isObj(root) && isObj(root['frame']) ? str(root['frame']['id']) : undefined;
+    if (!main) refuse(PROTECTED_RULES.refusal);
+    const pending: unknown[] = [root];
     while (pending.length > 0) {
       const node = pending.pop();
       if (!isObj(node)) continue;
@@ -485,11 +503,12 @@ export class TabShield {
   }
 
   private async inheritedProtected(frame: CDPPayload): Promise<boolean> {
-    if (!(str(frame['url']) ?? '').startsWith('about:')) return false;
+    const url = str(frame['url']) ?? '';
+    if (url !== '' && !url.startsWith('about:')) return false;
     try {
       return urlProtected(await this.documentOrigin(str(frame['id']) ?? ''));
     } catch {
-      return frame['parentId'] === undefined;
+      return true;
     }
   }
 
@@ -562,6 +581,9 @@ export class TabShield {
     if (url && urlProtected(url)) refuse(PROTECTED_RULES.refusal);
     if (NAVIGATES.has(method) && url !== undefined && url !== '' && !URL.canParse(url)) {
       refuse("a relative url would open one of the extension's own pages");
+    }
+    if (NAVIGATES.has(method) && wrapsAbout(url, PROTECTED_RULES.innerSchemes)) {
+      refuse(ABOUT_WRAPPED);
     }
   }
 

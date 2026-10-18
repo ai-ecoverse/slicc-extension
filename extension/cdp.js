@@ -16,6 +16,7 @@ import {
   ABOUT_OTHER,
   ABOUT_STUCK,
   ABOUT_WORLD,
+  ABOUT_WRAPPED,
   aboutUrl,
   assignExpression,
   bodyMethod,
@@ -36,6 +37,7 @@ import {
   stripProtectedCookies,
   UNSEEN,
   urlProtected,
+  wrapsAbout,
 } from './shield.js';
 
 const guard = protectedOrigins(protectedRules);
@@ -454,6 +456,7 @@ class Connection {
   async create(params) {
     const url = typeof params.url === 'string' ? params.url : '';
     if (relative(url)) throw new Error(RELATIVE);
+    if (wrapsAbout(url, protectedRules.innerSchemes)) throw new Error(ABOUT_WRAPPED);
     if (guard.target({ url })) refusal();
     if (params.newWindow === true) {
       const created = await this.api.windows.create({
@@ -509,13 +512,28 @@ class Connection {
     return { success: true };
   }
 
-  async mainFrameOf(tabId) {
+  async inventory(tabId, tab) {
+    let tree;
     try {
-      const tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
-      return tree?.frameTree?.frame ?? {};
+      tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
     } catch {
-      return {};
+      return false;
     }
+    const main = tree?.frameTree?.frame;
+    if (!main || typeof main.id !== 'string' || main.id === '') return false;
+    if (this.protectedOrigin(textOf(main.securityOrigin))) return false;
+    if (await this.inheritedProtected(tabId, main)) return false;
+    if (!tab.mainFrameId) tab.mainFrameId = main.id;
+    const pending = [...(tree.frameTree.childFrames ?? [])];
+    while (pending.length > 0) {
+      const node = pending.pop();
+      const frame = node?.frame;
+      if (typeof frame?.id === 'string' && (await this.inheritedProtected(tabId, frame))) {
+        tab.frames.set(frame.id, true);
+      }
+      if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
+    }
+    return true;
   }
 
   async frameOf(tabId, frameId) {
@@ -544,11 +562,12 @@ class Connection {
   }
 
   async inheritedProtected(tabId, frame) {
-    if (!textOf(frame?.url).startsWith('about:')) return false;
+    const url = textOf(frame?.url);
+    if (url !== '' && !url.startsWith('about:')) return false;
     try {
       return this.protectedOrigin(await this.documentOrigin(tabId, textOf(frame.id)));
     } catch {
-      return !frame.parentId;
+      return true;
     }
   }
 
@@ -610,16 +629,11 @@ class Connection {
         await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
         throw error;
       }
-      const main = await this.mainFrameOf(tabId);
-      if (
-        this.protectedOrigin(textOf(main.securityOrigin)) ||
-        (await this.inheritedProtected(tabId, main))
-      ) {
+      if (!(await this.inventory(tabId, tab))) {
         this.forget(tabId);
         await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
         refusal();
       }
-      if (main.id && !tab.mainFrameId) tab.mainFrameId = textOf(main.id);
       await bounded(
         this.send(tabId, 'Target.setAutoAttach', {
           autoAttach: true,
@@ -781,6 +795,9 @@ class Connection {
       refusal();
     }
     if (NAVIGATES.has(method) && relative(params.url)) throw new Error(RELATIVE);
+    if (NAVIGATES.has(method) && wrapsAbout(params.url, protectedRules.innerSchemes)) {
+      throw new Error(ABOUT_WRAPPED);
+    }
     if (namesProtectedStorage(guard, params)) refusal();
     if (this.frameProtected(tab, params.frameId)) refusal();
     if (this.contextProtected(tab, params)) refusal();

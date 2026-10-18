@@ -268,6 +268,21 @@ export function initScriptPrefix(rules) {
 export const ABOUT_OTHER = 'slicc: refused: about: urls other than about:blank do not open';
 export const ABOUT_STUCK = 'slicc: refused: the page did not open about:blank itself';
 export const ABOUT_WORLD = 'slicc-navigate';
+export const ABOUT_WRAPPED =
+  'slicc: refused: view-source and other wrappers of about: urls do not open';
+
+export function wrapsAbout(url, inner) {
+  let text = url;
+  for (let depth = 0; depth < 8; depth++) {
+    if (typeof text !== 'string' || !URL.canParse(text)) return false;
+    const parsed = new URL(text);
+    const scheme = parsed.protocol.slice(0, -1);
+    if (scheme === 'about') return depth > 0;
+    if (!inner.includes(scheme)) return false;
+    text = parsed.href.slice(parsed.protocol.length);
+  }
+  return true;
+}
 
 export function aboutUrl(url) {
   if (typeof url !== 'string' || !URL.canParse(url)) return undefined;

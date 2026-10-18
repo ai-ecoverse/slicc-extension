@@ -12,6 +12,7 @@ export const PROTECTED_RULES: {
   domains: readonly string[];
   hosts: readonly string[];
   schemes: readonly string[];
+  innerSchemes: readonly string[];
   protectedSchemes: readonly string[];
   schemeExceptions: readonly string[];
   refusal: string;

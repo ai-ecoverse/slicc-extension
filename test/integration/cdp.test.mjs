@@ -34,6 +34,8 @@ function port(name, url, id = extensionId) {
   };
 }
 
+const plainTree = { frameTree: { frame: { id: 'MAIN', url: 'https://other.test/' } } };
+
 function fakeChrome() {
   const eventListeners = new Set();
   const detachListeners = new Set();
@@ -130,6 +132,7 @@ function fakeChrome() {
       },
       sendCommand(target, method, params) {
         api.sent.push({ tabId: target.tabId, method, params });
+        if (method === 'Page.getFrameTree') return Promise.resolve(plainTree);
         return Promise.resolve({ value: 2 });
       },
       onEvent: {
@@ -606,6 +609,134 @@ test('an about:blank document on the extension origin is refused at attach, afte
   }
   assert.deepEqual(api.detached, [8, 8]);
   assert.equal(connection.posted.filter((m) => m.method === 'Target.detachedFromTarget').length, 0);
+  cdp.close();
+});
+
+test('attach fails closed when the frame tree or the main-frame origin cannot be read, after a control', async () => {
+  const cases = [
+    ['control', () => Promise.resolve(plainTree), true],
+    ['rejects', () => Promise.reject(new Error('Page.getFrameTree failed')), false],
+    ['hangs', () => new Promise(() => undefined), false],
+    ['empty', () => Promise.resolve({}), false],
+    [
+      'blank without origin',
+      () => Promise.resolve({ frameTree: { frame: { id: 'MAIN', url: 'about:blank' } } }),
+      false,
+    ],
+  ];
+  for (const [label, tree, attaches] of cases) {
+    const { connection, api, cdp } = open();
+    api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+    api.debugger.sendCommand = (target, method, params) => {
+      api.sent.push({ tabId: target.tabId, method, params });
+      if (method === 'Page.getFrameTree') return tree();
+      return Promise.resolve({});
+    };
+    const answer = await command(cdp, connection, {
+      id: 1,
+      method: 'Target.attachToTarget',
+      params: { targetId: '8', flatten: true },
+    });
+    if (attaches) {
+      assert.deepEqual(answer.result, { sessionId: '8' }, label);
+      assert.deepEqual(api.detached, [], label);
+    } else {
+      assert.equal(answer.error, refused, label);
+      assert.deepEqual(api.detached, [8], label);
+    }
+    assert.equal(
+      connection.posted.filter((m) => m.method === 'Target.detachedFromTarget').length,
+      0,
+      label
+    );
+    cdp.close();
+  }
+});
+
+test('a child about: frame whose origin cannot be read is treated as protected', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  api.debugger.sendCommand = (target, method, params) => {
+    api.sent.push({ tabId: target.tabId, method, params });
+    if (method === 'Page.getFrameTree') {
+      return Promise.resolve({
+        frameTree: {
+          frame: { id: 'MAIN', url: 'https://other.test/' },
+          childFrames: [{ frame: { id: 'AD', parentId: 'MAIN', url: 'about:blank' } }],
+        },
+      });
+    }
+    return Promise.resolve({});
+  };
+  const attached = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.deepEqual(attached.result, { sessionId: '8' });
+  const main = await command(cdp, connection, {
+    id: 2,
+    method: 'Runtime.evaluate',
+    params: { expression: '1' },
+    sessionId: '8',
+  });
+  assert.equal(main.error, undefined);
+  const child = await command(cdp, connection, {
+    id: 3,
+    method: 'Page.createIsolatedWorld',
+    params: { frameId: 'AD' },
+    sessionId: '8',
+  });
+  assert.equal(child.error, refused);
+  cdp.close();
+});
+
+test('view-source and other wrappers of about: urls are refused before forwarding, after a control', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  const control = await command(cdp, connection, {
+    id: 2,
+    method: 'Page.navigate',
+    params: { url: 'view-source:https://other.test/' },
+    sessionId: '8',
+  });
+  assert.deepEqual(control.result, { value: 2 });
+  let id = 3;
+  for (const url of [
+    'view-source:about:blank',
+    ' VIEW-SOURCE:about:blank#x',
+    'view-source:view-source:about:srcdoc',
+    'blob:about:blank',
+    'filesystem:about:blank',
+  ]) {
+    const answer = await command(cdp, connection, {
+      id: id++,
+      method: 'Page.navigate',
+      params: { url },
+      sessionId: '8',
+    });
+    assert.equal(
+      answer.error,
+      'slicc: refused: view-source and other wrappers of about: urls do not open',
+      url
+    );
+  }
+  const created = await command(cdp, connection, {
+    id: id++,
+    method: 'Target.createTarget',
+    params: { url: 'view-source:about:blank' },
+  });
+  assert.equal(
+    created.error,
+    'slicc: refused: view-source and other wrappers of about: urls do not open'
+  );
+  assert.equal(api.created.length, 0);
+  assert.equal(api.sent.filter((s) => s.method === 'Page.navigate').length, 1);
   cdp.close();
 });
 
@@ -1160,6 +1291,7 @@ test('concurrent dispatch: awaitPromise evaluate does not deadlock with Fetch.co
   const evalPromise = new Promise((resolve) => {
     api.debugger.sendCommand = (target, method, params) => {
       api.sent.push({ tabId: target.tabId, method, params });
+      if (method === 'Page.getFrameTree') return Promise.resolve(plainTree);
       if (method === 'Runtime.evaluate') {
         return new Promise((r) => {
           setTimeout(() => {
@@ -1451,6 +1583,7 @@ test('shield refuses protected cookie writes and filters protected cookies from 
   api.locations = new Map([[8, { url: 'https://other.test/' }]]);
   api.debugger.sendCommand = (target, method, params) => {
     api.sent.push({ tabId: target.tabId, method, params });
+    if (method === 'Page.getFrameTree') return Promise.resolve(plainTree);
     if (method.endsWith('Cookies')) {
       return Promise.resolve({
         cookies: [
