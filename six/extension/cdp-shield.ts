@@ -112,6 +112,9 @@ const REFUSED_METHODS = new Map<string, string>([
 export const COOKIES_REFUSAL = "slicc: refused: cookie is on seven's origin";
 const UNSEEN_REFUSAL = 'slicc: refused: request was not seen by the shield';
 const STREAM_REFUSAL = 'slicc: refused: stream handle was not opened through the shield';
+const BODY_READ_REFUSAL =
+  'slicc: refused: this paused response body was already read the other way';
+const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
 const PAUSE_REFUSAL = 'slicc: refused: request was not paused toward this client';
 
 export const GUARD_FETCH_PATTERN: CDPPayload = {
@@ -332,6 +335,7 @@ export class TabShield {
   private readonly held = new Bounded<ShieldEvent[]>(500);
   private readonly frames = new Bounded<string[]>(1000);
   private readonly forwarded = new Bounded<true>(2000);
+  private readonly bodyReads = new Bounded<string>(2000);
   private readonly streams = new Bounded<true>(500);
   private readonly failedDocuments = new Bounded<true>(200);
   private clientFetch: ClientFetch | null = null;
@@ -409,6 +413,7 @@ export class TabShield {
     if (settles) {
       if (!this.forwarded.has(pauseId)) refuse(PAUSE_REFUSAL);
       this.forwarded.delete(pauseId);
+      this.bodyReads.delete(pauseId);
     }
     let result: CDPPayload;
     try {
@@ -475,6 +480,11 @@ export class TabShield {
     if (FETCH_ANSWERS.has(method)) {
       const id = str(params['requestId']);
       if (!id || !this.forwarded.has(id)) refuse(PAUSE_REFUSAL);
+      if (FETCH_READS.has(method)) {
+        const read = this.bodyReads.get(id);
+        if (read !== undefined && read !== method) refuse(BODY_READ_REFUSAL);
+        this.bodyReads.set(id, method);
+      }
       return;
     }
     if (BODY_METHODS.has(method)) {
