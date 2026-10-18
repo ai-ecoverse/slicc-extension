@@ -462,7 +462,7 @@ class Connection {
       const created = await this.api.windows.create({
         url: url || 'about:blank',
         type: params.decorated === false ? 'popup' : 'normal',
-        focused: params.background !== true,
+        focused: typeof params.focus === 'boolean' ? params.focus : params.background === false,
       });
       const tabId = created?.tabs?.[0]?.id;
       if (typeof tabId !== 'number')

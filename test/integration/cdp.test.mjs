@@ -389,6 +389,22 @@ test('target commands list, open, activate, and close tabs', async () => {
   });
   assert.deepEqual(windowed.result, { targetId: '12' });
   assert.equal(api.opened[0].type, 'popup');
+  assert.equal(api.opened[0].focused, false, 'a new window opens unfocused by default');
+  for (const [id, chosen, focused] of [
+    [30, { background: true }, false],
+    [31, { background: false }, true],
+    [32, { focus: true }, true],
+    [33, { background: false, focus: false }, false],
+  ]) {
+    await command(cdp, connection, {
+      id,
+      method: 'Target.createTarget',
+      params: { url: 'https://example.test/win', newWindow: true, ...chosen },
+    });
+    assert.equal(api.opened.at(-1).focused, focused, JSON.stringify(chosen));
+  }
+  assert.deepEqual(api.activated, [], 'opening targets activates nothing');
+  assert.deepEqual(api.focused, [], 'opening targets focuses nothing');
   await command(cdp, connection, {
     id: 4,
     method: 'Target.activateTarget',
