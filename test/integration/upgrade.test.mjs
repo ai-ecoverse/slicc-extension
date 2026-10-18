@@ -112,7 +112,11 @@ async function saveSecret(page, name, value, domains) {
 async function upgrade(t, from, before) {
   const dir = await mkdtemp(join(tmpdir(), 'slicc-extension-upgrade-'));
   execFileSync('unzip', ['-q', await release(from), '-d', dir]);
-  const chrome = await launch({ roots: [['/', 'test/integration/page/']], extensions: [dir] });
+  const chrome = await launch({
+    roots: [['/', 'test/integration/page/']],
+    coverage: process.env.SLICC_COVERAGE ? undefined : [],
+    extensions: [dir],
+  });
   try {
     const name = `UPGRADE_${from.replaceAll('.', '_')}`;
     const value = `plaintext-${from}-${Date.now()}`;
