@@ -13,12 +13,18 @@ import { protectedOrigins } from './protected.mjs';
 import { protectedRules } from './protected-rules.js';
 import { seven } from './seven.js';
 import {
+  ABOUT_OTHER,
+  ABOUT_STUCK,
+  ABOUT_WORLD,
+  aboutUrl,
+  assignExpression,
   bodyMethod,
   COOKIES,
   cookieReader,
   cookieRefused,
   cookieSetter,
   dropProtectedCookies,
+  frameIn,
   initScriptPrefix,
   namesProtectedStorage,
   patternMatches,
@@ -26,6 +32,7 @@ import {
   refusedOutright,
   requestKey,
   requestUrl,
+  sameDocument,
   stripProtectedCookies,
   UNSEEN,
   urlProtected,
@@ -505,10 +512,73 @@ class Connection {
   async mainFrameOf(tabId) {
     try {
       const tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
-      return textOf(tree?.frameTree?.frame?.id);
+      return tree?.frameTree?.frame ?? {};
     } catch {
-      return '';
+      return {};
     }
+  }
+
+  async frameOf(tabId, frameId) {
+    const tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
+    return frameIn(tree?.frameTree, frameId);
+  }
+
+  async documentOrigin(tabId, frameId) {
+    const world = await bounded(
+      this.send(tabId, 'Page.createIsolatedWorld', { frameId, worldName: ABOUT_WORLD }),
+      5000,
+      'origin'
+    );
+    const answer = await bounded(
+      this.send(tabId, 'Runtime.evaluate', {
+        expression: 'self.origin',
+        contextId: world?.executionContextId,
+        returnByValue: true,
+      }),
+      5000,
+      'origin'
+    );
+    const origin = answer?.result?.value;
+    if (answer?.exceptionDetails || typeof origin !== 'string') throw new Error('no origin');
+    return origin;
+  }
+
+  async inheritedProtected(tabId, frame) {
+    if (!textOf(frame?.url).startsWith('about:')) return false;
+    try {
+      return this.protectedOrigin(await this.documentOrigin(tabId, textOf(frame.id)));
+    } catch {
+      return !frame.parentId;
+    }
+  }
+
+  async openBlank(tabId, params, about) {
+    if (about.pathname !== 'blank') throw new Error(ABOUT_OTHER);
+    const url = about.href;
+    const before = await this.frameOf(tabId, textOf(params.frameId));
+    if (!before) throw new Error('No frame with given id found');
+    const world = await this.send(tabId, 'Page.createIsolatedWorld', {
+      frameId: before.id,
+      worldName: ABOUT_WORLD,
+    });
+    const ran = await this.send(tabId, 'Runtime.evaluate', {
+      expression: assignExpression(url),
+      contextId: world?.executionContextId,
+    });
+    if (ran?.exceptionDetails) throw new Error(ABOUT_STUCK);
+    if (sameDocument(`${textOf(before.url)}${textOf(before.urlFragment)}`, url)) {
+      return { frameId: before.id };
+    }
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const now = await this.frameOf(tabId, before.id);
+      if (!now || now.loaderId === before.loaderId) continue;
+      if (this.protectedOrigin(textOf(now.securityOrigin))) refusal();
+      if (await this.inheritedProtected(tabId, now)) refusal();
+      return { frameId: before.id, loaderId: now.loaderId, isDownload: false };
+    }
+    throw new Error(ABOUT_STUCK);
   }
 
   async attach(params) {
@@ -541,7 +611,15 @@ class Connection {
         throw error;
       }
       const main = await this.mainFrameOf(tabId);
-      if (main && !tab.mainFrameId) tab.mainFrameId = main;
+      if (
+        this.protectedOrigin(textOf(main.securityOrigin)) ||
+        (await this.inheritedProtected(tabId, main))
+      ) {
+        this.forget(tabId);
+        await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+        refusal();
+      }
+      if (main.id && !tab.mainFrameId) tab.mainFrameId = textOf(main.id);
       await bounded(
         this.send(tabId, 'Target.setAutoAttach', {
           autoAttach: true,
@@ -810,6 +888,8 @@ class Connection {
     if (method === 'Page.addScriptToEvaluateOnNewDocument') {
       forwarded = { ...params, source: prefix + textOf(params.source) };
     }
+    const about = method === 'Page.navigate' ? aboutUrl(params.url) : undefined;
+    if (about) return this.openBlank(tabId, params, about);
     if (method === 'Page.bringToFront') await activate(this.api, tabId);
     let result =
       (await this.send(tabId, method, message.params === undefined ? undefined : forwarded)) ?? {};

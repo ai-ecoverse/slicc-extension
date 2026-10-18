@@ -264,3 +264,33 @@ export function initScriptPrefix(rules) {
     '})()) { throw "slicc: refused: init script on a protected origin"; }\n'
   );
 }
+
+export const ABOUT_OTHER = 'slicc: refused: about: urls other than about:blank do not open';
+export const ABOUT_STUCK = 'slicc: refused: the page did not open about:blank itself';
+export const ABOUT_WORLD = 'slicc-navigate';
+
+export function aboutUrl(url) {
+  if (typeof url !== 'string' || !URL.canParse(url)) return undefined;
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'about:') return undefined;
+  return parsed;
+}
+
+export function frameIn(tree, frameId) {
+  const pending = [tree];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    const frame = node?.frame;
+    if (frame && (frameId ? frame.id === frameId : !frame.parentId)) return frame;
+    if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
+  }
+  return undefined;
+}
+
+export function sameDocument(current, next) {
+  return next.includes('#') && current.split('#')[0] === next.split('#')[0];
+}
+
+export function assignExpression(url) {
+  return `location.assign(${JSON.stringify(url)})`;
+}

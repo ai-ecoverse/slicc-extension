@@ -125,6 +125,34 @@ export const GUARD_FETCH_PATTERN: CDPPayload = {
 
 const NAVIGATES = new Set(['Page.navigate', 'Network.loadNetworkResource']);
 
+export const ABOUT_OTHER = 'slicc: refused: about: urls other than about:blank do not open';
+export const ABOUT_STUCK = 'slicc: refused: the page did not open about:blank itself';
+const ABOUT_WORLD = 'slicc-navigate';
+
+export function aboutUrl(url: unknown): URL | undefined {
+  if (typeof url !== 'string' || !URL.canParse(url)) return undefined;
+  const parsed = new URL(url);
+  return parsed.protocol === 'about:' ? parsed : undefined;
+}
+
+export function frameIn(tree: unknown, frameId: string | undefined): CDPPayload | undefined {
+  const pending: unknown[] = [tree];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!isObj(node)) continue;
+    const frame = node['frame'];
+    if (isObj(frame) && (frameId ? frame['id'] === frameId : frame['parentId'] === undefined)) {
+      return frame;
+    }
+    if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
+  }
+  return undefined;
+}
+
+export function sameDocument(current: string, next: string): boolean {
+  return next.includes('#') && current.split('#')[0] === next.split('#')[0];
+}
+
 function isObj(value: unknown): value is CDPPayload {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -375,6 +403,7 @@ export class TabShield {
       const id = str(frame['id']);
       if (id) this.frames.set(id, [url, origin]);
       if (urlProtected(url) || urlProtected(origin)) refuse(PROTECTED_RULES.refusal);
+      if (await this.inheritedProtected(frame)) refuse(PROTECTED_RULES.refusal);
       if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
     }
   }
@@ -406,6 +435,8 @@ export class TabShield {
     const input = params ?? {};
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     await this.admit(method, input);
+    const about = method === 'Page.navigate' ? aboutUrl(input['url']) : undefined;
+    if (about) return this.openBlank(input, about);
     const rewritten = this.rewrite(method, input);
     if (rewritten === null) return {};
     const settles = FETCH_SETTLES.has(method);
@@ -431,6 +462,66 @@ export class TabShield {
     }
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     return this.after(method, result ?? {});
+  }
+
+  private async frameOf(frameId: string | undefined): Promise<CDPPayload | undefined> {
+    const tree = await this.send('Page.getFrameTree', {});
+    return frameIn(tree['frameTree'], frameId);
+  }
+
+  private async documentOrigin(frameId: string): Promise<string> {
+    const world = await this.send('Page.createIsolatedWorld', { frameId, worldName: ABOUT_WORLD });
+    const answer = await this.send('Runtime.evaluate', {
+      expression: 'self.origin',
+      contextId: world['executionContextId'],
+      returnByValue: true,
+    });
+    const result = answer['result'];
+    const origin = isObj(result) ? str(result['value']) : undefined;
+    if (answer['exceptionDetails'] !== undefined || origin === undefined) {
+      throw new Error('no origin');
+    }
+    return origin;
+  }
+
+  private async inheritedProtected(frame: CDPPayload): Promise<boolean> {
+    if (!(str(frame['url']) ?? '').startsWith('about:')) return false;
+    try {
+      return urlProtected(await this.documentOrigin(str(frame['id']) ?? ''));
+    } catch {
+      return frame['parentId'] === undefined;
+    }
+  }
+
+  private async openBlank(params: CDPPayload, about: URL): Promise<CDPPayload> {
+    if (about.pathname !== 'blank') refuse(ABOUT_OTHER);
+    const url = about.href;
+    const before = await this.frameOf(str(params['frameId']));
+    if (!before) throw new Error('No frame with given id found');
+    const frameId = str(before['id']) ?? '';
+    const world = await this.send('Page.createIsolatedWorld', { frameId, worldName: ABOUT_WORLD });
+    const ran = await this.send('Runtime.evaluate', {
+      expression: `location.assign(${JSON.stringify(url)})`,
+      contextId: world['executionContextId'],
+    });
+    if (ran['exceptionDetails'] !== undefined) refuse(ABOUT_STUCK);
+    const current = `${str(before['url']) ?? ''}${str(before['urlFragment']) ?? ''}`;
+    if (sameDocument(current, url)) return { frameId };
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const now = await this.frameOf(frameId);
+      if (!now || now['loaderId'] === before['loaderId']) continue;
+      if (
+        this.blockedFlag ||
+        urlProtected(str(now['securityOrigin']) ?? '') ||
+        (await this.inheritedProtected(now))
+      ) {
+        refuse(PROTECTED_RULES.refusal);
+      }
+      return { frameId, loaderId: now['loaderId'], isDownload: false };
+    }
+    refuse(ABOUT_STUCK);
   }
 
   private async admit(method: string, params: CDPPayload): Promise<void> {

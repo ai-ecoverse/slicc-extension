@@ -485,14 +485,127 @@ test('open, attach and navigate refuse seven and the vault', async () => {
   });
   assert.equal(navigated.error, refused);
   assert.equal(user(api).length, 0);
-  const blank = await command(cdp, connection, {
+  const plain = await command(cdp, connection, {
     id: 45,
     method: 'Page.navigate',
-    params: { url: 'about:blank' },
+    params: { url: 'https://example.test/next' },
     sessionId: '11',
   });
-  assert.deepEqual(blank.result, { value: 2 });
+  assert.deepEqual(plain.result, { value: 2 });
   assert.equal(user(api).at(-1).method, 'Page.navigate');
+  cdp.close();
+});
+
+function blankChrome(document = 'null') {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'about:blank' }]]);
+  let loader = 'L1';
+  let main = 'about:blank';
+  api.debugger.sendCommand = (target, method, params) => {
+    api.sent.push({ tabId: target.tabId, method, params });
+    if (method === 'Page.getFrameTree') {
+      return Promise.resolve({
+        frameTree: {
+          frame: { id: 'MAIN', url: main, loaderId: loader, securityOrigin: '://' },
+          childFrames: [{ frame: { id: 'CHILD', parentId: 'MAIN', url: 'https://other.test/' } }],
+        },
+      });
+    }
+    if (method === 'Page.createIsolatedWorld') return Promise.resolve({ executionContextId: 5 });
+    if (method === 'Runtime.evaluate' && params.expression === 'self.origin') {
+      return Promise.resolve({ result: { type: 'string', value: document } });
+    }
+    if (method === 'Runtime.evaluate' && params.expression.startsWith('location.assign(')) {
+      loader = 'L2';
+      main = JSON.parse(params.expression.slice(16, -1));
+    }
+    return Promise.resolve({});
+  };
+  return { connection, api, cdp };
+}
+
+test('Page.navigate to about:blank is opened by the page itself, never by the extension', async () => {
+  const { connection, api, cdp } = blankChrome();
+  const attached = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.deepEqual(attached.result, { sessionId: '8' });
+  const control = await command(cdp, connection, {
+    id: 2,
+    method: 'Page.navigate',
+    params: { url: 'https://other.test/' },
+    sessionId: '8',
+  });
+  assert.deepEqual(control.result, {});
+  assert.equal(api.sent.filter((s) => s.method === 'Page.navigate').length, 1);
+  const blank = await command(cdp, connection, {
+    id: 3,
+    method: 'Page.navigate',
+    params: { url: 'about:blank' },
+    sessionId: '8',
+  });
+  assert.deepEqual(blank.result, { frameId: 'MAIN', loaderId: 'L2', isDownload: false });
+  assert.equal(api.sent.filter((s) => s.method === 'Page.navigate').length, 1);
+  const assigned = api.sent.filter(
+    (s) => s.method === 'Runtime.evaluate' && s.params.expression.startsWith('location.assign(')
+  );
+  assert.deepEqual(assigned.at(-1).params, {
+    expression: 'location.assign("about:blank")',
+    contextId: 5,
+  });
+  const fragment = await command(cdp, connection, {
+    id: 4,
+    method: 'Page.navigate',
+    params: { url: 'about:blank#x' },
+    sessionId: '8',
+  });
+  assert.deepEqual(fragment.result, { frameId: 'MAIN' });
+  for (const [id, url] of [
+    [5, 'about:srcdoc'],
+    [6, 'about:BLANK'],
+  ]) {
+    const other = await command(cdp, connection, {
+      id,
+      method: 'Page.navigate',
+      params: { url },
+      sessionId: '8',
+    });
+    assert.match(other.error, /^slicc: refused: /, url);
+  }
+  const missing = await command(cdp, connection, {
+    id: 7,
+    method: 'Page.navigate',
+    params: { url: 'about:blank', frameId: 'NOPE' },
+    sessionId: '8',
+  });
+  assert.equal(missing.error, 'No frame with given id found');
+  assert.equal(api.sent.filter((s) => s.method === 'Page.navigate').length, 1);
+  assert.equal(connection.posted.filter((m) => m.method === 'Target.detachedFromTarget').length, 0);
+  cdp.close();
+});
+
+test('an about:blank document on the extension origin is refused at attach, after an opaque control', async () => {
+  const control = blankChrome();
+  const opaque = await command(control.cdp, control.connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.deepEqual(opaque.result, { sessionId: '8' });
+  control.cdp.close();
+  const { connection, api, cdp } = blankChrome(`chrome-extension://${extensionId}`);
+  for (const id of [1, 2]) {
+    const refusedAttach = await command(cdp, connection, {
+      id,
+      method: 'Target.attachToTarget',
+      params: { targetId: '8', flatten: true },
+    });
+    assert.equal(refusedAttach.error, refused);
+  }
+  assert.deepEqual(api.detached, [8, 8]);
+  assert.equal(connection.posted.filter((m) => m.method === 'Target.detachedFromTarget').length, 0);
   cdp.close();
 });
 
