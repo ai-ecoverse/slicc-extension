@@ -207,6 +207,9 @@ test('six handoff: a Link handoff header raises one notification and the badge p
     true,
     'both distinct handoffs are recorded, so every earlier navigation was handled'
   );
+  const shown =
+    'chrome.notifications.getAll().then((all) => Object.keys(all).filter((id) => id.startsWith("slicc-handoff-")).length >= 2)';
+  assert.equal(await panel.until(shown), true, 'both distinct handoffs show their notification');
   assert.equal(
     (await handoffs()).length,
     2,
