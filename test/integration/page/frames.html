@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>seven frames</title>
+  </head>
+  <body>
+    <script>
+    let painted = 0;
+    const tick = () => {
+      painted += 1;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    globalThis.painted = () => painted;
+    </script>
+  </body>
+</html>

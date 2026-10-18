@@ -50,6 +50,7 @@ const onePixel = Buffer.from(
 export async function pages(tls) {
   const html = await readFile(new URL('page/index.html', import.meta.url));
   const probe = await readFile(new URL('page/probe.html', import.meta.url));
+  const frames = await readFile(new URL('page/frames.html', import.meta.url));
   const seen = [];
   const server = await listen(tls, (request, response) => {
     const { pathname, searchParams } = new URL(request.url, 'https://vault.sliccy.ai');
@@ -114,7 +115,8 @@ export async function pages(tls) {
         })
         .end(html);
     }
-    const body = pathname === '/probe' ? probe : html;
+    const named = { '/probe': probe, '/frames': frames };
+    const body = named[pathname] ?? html;
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
   });
   return { ...server, seen };
