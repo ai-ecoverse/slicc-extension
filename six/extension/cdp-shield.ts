@@ -410,10 +410,11 @@ export class TabShield {
     if (rewritten === null) return {};
     const settles = FETCH_SETTLES.has(method);
     const pauseId = String(input['requestId']);
+    let read: string | undefined;
     if (settles) {
       if (!this.forwarded.has(pauseId)) refuse(PAUSE_REFUSAL);
       this.forwarded.delete(pauseId);
-      this.bodyReads.delete(pauseId);
+      read = this.bodyReads.delete(pauseId);
     }
     let result: CDPPayload;
     try {
@@ -422,8 +423,10 @@ export class TabShield {
         params === undefined && rewritten === input ? undefined : rewritten
       );
     } catch (err) {
-      if (settles && !/Invalid InterceptionId/i.test(String(err)))
+      if (settles && !/Invalid InterceptionId/i.test(String(err))) {
         this.forwarded.set(pauseId, true);
+        if (read !== undefined) this.bodyReads.set(pauseId, read);
+      }
       throw err;
     }
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
