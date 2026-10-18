@@ -44,6 +44,7 @@ const FETCH_ANSWERS = new Set([
   'Fetch.continueWithAuth',
 ]);
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
+const BODY_READ = 'slicc: refused: this paused response body was already read the other way';
 
 function textOf(value) {
   return typeof value === 'string' ? value : '';
@@ -722,6 +723,10 @@ class Connection {
     if (FETCH_ANSWERS.has(method) || FETCH_READS.has(method)) {
       const entry = tab.paused.get(textOf(params.requestId));
       if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
+      if (FETCH_READS.has(method)) {
+        if (entry.read !== undefined && entry.read !== method) throw new Error(BODY_READ);
+        entry.read = method;
+      }
       if (FETCH_ANSWERS.has(method)) entry.claimed = true;
     } else if (bodyMethod(method)) {
       const known = tab.requests.get(textOf(requestKey(params)));

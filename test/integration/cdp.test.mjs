@@ -949,6 +949,77 @@ test('a protected iframe does not detach the tab (Codex P2)', async () => {
   cdp.close();
 });
 
+test('a session answers its own held ordinary requests while its tab heads to a protected url, and nothing else', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  await command(cdp, connection, {
+    id: 2,
+    method: 'Fetch.enable',
+    params: { patterns: [{ urlPattern: '*' }] },
+    sessionId: '8',
+  });
+  for (const requestId of ['r1', 'r2']) {
+    api.fire(8, 'Fetch.requestPaused', {
+      requestId,
+      resourceType: 'Ping',
+      request: { url: `https://other.test/${requestId}` },
+    });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  api.locations.set(8, { url: 'https://other.test/', pendingUrl: 'https://vault.sliccy.ai/' });
+  const evaluate = await command(cdp, connection, {
+    id: 3,
+    method: 'Runtime.evaluate',
+    params: { expression: '1' },
+    sessionId: '8',
+  });
+  assert.equal(
+    evaluate.error,
+    refused,
+    'other commands are refused while the tab heads to the vault'
+  );
+  const unknown = await command(cdp, connection, {
+    id: 4,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'r9' },
+    sessionId: '8',
+  });
+  assert.equal(unknown.error, refused, 'an unknown request id is not admitted');
+  const held = await command(cdp, connection, {
+    id: 5,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'r1' },
+    sessionId: '8',
+  });
+  assert.equal(held.error, undefined, 'the held ordinary request is continued');
+  assert.ok(
+    api.sent.some(
+      (sent) => sent.method === 'Fetch.continueRequest' && sent.params?.requestId === 'r1'
+    ),
+    'the continue reaches chrome'
+  );
+  api.locations.set(8, { url: 'https://vault.sliccy.ai/' });
+  const committed = await command(cdp, connection, {
+    id: 6,
+    method: 'Fetch.continueRequest',
+    params: { requestId: 'r2' },
+    sessionId: '8',
+  });
+  assert.equal(committed.error, refused, 'a tab on a committed protected url is refused');
+  assert.equal(
+    api.sent.some(
+      (sent) => sent.method === 'Fetch.continueRequest' && sent.params?.requestId === 'r2'
+    ),
+    false
+  );
+  cdp.close();
+});
+
 test('concurrent dispatch: awaitPromise evaluate does not deadlock with Fetch.continueRequest (S7-2)', async () => {
   const { connection, api, cdp } = open();
   api.locations = new Map([[8, { url: 'https://other.test/' }]]);
