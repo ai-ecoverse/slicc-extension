@@ -124,7 +124,7 @@ jobs:
             find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp {} "$DEBS"/ \;
           fi
 
-      - name: Integration tests with coverage and CPU profiles
+      - name: Integration tests
         run: npm test
         env:
           NODE_OPTIONS: "--max-old-space-size=4096"
