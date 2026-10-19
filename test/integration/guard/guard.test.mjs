@@ -79,6 +79,7 @@ async function browser() {
   const rules = hosts.map((host) => `MAP ${host} 127.0.0.1:${fixture.port}`).join(', ');
   const chrome = await launch({
     roots: [['/', 'test/integration/page/']],
+    coverage: [],
     extensions: ['extension/'],
     args: ['--ignore-certificate-errors', `--host-resolver-rules=${rules}`],
   });
@@ -118,6 +119,7 @@ async function browser() {
     async send(method, params = {}, sessionId) {
       const tab = typeof params.targetId === 'string' && /^\d+$/.test(params.targetId);
       const mapped = tab ? { ...params, targetId: await realTarget(params.targetId) } : params;
+      if (method === 'Runtime.enable') await cdp.send('Runtime.disable', {}, sessionId);
       return cdp.send(method, mapped, sessionId);
     },
     on: (listener) => cdp.on(listener),

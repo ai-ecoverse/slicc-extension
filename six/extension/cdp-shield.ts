@@ -1,5 +1,15 @@
 import type { CDPPayload } from '@slicc/shared-ts';
 import {
+  ABOUT_WORLD,
+  extensionOrigin,
+  PROFILED,
+  profiled,
+  RESERVED_WORLD,
+  scopedBinding,
+  WORLD,
+  Worlds,
+} from './cdp-worlds.js';
+import {
   isProtectedCookieDomain,
   isProtectedStorageKey,
   isProtectedTarget,
@@ -127,7 +137,6 @@ const NAVIGATES = new Set(['Page.navigate', 'Network.loadNetworkResource']);
 
 export const ABOUT_OTHER = 'slicc: refused: about: urls other than about:blank do not open';
 export const ABOUT_STUCK = 'slicc: refused: the page did not open about:blank itself';
-const ABOUT_WORLD = 'slicc-navigate';
 export const ABOUT_WRAPPED =
   'slicc: refused: view-source and other wrappers of about: urls do not open';
 
@@ -381,7 +390,10 @@ export class TabShield {
   private readonly bodyReads = new Bounded<string>(2000);
   private readonly streams = new Bounded<true>(500);
   private readonly failedDocuments = new Bounded<true>(200);
+  private readonly hiddenFrames = new Bounded<true>(1000);
+  private readonly worlds = new Worlds();
   private clientFetch: ClientFetch | null = null;
+  private mainFrameId = '';
   private blockedFlag = false;
 
   constructor(
@@ -404,6 +416,7 @@ export class TabShield {
     await this.send('Fetch.enable', this.fetchParams());
     await this.send('Network.setBypassServiceWorker', { bypass: true });
     await this.inventoryFrames();
+    await this.send('Runtime.enable', {});
   }
 
   private async inventoryFrames(): Promise<void> {
@@ -411,6 +424,7 @@ export class TabShield {
     const root = tree['frameTree'];
     const main = isObj(root) && isObj(root['frame']) ? str(root['frame']['id']) : undefined;
     if (!main) refuse(PROTECTED_RULES.refusal);
+    this.mainFrameId = main;
     const pending: unknown[] = [root];
     while (pending.length > 0) {
       const node = pending.pop();
@@ -420,6 +434,10 @@ export class TabShield {
       const origin = str(frame['securityOrigin']) ?? '';
       const id = str(frame['id']);
       if (id) this.frames.set(id, [url, origin]);
+      if (id && id !== main && (extensionOrigin(url) || extensionOrigin(origin))) {
+        this.hiddenFrames.set(id, true);
+        continue;
+      }
       if (urlProtected(url) || urlProtected(origin)) refuse(PROTECTED_RULES.refusal);
       if (await this.inheritedProtected(frame)) refuse(PROTECTED_RULES.refusal);
       if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
@@ -450,9 +468,10 @@ export class TabShield {
     params: CDPPayload | undefined,
     forward: Send
   ): Promise<CDPPayload> {
-    const input = params ?? {};
+    const input = method === 'Runtime.addBinding' ? scopedBinding(params ?? {}) : (params ?? {});
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     await this.admit(method, input);
+    if (method === 'Runtime.enable' || method === 'Runtime.disable') return {};
     const about = method === 'Page.navigate' ? aboutUrl(input['url']) : undefined;
     if (about) return this.openBlank(input, about);
     const rewritten = this.rewrite(method, input);
@@ -480,6 +499,10 @@ export class TabShield {
     }
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     return this.after(method, result ?? {});
+  }
+
+  visibleContexts(): CDPPayload[] {
+    return this.worlds.visible();
   }
 
   private async frameOf(frameId: string | undefined): Promise<CDPPayload | undefined> {
@@ -558,6 +581,7 @@ export class TabShield {
     this.admitUrls(method, params);
     if (namesProtectedStorage(params)) refuse(PROTECTED_RULES.refusal);
     this.admitFrame(params);
+    this.admitWorlds(method, params);
     this.admitRequestIds(method, params);
     if (method === 'Page.navigateToHistoryEntry') await this.admitHistory(params);
   }
@@ -598,6 +622,14 @@ export class TabShield {
   private admitFrame(params: CDPPayload): void {
     const frameId = str(params['frameId']);
     if (frameId && this.frameProtected(frameId)) refuse(PROTECTED_RULES.refusal);
+  }
+
+  private admitWorlds(method: string, params: CDPPayload): void {
+    if (profiled(method) && this.worlds.foreign) refuse(PROFILED);
+    if (params['worldName'] === ABOUT_WORLD) refuse(RESERVED_WORLD);
+    if (this.worlds.named(params['worldName'])) refuse(WORLD);
+    const reason = this.worlds.refusal(params);
+    if (reason) refuse(reason);
   }
 
   private admitRequestIds(method: string, params: CDPPayload): void {
@@ -653,11 +685,15 @@ export class TabShield {
   }
 
   private after(method: string, result: CDPPayload): CDPPayload {
+    this.worlds.learn(result);
+    if (method === 'Page.createIsolatedWorld') this.worlds.seen(result['executionContextId']);
     const stream = str(result['stream']);
     if (stream) this.streams.set(stream, true);
     const resource = result['resource'];
     const resourceStream = isObj(resource) ? str(resource['stream']) : undefined;
     if (resourceStream) this.streams.set(resourceStream, true);
+    if (method === 'Page.getFrameTree') this.pruneFrames(result['frameTree']);
+    if (method === 'Page.getResourceTree') this.pruneFrames(result['frameTree']);
     if (COOKIE_READERS.has(method)) dropProtectedCookies(result);
     if (method === 'Page.getNavigationHistory') redactHistory(result);
     if (method === 'Target.getTargetInfo' && isObj(result['targetInfo'])) {
@@ -674,7 +710,10 @@ export class TabShield {
     if (method === 'Fetch.requestPaused') return this.onPaused(p);
     if (method === 'Fetch.authRequired') return this.onAuth(p);
     this.track(p);
-    this.watchCommit(method, p);
+    if (this.watchCommit(method, p)) return [];
+    if (profiled(method) && this.worlds.foreign) return [];
+    if (this.worlds.hides(p)) return [];
+    if (this.frameProtected(str(p['frameId']) ?? '')) return [];
     if (method.startsWith('Target.')) {
       if (isObj(p['targetInfo']) && isProtectedTargetType(p['targetInfo']['type'])) return [];
       return [this.redactTarget(method, p)];
@@ -751,28 +790,80 @@ export class TabShield {
 
   private frameProtected(frameId: string): boolean {
     if (!frameId) return false;
+    if (this.hiddenFrames.has(frameId)) return true;
     return (this.frames.get(frameId) ?? []).some(urlProtected);
   }
 
-  private watchCommit(method: string, params: CDPPayload): void {
+  private watchCommit(method: string, params: CDPPayload): boolean {
     if (method === 'Page.frameNavigated' && isObj(params['frame'])) {
       const frame = params['frame'];
       const url = `${str(frame['url']) ?? ''}${str(frame['urlFragment']) ?? ''}`;
       const origin = str(frame['securityOrigin']) ?? '';
       const id = str(frame['id']);
       if (id) this.frames.set(id, [url, origin]);
-      if (frame['parentId'] === undefined && (urlProtected(url) || urlProtected(origin)))
-        this.block();
-      return;
+      if (frame['parentId'] === undefined) {
+        if (id) this.mainFrameId = id;
+        if (urlProtected(url) || urlProtected(origin)) this.block();
+        return false;
+      }
+      if (id && (extensionOrigin(url) || extensionOrigin(origin))) {
+        this.hiddenFrames.set(id, true);
+        return true;
+      }
+      return false;
+    }
+    if (method === 'Runtime.executionContextDestroyed') {
+      return this.worlds.remove(params['executionContextId']);
+    }
+    if (method === 'Runtime.executionContextsCleared') {
+      this.worlds.clear();
+      return false;
     }
     if (method === 'Runtime.executionContextCreated' && isObj(params['context'])) {
-      const context = params['context'];
-      const aux = isObj(context['auxData']) ? context['auxData'] : {};
-      if (aux['isDefault'] === false) return;
-      const origin = str(context['origin']) ?? '';
-      const frame = str(aux['frameId']);
+      return this.watchContext(params['context']);
+    }
+    return false;
+  }
+
+  private watchContext(context: CDPPayload): boolean {
+    const aux = isObj(context['auxData']) ? context['auxData'] : {};
+    const origin = str(context['origin']) ?? '';
+    const frame = str(aux['frameId']);
+    let kind = this.worlds.kindOf(context, urlProtected);
+    if (aux['isDefault'] !== false && kind === undefined) {
       if (frame) this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
-      if (urlProtected(origin)) this.block();
+      const child = frame !== undefined && frame !== this.mainFrameId;
+      if (child && (extensionOrigin(origin) || (frame && this.hiddenFrames.has(frame)))) {
+        if (frame) this.hiddenFrames.set(frame, true);
+        kind = 'foreign';
+      } else if (urlProtected(origin)) {
+        this.block();
+        return true;
+      }
+    }
+    if (this.worlds.add(context, kind)) this.quietProfilers();
+    return kind !== undefined;
+  }
+
+  private pruneFrames(tree: unknown): void {
+    if (!isObj(tree) || !Array.isArray(tree['childFrames'])) return;
+    const kept = tree['childFrames'].filter((node: unknown) => {
+      const frame = isObj(node) && isObj(node['frame']) ? node['frame'] : {};
+      const id = str(frame['id']) ?? '';
+      const hidden =
+        this.frameProtected(id) ||
+        extensionOrigin(frame['url']) ||
+        extensionOrigin(frame['securityOrigin']);
+      if (hidden && id) this.hiddenFrames.set(id, true);
+      return !hidden;
+    });
+    tree['childFrames'] = kept;
+    for (const node of kept) this.pruneFrames(node);
+  }
+
+  private quietProfilers(): void {
+    for (const method of ['Debugger.disable', 'Profiler.disable', 'HeapProfiler.disable']) {
+      this.send(method, {}).catch(() => {});
     }
   }
 
@@ -800,6 +891,7 @@ export class TabShield {
       }
     }
     const released = id && this.requests.get(id) === false ? (this.held.delete(id) ?? []) : [];
+    this.worlds.learn(params);
     return [event, ...released];
   }
 }

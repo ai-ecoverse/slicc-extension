@@ -48,3 +48,5 @@ export function portCall(page, name, message) {
     { extId, name, message }
   );
 }
+
+export const fixtureId = 'ijjffdhhmbfnhfadpaaojpcpkfinpjoa';

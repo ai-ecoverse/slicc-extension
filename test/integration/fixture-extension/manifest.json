@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "slicc fixture content script",
+  "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApsS3yri78ruhPFozgjjTHTRJ7YkF8SJNEDDrspIQdixQAGJnR/A1+k2zVvb5JfUB11ONoxiqngZCM/qdfBCl9sQRkVx9DiRiSSCau4qn8tf/wyhSu462cFeDDF0MaMt0c6yV1Zmox3xPW3kBMUdbyblA6RUCjG8UD64Gckf9b1662p868vTZhjiwTiBfN8THCjfO6v9ehMNuvPgxuAD+iyBsqEEkfF9S3pyTHw9fv1mPAA/dCwgAirzajbJCiyFxJqhBp0NzbRO/B+n68QfMZ1QcEuV7R/9EQu+fBD5wpPFOHlh70jjtsW2gz6gW4rk1rUAx+Gt2arDCAALcUmlKMQIDAQAB",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [{ "resources": ["frame.html"], "matches": ["<all_urls>"] }]
+}
