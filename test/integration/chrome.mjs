@@ -30,7 +30,7 @@ export async function launch() {
   const chrome = await start({
     roots: [['/', 'test/integration/page/']],
     coverage: process.env.SLICC_COVERAGE ? undefined : [],
-    extensions: ['extension/'],
+    extensions: ['extension/', 'test/integration/fixture-extension/'],
     args: [
       '--ignore-certificate-errors',
       `--host-resolver-rules=${rules}`,

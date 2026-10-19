@@ -25,18 +25,27 @@ import {
   cookieRefused,
   cookieSetter,
   dropProtectedCookies,
+  EXTENSION_FRAME,
+  extensionOrigin,
+  foreignFrame,
   frameIn,
   initScriptPrefix,
   namesProtectedStorage,
+  PROFILED,
   patternMatches,
   patternProtected,
+  profiled,
+  RESERVED_WORLD,
   refusedOutright,
   requestKey,
   requestUrl,
   sameDocument,
+  scopedBinding,
   stripProtectedCookies,
   UNSEEN,
   urlProtected,
+  WORLD,
+  Worlds,
   wrapsAbout,
 } from './shield.js';
 
@@ -255,6 +264,14 @@ function bounded(promise, ms, label) {
 
 function plainContinue(params) {
   return Object.keys(params).every((key) => key === 'requestId');
+}
+
+function outgoing(message, params) {
+  if (message.method === 'Page.addScriptToEvaluateOnNewDocument') {
+    return { ...params, source: prefix + textOf(params.source) };
+  }
+  if (message.params === undefined && message.method !== 'Runtime.addBinding') return undefined;
+  return params;
 }
 
 class Connection {
@@ -617,7 +634,14 @@ class Connection {
     let tab = this.tabState(tabId);
     if (!tab) {
       if (!this.state.ownedTabs.has(tabId)) {
-        await bounded(this.api.debugger.attach({ tabId }, '1.3'), 10000, 'Target.attachToTarget');
+        await bounded(
+          this.api.debugger.attach({ tabId }, '1.3'),
+          10000,
+          'Target.attachToTarget'
+        ).catch((error) => {
+          if (foreignFrame(error)) throw new Error(EXTENSION_FRAME);
+          throw error;
+        });
         this.state.ownedTabs.add(tabId);
       }
       tab = {
@@ -625,7 +649,8 @@ class Connection {
         mainFrameId: '',
         pageUrl: seen.url,
         frames: new Map(),
-        contexts: new Map(),
+        worlds: new Worlds(),
+        runtime: new Set(),
         requests: new Map(),
         held: new Map(),
         paused: new Map(),
@@ -638,7 +663,7 @@ class Connection {
         await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
         throw error;
       }
-      if (!(await this.inventory(tabId, tab))) {
+      if (!(await this.inventory(tabId, tab)) || !(await this.watchRuntime(tabId))) {
         this.forget(tabId);
         await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
         refusal();
@@ -663,6 +688,15 @@ class Connection {
     return { sessionId };
   }
 
+  async watchRuntime(tabId) {
+    try {
+      await bounded(this.send(tabId, 'Runtime.enable', {}), 5000, 'runtime');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async settlePaused(tabId, sessionId) {
     const tab = this.tabState(tabId);
     if (!tab) return;
@@ -681,6 +715,7 @@ class Connection {
     const tab = this.tabState(tabId);
     this.state.sessions.delete(sessionId);
     tab?.sessions.delete(sessionId);
+    tab?.runtime.delete(sessionId);
     if (tab && tab.sessions.size > 0) {
       await bounded(this.settlePaused(tabId, sessionId), 5000, 'detach').catch(() => undefined);
       await bounded(this.applyFetch(tabId), 5000, 'detach').catch(() => undefined);
@@ -785,18 +820,6 @@ class Connection {
     return typeof frameId === 'string' && tab.frames.get(frameId) === true;
   }
 
-  contextProtected(tab, params) {
-    for (const key of ['contextId', 'executionContextId']) {
-      if (typeof params[key] === 'number' && tab.contexts.get(params[key]) === true) return true;
-    }
-    if (typeof params.uniqueContextId === 'string') {
-      for (const [id, value] of tab.contexts) {
-        if (value === true && params.uniqueContextId.endsWith(`.${id}`)) return true;
-      }
-    }
-    return false;
-  }
-
   checkParams(method, params, tab) {
     if (cookieSetter(method)) {
       if (cookieRefused(guard, params)) throw new Error(COOKIES);
@@ -809,7 +832,11 @@ class Connection {
     }
     if (namesProtectedStorage(guard, params)) refusal();
     if (this.frameProtected(tab, params.frameId)) refusal();
-    if (this.contextProtected(tab, params)) refusal();
+    if (profiled(method) && tab.worlds.foreign) throw new Error(PROFILED);
+    if (params.worldName === ABOUT_WORLD) throw new Error(RESERVED_WORLD);
+    if (tab.worlds.named(params.worldName)) throw new Error(WORLD);
+    const world = tab.worlds.refusal(params);
+    if (world) throw new Error(world);
     if (method === 'Fetch.enable') {
       const patterns = Array.isArray(params.patterns) ? params.patterns : [];
       if (patterns.some((p) => patternProtected(guard, protectedRules.domains, p))) refusal();
@@ -910,15 +937,15 @@ class Connection {
       tab.paused.delete(requestId);
       return this.answer(tabId, method, params);
     }
-    let forwarded = params;
-    if (method === 'Page.addScriptToEvaluateOnNewDocument') {
-      forwarded = { ...params, source: prefix + textOf(params.source) };
+    const forwarded = outgoing(message, params);
+    if (method === 'Runtime.enable' || method === 'Runtime.disable') {
+      return this.runtimeSwitch(tab, method, sessionId);
     }
     const about = method === 'Page.navigate' ? aboutUrl(params.url) : undefined;
     if (about) return this.openBlank(tabId, params, about);
     if (method === 'Page.bringToFront') await activate(this.api, tabId);
-    let result =
-      (await this.send(tabId, method, message.params === undefined ? undefined : forwarded)) ?? {};
+    let result = (await this.send(tabId, method, forwarded)) ?? {};
+    this.learn(tab, method, result);
     if (cookieReader(method)) result = dropProtectedCookies(guard, result);
     if (typeof result.stream === 'string') this.state.streams.add(result.stream);
     if (method === 'IO.resolveBlob' && typeof result.uuid === 'string') {
@@ -926,6 +953,26 @@ class Connection {
     }
     if (method === 'IO.close') this.state.streams.delete(textOf(params.handle));
     return result;
+  }
+
+  learn(tab, method, result) {
+    if (method === 'Page.createIsolatedWorld') tab.worlds.seen(result.executionContextId);
+    if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
+      this.pruneFrames(tab, result.frameTree);
+    }
+  }
+
+  runtimeSwitch(tab, method, sessionId) {
+    if (method === 'Runtime.disable') {
+      tab.runtime.delete(sessionId);
+      return {};
+    }
+    if (tab.runtime.has(sessionId)) return {};
+    tab.runtime.add(sessionId);
+    for (const context of tab.worlds.visible()) {
+      this.post({ method: 'Runtime.executionContextCreated', params: { context }, sessionId });
+    }
+    return {};
   }
 
   async dispatch(message) {
@@ -953,7 +1000,10 @@ class Connection {
       case 'Browser.getVersion':
         return version();
       default:
-        return this.sessionCommand(message, params);
+        return this.sessionCommand(
+          message,
+          message.method === 'Runtime.addBinding' ? scopedBinding(params) : params
+        );
     }
   }
 
@@ -999,7 +1049,12 @@ class Connection {
   }
 
   broadcast(tabId, method, params) {
-    for (const sessionId of this.sessionsOf(tabId)) this.post({ method, params, sessionId });
+    const tab = this.tabState(tabId);
+    const runtime = method.startsWith('Runtime.');
+    for (const sessionId of this.sessionsOf(tabId)) {
+      if (runtime && !tab?.runtime.has(sessionId)) continue;
+      this.post({ method, params, sessionId });
+    }
   }
 
   deliver(tabId, tab, method, params) {
@@ -1099,11 +1154,35 @@ class Connection {
   watchContext(tabId, tab, ctx) {
     const frameId = textOf(ctx.auxData?.frameId);
     const isProtected = this.protectedOrigin(textOf(ctx.origin));
-    if (typeof ctx.id === 'number') tab.contexts.set(ctx.id, isProtected);
     if (isProtected && ctx.auxData?.isDefault && frameId && frameId === tab.mainFrameId) {
       this.release(tabId);
+      return true;
     }
-    return isProtected;
+    const kind = tab.worlds.hideable(ctx, tab.mainFrameId, (origin) =>
+      this.protectedOrigin(origin)
+    );
+    if (tab.worlds.add(ctx, kind)) this.quietProfilers(tabId);
+    return kind !== undefined;
+  }
+
+  pruneFrames(tab, tree) {
+    if (!Array.isArray(tree?.childFrames)) return;
+    tree.childFrames = tree.childFrames.filter((node) => {
+      const frame = node?.frame ?? {};
+      const hidden =
+        this.frameProtected(tab, frame.id) ||
+        extensionOrigin(frame.url) ||
+        extensionOrigin(frame.securityOrigin);
+      if (hidden && typeof frame.id === 'string') tab.frames.set(frame.id, true);
+      return !hidden;
+    });
+    for (const node of tree.childFrames) this.pruneFrames(tab, node);
+  }
+
+  quietProfilers(tabId) {
+    for (const method of ['Debugger.disable', 'Profiler.disable', 'HeapProfiler.disable']) {
+      void this.send(tabId, method, {}).catch(() => undefined);
+    }
   }
 
   watch(tabId, tab, method, p) {
@@ -1113,7 +1192,10 @@ class Connection {
       return this.watchContext(tabId, tab, p.context ?? {});
     }
     if (method === 'Runtime.executionContextDestroyed') {
-      tab.contexts.delete(p.executionContextId);
+      return tab.worlds.remove(p.executionContextId);
+    }
+    if (method === 'Runtime.executionContextsCleared') {
+      tab.worlds.clear();
       return false;
     }
     if (method === 'Page.navigatedWithinDocument' && this.isMain(tab, textOf(p.frameId))) {
@@ -1142,7 +1224,9 @@ class Connection {
       return;
     }
     if (this.watch(tabId, tab, method, p)) return;
-    if (this.contextProtected(tab, p)) return;
+    if (profiled(method) && tab.worlds.foreign) return;
+    if (tab.worlds.hides(p)) return;
+    if (this.frameProtected(tab, p.frameId)) return;
     this.deliver(tabId, tab, method, p);
   }
 

@@ -13,6 +13,7 @@ import {
   type TargetInfo,
 } from '@slicc/shared-ts';
 import { ABOUT_WRAPPED, redacted, TabShield, wrapsAbout } from './cdp-shield.js';
+import { EXTENSION_FRAME, foreignFrameError } from './cdp-worlds.js';
 import { tabHasProtectedFrame } from './protected-frames-sw.js';
 import {
   isProtectedTab,
@@ -801,7 +802,10 @@ async function cdpAttachToTarget(
   const targetId = readTargetIdParam(params);
   const tabId = await guardedTab(params, deps);
   if (!state.ownedTabs.has(tabId)) {
-    const attachedByThisPort = await deps.attachDebugger(tabId);
+    const attachedByThisPort = await deps.attachDebugger(tabId).catch((err: unknown) => {
+      if (foreignFrameError(err)) throw new Error(EXTENSION_FRAME);
+      throw err;
+    });
     if (attachedByThisPort) state.ownedTabs.add(tabId);
   }
   if (await isProtectedTab(await deps.getTab(tabId), deps.getTab)) {

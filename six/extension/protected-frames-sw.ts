@@ -1,3 +1,4 @@
+import { extensionOrigin } from './cdp-worlds.js';
 import { isProtectedUrl } from './protected-origins.js';
 
 const STORAGE_KEY = 'slicc_protected_frame_tabs';
@@ -36,7 +37,7 @@ export function noteFrameResponse(details: {
   const { tabId, type, url } = details;
   if (tabId < 0) return Promise.resolve();
   if (type === 'main_frame') return update((tabs) => tabs.delete(tabId));
-  if (type === 'sub_frame' && isProtectedUrl(url)) {
+  if (type === 'sub_frame' && isProtectedUrl(url) && !extensionOrigin(url)) {
     return update((tabs) => {
       if (tabs.has(tabId)) return false;
       tabs.add(tabId);

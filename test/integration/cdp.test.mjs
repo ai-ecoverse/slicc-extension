@@ -188,7 +188,10 @@ function open(url = 'https://seven.sliccy.ai/play') {
 
 function user(api) {
   return api.sent.filter(
-    (sent) => !['Fetch.enable', 'Page.getFrameTree', 'Target.setAutoAttach'].includes(sent.method)
+    (sent) =>
+      !['Fetch.enable', 'Page.getFrameTree', 'Target.setAutoAttach', 'Runtime.enable'].includes(
+        sent.method
+      )
   );
 }
 
