@@ -15,7 +15,7 @@ concurrency:
 
 env:
   LEFTHOOK: "0"
-  BASE_SHA: ${{ github.sha }}
+  BASE_SHA: ${{ github.event_name == 'pull_request_target' && github.sha || '' }}
   APPROVAL: cert-review-approved
   QUIET: |
     test/**

@@ -1017,3 +1017,25 @@ test('the diff is taken against the workflow commit on main, not a stale base sh
   assert.deepEqual(await files({ BASE_SHA: main2 }), ['extension/relay.js']);
   assert.deepEqual((await files({})).sort(), ['README.md', 'extension/relay.js']);
 });
+
+test('the plan decides on the diff against the workflow commit: a PR that only carries main forward is not behaviour', async () => {
+  reset();
+  git('checkout', '-q', '-B', 'main3', shas.base);
+  write('extension/moved.js', 'export const moved = 1;\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'main3');
+  const main3 = git('rev-parse', 'HEAD');
+  git('checkout', '-q', '-B', 'carried', main3);
+  write('README.md', '# r\n\nand docs\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'carried');
+  const head = git('rev-parse', 'HEAD');
+  const env = { GITHUB_EVENT_PATH: event('carried', head), GUARD: 'PASS', RECEIPT: receipt(head) };
+  const p = await run('plan.mjs', { ...env, BASE_SHA: main3 });
+  assert.equal(p.outputs.conclusion, 'success', p.stdout);
+  const stale = await run('plan.mjs', env);
+  assert.equal(stale.outputs.kind, 'review');
+  const missing = await run('plan.mjs', { ...env, GITHUB_ACTIONS: 'true' });
+  assert.equal(missing.code, 1);
+  assert.match(missing.stdout, /BASE_SHA/);
+});

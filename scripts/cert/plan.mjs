@@ -1,5 +1,15 @@
 import { readFileSync } from 'node:fs';
-import { decide, diffOf, diffSize, globs, noop, output, sha, touchedPaths } from './lib.mjs';
+import {
+  baseOf,
+  decide,
+  diffOf,
+  diffSize,
+  globs,
+  noop,
+  output,
+  sha,
+  touchedPaths,
+} from './lib.mjs';
 
 const env = process.env;
 const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
@@ -21,7 +31,7 @@ if (
 }
 
 const fork = pull.head.repo?.full_name !== repo;
-const files = fork ? [] : diffOf(sha(env.BASE_SHA || pull.base.sha), head);
+const files = fork ? [] : diffOf(baseOf(env, pull), head);
 const paths = touchedPaths(files);
 const d = decide({
   fork,
