@@ -1,0 +1,305 @@
+name: cert-review-pr
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') || (github.event.action == 'edited' && !github.event.changes.base)) && format('cert-review-noop-{0}', github.run_id) || format('cert-review-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+env:
+  LEFTHOOK: "0"
+  APPROVAL: cert-review-approved
+  QUIET: |
+    test/**
+    **/*.md
+  LOUD: |
+    extension/**
+    six/**
+  INJECTION_ALLOW: ""
+  GUARD_PATHS: |
+    .github/workflows/**
+    .github/actions/**
+    scripts/cert/**
+    scripts/gate.mjs
+    scripts/is-main.mjs
+  FALLBACK: |
+    const e = process.env;
+    const run = `${e.GITHUB_SERVER_URL}/${e.GITHUB_REPOSITORY}/actions/runs/${e.GITHUB_RUN_ID}`;
+    const body = { name: 'cert-review', head_sha: e.HEAD_SHA, external_id: `v2:${e.PR}:${e.HEAD_SHA}:${e.GITHUB_RUN_ID}:${e.GITHUB_RUN_ATTEMPT}`, details_url: run, status: 'completed', conclusion: 'failure', completed_at: new Date().toISOString(), output: { title: `incomplete: ${e.STAGE}; re-run`, summary: `cert-review did not finish its ${e.STAGE}: re-run the failed jobs (${run}).` } };
+    const r = await fetch(`${e.GITHUB_API_URL}/repos/${e.GITHUB_REPOSITORY}/check-runs`, { method: 'POST', headers: { authorization: `Bearer ${e.GH_TOKEN}`, accept: 'application/vnd.github+json' }, body: JSON.stringify(body) });
+    console.log(`cert-review: failure on ${e.HEAD_SHA} (incomplete: ${e.STAGE}), HTTP ${r.status}`);
+    process.exit(1);
+
+jobs:
+  guard:
+    name: cert / self-guard
+    if: github.event_name == 'merge_group' || (github.event.pull_request.head.repo.full_name == github.repository && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') || (github.event.action == 'edited' && !github.event.changes.base)))
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: write
+    outputs:
+      status: ${{ steps.guard.outputs.status }}
+      receipt: ${{ steps.guard.outputs.receipt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The pull request's head, as data
+        if: github.event_name == 'pull_request_target'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch -q --no-tags origin "$HEAD_SHA"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ai-ecoverse/slicc-shared-web
+          ref: f342d7cf558c817ce517bbbbc4cc46df6eac2f97
+          path: .cert-self-guard
+          sparse-checkout: .github/actions/cert-self-guard
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+
+      - id: guard
+        name: cert-self-guard v1.24.2, with pull_request_target read as the pull_request it carries
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CERT_GUARD_PATHS: ${{ env.GUARD_PATHS }}
+          CERT_GUARD_APPROVAL_LABEL: cert-review-approved
+        run: |
+          event="$GITHUB_EVENT_NAME"
+          [ "$event" = pull_request_target ] && event=pull_request
+          GITHUB_EVENT_NAME="$event" node .cert-self-guard/.github/actions/cert-self-guard/guard.mjs
+
+  plan:
+    name: cert / plan
+    needs: guard
+    if: ${{ !cancelled() && github.event_name == 'pull_request_target' && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') || (github.event.action == 'edited' && !github.event.changes.base)) }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      kind: ${{ steps.plan.outputs.kind }}
+      conclusion: ${{ steps.plan.outputs.conclusion }}
+      title: ${{ steps.plan.outputs.title }}
+      summary: ${{ steps.plan.outputs.summary }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The pull request's head, as data
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch -q --no-tags origin "$HEAD_SHA"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+
+      - id: plan
+        name: Fork, draft, cert path, not behaviour, or review
+        env:
+          GUARD: ${{ needs.guard.outputs.status }}
+          RECEIPT: ${{ needs.guard.outputs.receipt }}
+        run: node scripts/cert/plan.mjs
+
+  review:
+    name: cert / review
+    needs: plan
+    if: needs.plan.outputs.kind == 'review' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The pull request's head, as data
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch -q --no-tags origin "$HEAD_SHA"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+
+      - id: diff
+        name: The annotated diff and main's prompt
+        shell: bash
+        env:
+          CERT_DIR: ${{ runner.temp }}/cert
+          CERT_PROMPT: scripts/cert/review.txt
+        run: |
+          node scripts/cert/diff.mjs
+          schema=$(node -e 'process.stdout.write(JSON.stringify(require("./scripts/cert/verdict.schema.json")))')
+          echo "schema=$schema" >> "$GITHUB_OUTPUT"
+
+      - id: claude
+        name: Review, read-only, without a token that can write
+        continue-on-error: true
+        uses: anthropics/claude-code-action/base-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: ${{ vars.CERT_AWS_REGION || 'us-west-2' }}
+        with:
+          use_bedrock: "true"
+          prompt_file: ${{ runner.temp }}/cert/prompt.txt
+          claude_args: |
+            --model ${{ vars.CERT_BEDROCK_MODEL || 'global.anthropic.claude-opus-5-5' }}
+            --add-dir ${{ runner.temp }}/cert
+            --permission-mode dontAsk
+            --allowedTools "Read(/${{ github.workspace }}/**),Glob(/${{ github.workspace }}/**),Grep(/${{ github.workspace }}/**),Read(/${{ runner.temp }}/cert/**),Glob(/${{ runner.temp }}/cert/**),Grep(/${{ runner.temp }}/cert/**)"
+            --disallowedTools "Bash,Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Agent,Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(//etc/**),Read(//run/**),Read(//var/**),Read(//tmp/**)"
+            --json-schema '${{ steps.diff.outputs.schema }}'
+            --max-turns 80
+
+      - name: The verdict, exactly as the review returned it
+        env:
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+          OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/verdict"
+          echo "review: $OUTCOME"
+          if [ "$OUTCOME" = success ] && [ -n "$VERDICT" ]; then printf '%s' "$VERDICT" > "$RUNNER_TEMP/verdict/verdict.json"; else echo "the review returned no verdict"; fi
+
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cert-review-verdict
+          path: ${{ runner.temp }}/verdict/verdict.json
+          if-no-files-found: ignore
+          overwrite: true
+
+  post:
+    name: cert / post
+    needs: [plan, review]
+    if: ${{ !cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.kind != 'noop' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The pull request's head, as data
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch -q --no-tags origin "$HEAD_SHA"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+
+      - id: artifacts
+        name: The run's only verdict artifact is the one the review job uploaded
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECT_ID: ${{ needs.review.outputs.id }}
+          EXPECT_DIGEST: ${{ needs.review.outputs.digest }}
+        run: node scripts/cert/artifacts.mjs
+
+      - if: needs.review.outputs.id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.review.outputs.id }}
+          path: ${{ runner.temp }}/verdict
+          digest-mismatch: error
+
+      - id: post
+        name: Validate the verdict, post the review, set the cert-review check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CERT_SECRETS: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          ARTIFACTS: ${{ steps.artifacts.outcome }}
+          VERDICT: ${{ runner.temp }}/verdict/verdict.json
+          KIND: ${{ needs.plan.outputs.kind }}
+          CONCLUSION: ${{ needs.plan.outputs.conclusion }}
+          TITLE: ${{ needs.plan.outputs.title }}
+          SUMMARY: ${{ needs.plan.outputs.summary }}
+        run: node scripts/cert/post.mjs
+
+      - name: A post that set no check still sets one, so cert-review never waits forever
+        if: failure() && steps.post.outputs.checked != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          STAGE: post
+        run: node --input-type=module -e "$FALLBACK"
+
+  group:
+    name: cert / merge group
+    needs: guard
+    if: ${{ !cancelled() && github.event_name == 'merge_group' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+
+      - id: group
+        name: Every member has a cert-review success on its head from this workflow, in code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GUARD: ${{ needs.guard.outputs.status }}
+          RECEIPT: ${{ needs.guard.outputs.receipt }}
+        run: node scripts/cert/group.mjs
+
+      - name: A lookup that set no check still sets one, so cert-review never waits forever
+        if: failure() && steps.group.outputs.checked != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: group
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          STAGE: merge-group lookup
+        run: node --input-type=module -e "$FALLBACK"

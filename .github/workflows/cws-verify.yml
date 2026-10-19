@@ -1,0 +1,119 @@
+name: cws-verify
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cws-verify
+  cancel-in-progress: false
+
+env:
+  LEFTHOOK: "0"
+
+jobs:
+  probe:
+    name: the version the store serves, on main
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      version: ${{ steps.probe.outputs.version }}
+      tag: ${{ steps.probe.outputs.tag }}
+      recorded: ${{ steps.probe.outputs.recorded }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+
+      - id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ITEM_ID: ${{ vars.CHROME_WEB_STORE_ITEM_ID }}
+        run: node scripts/cert/cws-verify.mjs --probe
+
+  rebuild:
+    name: rebuild the release from its tag, without a token that can write
+    needs: probe
+    if: needs.probe.outputs.recorded == 'false'
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.probe.outputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+
+      - shell: bash
+        env:
+          VERSION: ${{ needs.probe.outputs.version }}
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          node scripts/pack.mjs "$VERSION"
+
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cws-verify-rebuild
+          path: artifacts/slicc-extension.zip
+          if-no-files-found: error
+          overwrite: true
+
+  verify:
+    name: store crx = release zip = rebuild
+    needs: [probe, rebuild]
+    if: ${{ !cancelled() && needs.probe.result == 'success' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+
+      - if: needs.probe.outputs.recorded == 'false'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.rebuild.outputs.id }}
+          path: ${{ runner.temp }}/rebuild
+          digest-mismatch: error
+
+      - name: The store's crx, minus _metadata/ and update_url, is byte-identical to the release zip and to the rebuild
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ITEM_ID: ${{ vars.CHROME_WEB_STORE_ITEM_ID }}
+          VERSION: ${{ needs.probe.outputs.version }}
+          REBUILT: ${{ needs.probe.outputs.recorded == 'false' && format('{0}/rebuild/slicc-extension.zip', runner.temp) || '' }}
+        run: |
+          args=(--expect "$VERSION")
+          [ -n "$REBUILT" ] && args+=(--rebuilt "$REBUILT")
+          node scripts/gate.mjs cws-verify -- node scripts/cert/cws-verify.mjs "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
