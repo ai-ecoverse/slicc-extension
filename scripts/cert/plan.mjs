@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { changes, decide, globs, noop, output, sha, touchedPaths } from './lib.mjs';
+import { decide, diffOf, diffSize, globs, noop, output, sha, touchedPaths } from './lib.mjs';
 
 const env = process.env;
 const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
@@ -7,17 +7,27 @@ const pull = event.pull_request;
 const head = sha(pull.head.sha);
 const repo = env.GITHUB_REPOSITORY;
 
-if (noop({ action: event.action, label: event.label?.name, approval: env.APPROVAL })) {
+if (
+  noop({
+    action: event.action,
+    label: event.label?.name,
+    approval: env.APPROVAL,
+    changes: event.changes,
+  })
+) {
   console.log(`cert-review plan: noop (${event.action} ${event.label?.name ?? ''})`);
   output({ kind: 'noop' });
   process.exit(0);
 }
 
 const fork = pull.head.repo?.full_name !== repo;
-const paths = fork ? [] : touchedPaths(changes(sha(pull.base.sha), head));
+const files = fork ? [] : diffOf(sha(pull.base.sha), head);
+const paths = touchedPaths(files);
 const d = decide({
   fork,
   repo,
+  baseRef: pull.base.ref,
+  size: diffSize(files),
   draft: pull.draft === true,
   approval: env.APPROVAL,
   guard: env.GUARD,

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { inflateRawSync } from 'node:zlib';
+import { crc32, inflateRawSync } from 'node:zlib';
 import { isMain } from '../is-main.mjs';
 
 const ITEM = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
@@ -22,7 +22,9 @@ export function unzip(buf) {
   for (let k = 0; k < count; k++) {
     if (buf.readUInt32LE(pos) !== 0x02014b50) throw new Error('bad zip central directory');
     const method = buf.readUInt16LE(pos + 10);
+    const crc = buf.readUInt32LE(pos + 16);
     const size = buf.readUInt32LE(pos + 20);
+    const plain = buf.readUInt32LE(pos + 24);
     const nameLen = buf.readUInt16LE(pos + 28);
     const extraLen = buf.readUInt16LE(pos + 30);
     const commentLen = buf.readUInt16LE(pos + 32);
@@ -30,12 +32,18 @@ export function unzip(buf) {
     const name = buf.subarray(pos + 46, pos + 46 + nameLen).toString('utf8');
     if (size === 0xffffffff || local === 0xffffffff) throw new Error('zip64 is not expected');
     if (buf.readUInt32LE(local) !== 0x04034b50) throw new Error(`bad local header for ${name}`);
+    const localName = buf
+      .subarray(local + 30, local + 30 + buf.readUInt16LE(local + 26))
+      .toString('utf8');
+    if (localName !== name) throw new Error(`zip entry ${name} has local name ${localName}`);
     const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
     const raw = buf.subarray(start, start + size);
     let data;
     if (method === 0) data = Buffer.from(raw);
     else if (method === 8) data = inflateRawSync(raw);
     else throw new Error(`unsupported zip method ${method} for ${name}`);
+    if (data.length !== plain || crc32(data) !== crc)
+      throw new Error(`zip entry ${name} fails its size or CRC`);
     if (entries.has(name)) throw new Error(`duplicate zip entry ${name}`);
     entries.set(name, data);
     pos += 46 + nameLen + extraLen + commentLen;
@@ -83,6 +91,18 @@ export function compare(crx, zip) {
     if (!theirs.equals(bytes)) problems.push(`${name} differs`);
   }
   return { ok: problems.length === 0, problems, files, metadata: metadata.length };
+}
+
+export function sameZip(a, b) {
+  const x = unzip(a);
+  const y = unzip(b);
+  const problems = [];
+  for (const name of x.keys()) if (!y.has(name)) problems.push(`only in the release zip: ${name}`);
+  for (const name of y.keys()) if (!x.has(name)) problems.push(`only in the rebuild: ${name}`);
+  for (const [name, bytes] of x)
+    if (y.has(name) && !y.get(name).equals(bytes))
+      problems.push(`${name} differs from the rebuild`);
+  return problems;
 }
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
@@ -135,43 +155,67 @@ function github(repo, token) {
   return { call, asset };
 }
 
-export async function verifyLive({ repo, token, item }) {
-  const gh = github(repo, token);
-  const { version, crx, hash } = await live(item);
-  const tag = `v${version}`;
-  const release = await gh.call(`releases/tags/${tag}`);
-  const asset = release.assets?.find((a) => a.name === 'slicc-extension.zip');
-  if (release.draft || !asset)
-    throw new Error(`release ${tag} has no published slicc-extension.zip`);
-  const zip = await gh.asset(asset.id);
+async function tagCommit(gh, tag) {
   let ref = await gh.call(`git/ref/tags/${tag}`);
   for (let i = 0; ref.object.type === 'tag' && i < 5; i++)
     ref = { object: (await gh.call(`git/tags/${ref.object.sha}`)).object };
   if (ref.object.type !== 'commit') throw new Error(`${tag} does not resolve to a commit`);
-  const commit = ref.object.sha;
-  const onMain = (await gh.call(`compare/main...${commit}`)).status;
-  const result = compare(crx, zip);
-  if (!['identical', 'behind'].includes(onMain))
-    result.problems.push(`${tag} (${commit}) is not on main (${onMain})`);
-  result.ok = result.problems.length === 0;
-  return { gh, version, tag, commit, hash, zipSha: sha256(zip), result };
+  return ref.object.sha;
 }
 
-async function record({ gh, version, tag, commit, hash, result, runUrl }) {
-  const key = `${version}:${hash}`;
-  const conclusion = result.ok ? 'success' : 'failure';
+async function recorded(gh, commit, key) {
   const runs = (
     await gh.call(`commits/${commit}/check-runs?check_name=cws-verify&filter=all&per_page=100`)
   ).check_runs;
-  if (runs.some((c) => c.external_id === key && c.conclusion === conclusion))
-    return 'already recorded';
+  return runs.some((c) => c.external_id === key && c.conclusion === 'success');
+}
+
+export async function probe({ repo, token, item }) {
+  const gh = github(repo, token);
+  const { version, crx, hash } = await live(item);
+  const tag = `v${version}`;
+  const commit = await tagCommit(gh, tag);
+  return {
+    gh,
+    version,
+    tag,
+    commit,
+    crx,
+    hash,
+    done: await recorded(gh, commit, `${version}:${hash}`),
+  };
+}
+
+export async function verifyLive({ repo, token, item, expect, rebuilt }) {
+  const p = await probe({ repo, token, item });
+  if (expect && p.version !== expect)
+    throw new Error(`the store moved from ${expect} to ${p.version} during the run; re-run`);
+  if (p.done)
+    return { ...p, result: { ok: true, problems: [], files: 0 }, how: 'already recorded' };
+  if (!rebuilt) throw new Error(`${p.tag} is not verified yet and no rebuild of it was given`);
+  const release = await p.gh.call(`releases/tags/${p.tag}`);
+  const asset = release.assets?.find((a) => a.name === 'slicc-extension.zip');
+  if (release.draft || !asset)
+    throw new Error(`release ${p.tag} has no published slicc-extension.zip`);
+  const zip = await p.gh.asset(asset.id);
+  const onMain = (await p.gh.call(`compare/main...${p.commit}`)).status;
+  const result = compare(p.crx, zip);
+  result.problems.push(...sameZip(zip, rebuilt));
+  if (!['identical', 'behind'].includes(onMain))
+    result.problems.push(`${p.tag} (${p.commit}) is not on main (${onMain})`);
+  result.ok = result.problems.length === 0;
+  return { ...p, result };
+}
+
+async function record({ gh, version, tag, commit, hash, result, runUrl }) {
+  const conclusion = result.ok ? 'success' : 'failure';
   const summary = result.ok
-    ? `The Chrome Web Store serves ${version}, and its crx minus _metadata/ and the update_url line is byte-identical to ${tag}'s slicc-extension.zip (${result.files} files), and ${tag} is on main.`
-    : `The Chrome Web Store serves ${version}, and it is not ${tag}'s slicc-extension.zip:\n${result.problems.map((p) => `- ${p}`).join('\n')}`;
+    ? `The Chrome Web Store serves ${version}. Its crx, minus _metadata/ and the update_url line, is byte-identical to ${tag}'s slicc-extension.zip (${result.files} files). That zip is identical to a rebuild from ${tag}, and ${tag} is on main.`
+    : `The Chrome Web Store serves ${version}, and it is not ${tag} as released and rebuilt:\n${result.problems.map((p) => `- ${p}`).join('\n')}`;
   await gh.call('check-runs', 'POST', {
     name: 'cws-verify',
     head_sha: commit,
-    external_id: key,
+    external_id: `${version}:${hash}`,
     details_url: runUrl,
     status: 'completed',
     conclusion,
@@ -185,29 +229,47 @@ async function record({ gh, version, tag, commit, hash, result, runUrl }) {
 }
 
 if (isMain(import.meta.url)) {
-  const { values } = parseArgs({ options: { crx: { type: 'string' }, zip: { type: 'string' } } });
+  const { values } = parseArgs({
+    options: {
+      crx: { type: 'string' },
+      zip: { type: 'string' },
+      probe: { type: 'boolean' },
+      expect: { type: 'string' },
+      rebuilt: { type: 'string' },
+    },
+  });
+  const env = process.env;
+  const where = { repo: env.GITHUB_REPOSITORY, token: env.GH_TOKEN, item: env.ITEM_ID || ITEM };
   try {
     if (values.crx || values.zip) {
       const r = compare(readFileSync(values.crx), readFileSync(values.zip));
-      if (!r.ok) throw new Error(r.problems.join('; '));
+      if (values.rebuilt)
+        r.problems.push(...sameZip(readFileSync(values.zip), readFileSync(values.rebuilt)));
+      if (r.problems.length) throw new Error(r.problems.join('; '));
       console.log(
         `cws-verify: PASS ${values.crx} minus _metadata/ and update_url = ${values.zip} (${r.files} files)`
       );
+    } else if (values.probe) {
+      const p = await probe(where);
+      const line = `version=${p.version}\ntag=${p.tag}\nrecorded=${p.done}\n`;
+      if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, line);
+      console.log(
+        `cws-verify probe: the store serves ${p.version} (${p.tag} at ${p.commit}), ${p.done ? 'already verified' : 'not verified yet'}`
+      );
     } else {
-      const env = process.env;
       const runUrl = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`;
       const v = await verifyLive({
-        repo: env.GITHUB_REPOSITORY,
-        token: env.GH_TOKEN,
-        item: env.ITEM_ID || ITEM,
+        ...where,
+        expect: values.expect,
+        rebuilt: values.rebuilt ? readFileSync(values.rebuilt) : undefined,
       });
-      const how = await record({ ...v, runUrl });
+      const how = v.how ?? (await record({ ...v, runUrl }));
       if (!v.result.ok)
         throw new Error(
           `store ${v.version} != ${v.tag}: ${v.result.problems.join('; ')} (check ${how})`
         );
       console.log(
-        `cws-verify: PASS store ${v.version} = ${v.tag} (${v.result.files} files, on main at ${v.commit}, check ${how})`
+        `cws-verify: PASS store ${v.version} = ${v.tag}, released and rebuilt, on main at ${v.commit} (check ${how})`
       );
     }
   } catch (err) {

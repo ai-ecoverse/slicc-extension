@@ -7,6 +7,7 @@ import {
   globs,
   injections,
   MARKER,
+  opaque,
   output,
   place,
   quiet,
@@ -125,52 +126,77 @@ async function postReview({ conclusion, title, text, comments, files }) {
   }
 }
 
+function conclude(found, verdict, problem) {
+  const comments = [...found, ...(verdict?.comments ?? [])];
+  const fails = comments.filter((c) => c.severity === 'fail').length;
+  const titled = `fail: ${fails} finding${fails === 1 ? '' : 's'}`;
+  if (!verdict && !found.length)
+    return {
+      conclusion: 'failure',
+      title: `incomplete: ${problem}; re-run`,
+      text: `No valid verdict: ${problem}. Not certified; re-run the workflow.`,
+      comments,
+    };
+  const pre = found.length
+    ? `${found.length} finding(s) in code (prompt-injection text or files the review can't read). `
+    : '';
+  const text = verdict
+    ? `${pre}${found.length ? `The review's own verdict was ${verdict.verdict}. ` : ''}${verdict.summary}`
+    : `${pre}No valid verdict either (${problem}).`;
+  return {
+    conclusion: fails ? 'failure' : 'success',
+    title: fails ? titled : 'pass',
+    text,
+    comments,
+  };
+}
+
+async function publish(r, files) {
+  if (!(await current())) return;
+  await tidySafely();
+  if (r.conclusion === 'failure' || r.comments.length) await postReview({ ...r, files });
+}
+
 async function reviewed() {
   const files = diffOf(base, head);
-  const hits = injections(files, globs(env.GUARD_PATHS));
+  const found = [
+    ...injections(files, globs(env.GUARD_PATHS)),
+    ...opaque(files, globs(env.QUIET), globs(env.LOUD)),
+  ];
   const v = verdictOf();
-  let comments = hits;
-  let conclusion = 'failure';
-  let title;
-  let text;
-  if (v.ok) {
-    comments = [...hits, ...v.value.comments];
-    const fails = comments.filter((c) => c.severity === 'fail').length;
-    conclusion = fails ? 'failure' : 'success';
-    title = fails ? `fail: ${fails} finding${fails === 1 ? '' : 's'}` : 'pass';
-    text = hits.length
-      ? `Possible prompt injection on ${hits.length} added line(s); the review's own verdict was ${v.value.verdict}. ${v.value.summary}`
-      : v.value.summary;
-  } else if (hits.length) {
-    title = `fail: ${hits.length} finding${hits.length === 1 ? '' : 's'}`;
-    text = `Possible prompt injection on ${hits.length} added line(s), and no valid verdict (${v.problem}).`;
-  } else {
-    title = `incomplete: ${v.problem}; re-run`;
-    text = `No valid verdict: ${v.problem}. Not certified; re-run the workflow.`;
+  const r = conclude(found, v.ok ? v.value : null, v.problem);
+  await publish(r, files);
+  return r;
+}
+
+async function decided() {
+  const plan = {
+    conclusion: env.CONCLUSION === 'success' ? 'success' : 'failure',
+    title: env.TITLE,
+    text: env.SUMMARY,
+  };
+  if (!plan.title || !plan.text)
+    return {
+      conclusion: 'failure',
+      title: 'incomplete: plan; re-run',
+      text: 'The plan left no decision.',
+    };
+  if (plan.conclusion !== 'success') return plan;
+  const files = diffOf(base, head);
+  const found = injections(files, globs(env.GUARD_PATHS));
+  if (!found.length) {
+    if (await current()) await tidySafely();
+    return plan;
   }
-  if ((conclusion === 'failure' || comments.length) && (await current())) {
-    await tidySafely();
-    await postReview({ conclusion, title, text, comments, files });
-  } else if (conclusion === 'success' && (await current())) await tidySafely();
-  return { conclusion, title, text };
+  const r = conclude(found, { verdict: 'pass', summary: plan.text, comments: [] }, '');
+  await publish(r, files);
+  return r;
 }
 
 let r;
 try {
-  if (env.KIND === 'decided') {
-    r = {
-      conclusion: env.CONCLUSION === 'success' ? 'success' : 'failure',
-      title: env.TITLE,
-      text: env.SUMMARY,
-    };
-    if (!r.title || !r.text)
-      r = {
-        conclusion: 'failure',
-        title: 'incomplete: plan; re-run',
-        text: 'The plan left no decision.',
-      };
-    if (r.conclusion === 'success' && (await current())) await tidySafely();
-  } else if (env.KIND === 'review') r = await reviewed();
+  if (env.KIND === 'decided') r = await decided();
+  else if (env.KIND === 'review') r = await reviewed();
   else
     r = {
       conclusion: 'failure',

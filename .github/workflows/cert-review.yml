@@ -2,14 +2,15 @@ name: cert-review-pr
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
   merge_group:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') && format('cert-review-noop-{0}', github.run_id) || format('cert-review-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
+  group: ${{ (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') || (github.event.action == 'edited' && !github.event.changes.base)) && format('cert-review-noop-{0}', github.run_id) || format('cert-review-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 
 env:
@@ -38,7 +39,7 @@ env:
 jobs:
   guard:
     name: cert / self-guard
-    if: github.event_name == 'merge_group' || (github.event.pull_request.head.repo.full_name == github.repository && !((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved'))
+    if: github.event_name == 'merge_group' || (github.event.pull_request.head.repo.full_name == github.repository && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') || (github.event.action == 'edited' && !github.event.changes.base)))
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -88,7 +89,7 @@ jobs:
   plan:
     name: cert / plan
     needs: guard
-    if: ${{ !cancelled() && github.event_name == 'pull_request_target' && !((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') }}
+    if: ${{ !cancelled() && github.event_name == 'pull_request_target' && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') || (github.event.action == 'edited' && !github.event.changes.base)) }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -151,12 +152,14 @@ jobs:
 
       - id: diff
         name: The annotated diff and main's prompt
+        shell: bash
         env:
           CERT_DIR: ${{ runner.temp }}/cert
           CERT_PROMPT: scripts/cert/review.txt
         run: |
           node scripts/cert/diff.mjs
-          echo "schema=$(node -e 'process.stdout.write(JSON.stringify(require("./scripts/cert/verdict.schema.json")))')" >> "$GITHUB_OUTPUT"
+          schema=$(node -e 'process.stdout.write(JSON.stringify(require("./scripts/cert/verdict.schema.json")))')
+          echo "schema=$schema" >> "$GITHUB_OUTPUT"
 
       - id: claude
         name: Review, read-only, without a token that can write
@@ -173,7 +176,7 @@ jobs:
             --add-dir ${{ runner.temp }}/cert
             --permission-mode dontAsk
             --allowedTools "Read(/${{ github.workspace }}/**),Glob(/${{ github.workspace }}/**),Grep(/${{ github.workspace }}/**),Read(/${{ runner.temp }}/cert/**),Glob(/${{ runner.temp }}/cert/**),Grep(/${{ runner.temp }}/cert/**)"
-            --disallowedTools "Bash,Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(//etc/**),Read(//run/**),Read(//var/**),Read(//tmp/**)"
+            --disallowedTools "Bash,Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Agent,Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(//etc/**),Read(//run/**),Read(//var/**),Read(//tmp/**)"
             --json-schema '${{ steps.diff.outputs.schema }}'
             --max-turns 80
 
@@ -184,7 +187,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/verdict"
           echo "review: $OUTCOME"
-          if [ -n "$VERDICT" ]; then printf '%s' "$VERDICT" > "$RUNNER_TEMP/verdict/verdict.json"; else echo "the review returned no verdict"; fi
+          if [ "$OUTCOME" = success ] && [ -n "$VERDICT" ]; then printf '%s' "$VERDICT" > "$RUNNER_TEMP/verdict/verdict.json"; else echo "the review returned no verdict"; fi
 
       - id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -192,6 +195,7 @@ jobs:
           name: cert-review-verdict
           path: ${{ runner.temp }}/verdict/verdict.json
           if-no-files-found: ignore
+          overwrite: true
 
   post:
     name: cert / post

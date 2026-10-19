@@ -13,7 +13,8 @@ if (!out || !template) throw new Error('CERT_DIR and CERT_PROMPT are required');
 mkdirSync(out, { recursive: true });
 
 const files = diffOf(base, head);
-writeFileSync(join(out, 'diff.txt'), annotate(files));
+const text = annotate(files);
+writeFileSync(join(out, 'diff.txt'), text);
 writeFileSync(
   join(out, 'files.json'),
   `${JSON.stringify(
@@ -30,6 +31,7 @@ const values = {
   WORKSPACE: env.GITHUB_WORKSPACE ?? process.cwd(),
   DIFF: join(out, 'diff.txt'),
   FILES: join(out, 'files.json'),
+  DIFFLINES: String(text.split('\n').length),
 };
 const prompt = readFileSync(template, 'utf8').replace(
   /\{\{([A-Z]+)\}\}/g,

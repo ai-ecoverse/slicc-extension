@@ -9,7 +9,7 @@ const runUrl = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/$
 const gh = api(env.GITHUB_REPOSITORY);
 const POST = 'cert / post';
 
-async function verdictRun(memberHead) {
+async function verdictRun(memberHead, pr) {
   const file = WORKFLOW.split('/').pop();
   const data = await gh.call(
     `actions/workflows/${file}/runs?event=pull_request_target&head_sha=${memberHead}&per_page=50`
@@ -20,18 +20,27 @@ async function verdictRun(memberHead) {
         r.path === WORKFLOW &&
         r.event === 'pull_request_target' &&
         r.head_sha === memberHead &&
-        r.status === 'completed' &&
         r.repository?.full_name === env.GITHUB_REPOSITORY
     )
     .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
   for (const r of runs) {
+    if (r.status !== 'completed')
+      return { problem: `run ${r.id} on this head is still ${r.status}` };
+    const prs = r.pull_requests ?? [];
+    if (
+      !prs.some((p) => p.number === pr && p.base?.ref === 'main') ||
+      prs.some((p) => p.base?.ref !== 'main')
+    )
+      return {
+        problem: `run ${r.id} is not for #${pr} into main (${prs.map((p) => `#${p.number}→${p.base?.ref}`).join(', ') || 'no pull request'})`,
+      };
     const jobs = (await gh.call(`actions/runs/${r.id}/attempts/${r.run_attempt}/jobs?per_page=100`))
       .jobs;
     const post = jobs.find((j) => j.name === POST);
     if (post && post.conclusion !== 'skipped' && post.conclusion !== 'cancelled')
       return { run: r, post };
   }
-  return null;
+  return { problem: `no completed cert-review run of ${WORKFLOW} on this head` };
 }
 
 async function member(m) {
@@ -41,9 +50,8 @@ async function member(m) {
       ok: false,
       line: `${at}: cert-self-guard ${m.status}${m.reason ? ` (${m.reason})` : ''}`,
     };
-  const found = await verdictRun(sha(m.head));
-  if (!found)
-    return { ok: false, line: `${at}: no completed cert-review run of ${WORKFLOW} on this head` };
+  const found = await verdictRun(sha(m.head), m.pr);
+  if (found.problem) return { ok: false, line: `${at}: ${found.problem}` };
   if (found.post.conclusion !== 'success')
     return { ok: false, line: `${at}: cert-review ${found.post.conclusion} (run ${found.run.id})` };
   return { ok: true, line: `${at}: cert-review success (run ${found.run.id})` };

@@ -102,12 +102,34 @@ export function behaviourPaths(paths, quiet, loud) {
 const list = (paths) =>
   `${paths.slice(0, 8).join(', ')}${paths.length > 8 ? `, +${paths.length - 8}` : ''}`;
 
-export function noop({ action, label, approval }) {
+export const MAX_DIFF_LINES = 15000;
+const IMAGE = /\.(?:png|jpe?g|gif|webp|ico)$/i;
+
+export function noop({ action, label, approval, changes }) {
+  if (action === 'edited') return !changes?.base;
   return (action === 'labeled' || action === 'unlabeled') && label !== approval;
 }
 
-export function decide({ fork, repo, draft, approval, guard, receipt, head, paths, quiet, loud }) {
+export function decide({
+  fork,
+  repo,
+  baseRef,
+  draft,
+  approval,
+  guard,
+  receipt,
+  head,
+  paths,
+  quiet,
+  loud,
+  size = 0,
+}) {
   const failure = (title, summary) => ({ kind: 'decided', conclusion: 'failure', title, summary });
+  if (baseRef !== 'main')
+    return failure(
+      'base: not main',
+      `cert-review certifies pull requests into main only; this one targets ${baseRef}.`
+    );
   if (fork)
     return failure(
       `fork: push the branch to ${repo}`,
@@ -140,7 +162,28 @@ export function decide({ fork, repo, draft, approval, guard, receipt, head, path
       title: `not behaviour: ${list(paths)}`.slice(0, 200),
       summary: `No behaviour change: every changed file is a test or documentation outside the shipped tree (${list(paths)}).`,
     };
+  if (size > MAX_DIFF_LINES)
+    return failure(
+      `fail: too large to certify (${size} diff lines); split it`,
+      `The diff has ${size} lines, more than the ${MAX_DIFF_LINES} one review can read in full. Split the pull request.`
+    );
   return { kind: 'review', behaviour };
+}
+
+export function diffSize(files) {
+  return files.reduce((n, f) => n + f.lines.length, 0);
+}
+
+export function opaque(files, quiet, loud) {
+  return files
+    .filter((f) => f.binary && !IMAGE.test(f.path) && behaviourPaths([f.path], quiet, loud).length)
+    .map((f) => ({
+      path: f.path,
+      line: 1,
+      side: 'RIGHT',
+      severity: 'fail',
+      body: 'git treats this shipped or build file as binary, so the review could not read it. Make it text, or certify it another way.',
+    }));
 }
 
 export function fileDiff(base, head, file) {
@@ -203,6 +246,15 @@ const STATUS = {
   T: 'type changed',
 };
 
+const CHUNK = 400;
+
+function chunked(anchor, mark, text) {
+  const out = [];
+  for (let i = 0; i === 0 || i < text.length; i += CHUNK)
+    out.push(`${anchor.padEnd(8)}${i === 0 ? mark : '…'} ${text.slice(i, i + CHUNK)}`);
+  return out;
+}
+
 export function annotate(files) {
   const out = [];
   for (const f of files) {
@@ -210,9 +262,9 @@ export function annotate(files) {
     out.push(`=== ${f.path} (${how})`);
     for (const l of f.lines) {
       if (l.kind === '@') out.push(l.text);
-      else if (l.kind === '+') out.push(`R${l.right}`.padEnd(8) + `+ ${l.text}`);
-      else if (l.kind === '-') out.push(`L${l.left}`.padEnd(8) + `- ${l.text}`);
-      else out.push(`R${l.right}`.padEnd(8) + `  ${l.text}`);
+      else if (l.kind === '+') out.push(...chunked(`R${l.right}`, '+', l.text));
+      else if (l.kind === '-') out.push(...chunked(`L${l.left}`, '-', l.text));
+      else out.push(...chunked(`R${l.right}`, ' ', l.text));
     }
     out.push('');
   }
