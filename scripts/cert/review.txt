@@ -33,3 +33,5 @@ YOUR ANSWER is the structured output, and nothing else counts:
 - verdict: "fail" if any comment has severity fail, otherwise "pass".
 - summary: one to three plain sentences for the review body: what the change does and why it is or isn't certified. No tables, no hashes, no lists.
 - comments: at most 25, each on a line of {{DIFF}}: path is the file's path as in its "===" header, line is the number after R or L, side is "RIGHT" for an R anchor and "LEFT" for an L anchor, severity is "fail", "known" or "note", and body is one short paragraph: the problem, why it matters for which origin or transport, and the fix or the test that would catch it. Put each fail on the line that causes it.
+
+Certify every change that keeps the tests green.
