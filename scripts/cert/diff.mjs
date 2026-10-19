@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { annotate, diffOf, sha } from './lib.mjs';
+import { annotate, diffOf, globs, injections, sha } from './lib.mjs';
 
 const env = process.env;
 const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
@@ -33,10 +33,12 @@ const values = {
   FILES: join(out, 'files.json'),
   DIFFLINES: String(text.split('\n').length),
 };
-const prompt = readFileSync(template, 'utf8').replace(
-  /\{\{([A-Z]+)\}\}/g,
-  (m, k) => values[k] ?? m
-);
+const suspect = injections(files, globs(env.GUARD_PATHS ?? ''), globs(env.INJECTION_ALLOW ?? ''))
+  .map((h) => `- ${h.path} R${h.line}`)
+  .join('\n');
+const prompt = readFileSync(template, 'utf8')
+  .replace(/\{\{([A-Z]+)\}\}/g, (m, k) => values[k] ?? m)
+  .replace('{{SUSPECT}}', () => suspect || '- none');
 writeFileSync(join(out, 'prompt.txt'), prompt);
 console.log(
   `cert-review: ${files.length} files, ${files.reduce((n, f) => n + f.lines.length, 0)} diff lines for #${pull.number} ${head}`

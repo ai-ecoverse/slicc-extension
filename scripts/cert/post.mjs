@@ -137,7 +137,7 @@ function conclude(found, verdict, problem) {
   const comments = [...found, ...(verdict?.comments ?? [])];
   const fails = comments.filter((c) => c.severity === 'fail').length;
   const titled = `fail: ${fails} finding${fails === 1 ? '' : 's'}`;
-  if (!verdict && !found.length)
+  if (!verdict && !fails)
     return {
       conclusion: 'failure',
       title: `incomplete: ${problem}; re-run`,
@@ -151,7 +151,7 @@ function conclude(found, verdict, problem) {
     ? `${pre}${found.length ? `The review's own verdict was ${verdict.verdict}. ` : ''}${verdict.summary}`
     : `${pre}No valid verdict either (${problem}).`;
   return {
-    conclusion: fails ? 'failure' : 'success',
+    conclusion: fails || !verdict ? 'failure' : 'success',
     title: fails ? titled : 'pass',
     text,
     comments,
@@ -167,7 +167,7 @@ async function publish(r, files) {
 async function reviewed() {
   const files = diffOf(base, head);
   const found = [
-    ...injections(files, globs(env.GUARD_PATHS)),
+    ...injections(files, globs(env.GUARD_PATHS), globs(env.INJECTION_ALLOW)),
     ...opaque(files, globs(env.QUIET), globs(env.LOUD)),
   ];
   const v = verdictOf();
@@ -196,7 +196,7 @@ async function decided() {
     };
   if (plan.conclusion !== 'success') return plan;
   const files = diffOf(base, head);
-  const found = injections(files, globs(env.GUARD_PATHS));
+  const found = injections(files, globs(env.GUARD_PATHS), globs(env.INJECTION_ALLOW));
   if (!found.length) {
     if (await current()) await tidySafely();
     return plan;

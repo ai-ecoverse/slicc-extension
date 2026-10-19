@@ -22,6 +22,7 @@ env:
   LOUD: |
     extension/**
     six/**
+  INJECTION_ALLOW: ""
   GUARD_PATHS: |
     .github/workflows/**
     .github/actions/**

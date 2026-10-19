@@ -783,6 +783,9 @@ const bedrock = 'bedrock-key-value-5f3a9c1e7b';
 
 for (const [name, text] of [
   ['the Bedrock key this run holds', `fine ${bedrock}`],
+  ['the Bedrock key as hex', `fine ${Buffer.from(bedrock).toString('hex')}`],
+  ['the Bedrock key as base64url', `fine ${Buffer.from(bedrock).toString('base64url')}`],
+  ['the Bedrock key URL-encoded, reversed', `fine ${bedrock.split('').reverse().join('')}`],
   ['a GitHub token', 'fine ghp_abcdefghijklmnopqrstuvwxyz0123'],
   ['a fine-grained PAT', 'fine github_pat_11ABCDEFG0123456789_abcdef'],
   ['an AWS key id', 'fine AKIAABCDEFGHIJKLMNOP'],
@@ -934,4 +937,56 @@ test('a lockfile integrity quote posts as written, a generic long mixed-case run
   );
   assert.equal(absk.check.output.title, 'incomplete: verdict carries a secret');
   assert.equal(state.reviews.length, 0);
+});
+
+async function generic(verdict) {
+  reset();
+  git('checkout', '-q', '-B', 'generic', shas.code);
+  write('extension/relay.js', 'const doc = "the system prompt of the page";\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'generic');
+  const head = git('rev-parse', 'HEAD');
+  const env = { GITHUB_EVENT_PATH: event('generic', head), KIND: 'review', ARTIFACTS: 'success' };
+  if (verdict) {
+    const file = join(scratch, 'generic-verdict.json');
+    writeFileSync(file, JSON.stringify({ schema: 'cert-review/v2', head, ...verdict }));
+    env.VERDICT = file;
+  }
+  const r = await run('post.mjs', env);
+  return { r, check: state.checks.at(-1), review: state.reviews.at(-1) };
+}
+
+test('generic instruction-shaped text is a note, not a failure, and is flagged to the review as suspect', async () => {
+  const { r, check, review } = await generic({ verdict: 'pass', summary: 'fine', comments: [] });
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(check.conclusion, 'success');
+  assert.equal(review.event, 'COMMENT');
+  assert.deepEqual(
+    review.comments.map((c) => [c.path, c.line]),
+    [['extension/relay.js', 1]]
+  );
+  assert.match(review.comments[0].body, /note/);
+});
+
+test('no valid verdict with only scanner notes is incomplete, never a pass', async () => {
+  const { r, check } = await generic(undefined);
+  assert.equal(r.code, 1, r.stdout);
+  assert.equal(check.conclusion, 'failure');
+  assert.match(check.output.title, /^incomplete: /);
+});
+
+test('the prompt lists suspect lines for the review', async () => {
+  reset();
+  git('checkout', '-q', 'generic');
+  const head = git('rev-parse', 'HEAD');
+  const dir = join(scratch, 'certdir');
+  const r = await run('diff.mjs', {
+    GITHUB_EVENT_PATH: event('promptcheck', head),
+    CERT_DIR: dir,
+    CERT_PROMPT: join(cert, 'review.txt'),
+  });
+  assert.equal(r.code, 0, r.stdout);
+  const prompt = readFileSync(join(dir, 'prompt.txt'), 'utf8');
+  assert.match(prompt, /- extension\/relay\.js R1/);
+  assert.doesNotMatch(prompt, /\{\{[A-Z]+\}\}/);
 });

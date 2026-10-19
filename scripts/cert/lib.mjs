@@ -408,38 +408,83 @@ const SECRET_SHAPES = [
 export function carriesSecret(text, secrets = []) {
   const raw = String(text);
   for (const v of secrets.filter((x) => typeof x === 'string' && x.length >= 8)) {
-    const forms = [v, JSON.stringify(v).slice(1, -1), Buffer.from(v).toString('base64')];
-    if (forms.some((f) => raw.includes(f))) return 'a secret value this run holds';
+    const b = Buffer.from(v);
+    const forms = [
+      v,
+      JSON.stringify(v).slice(1, -1),
+      b.toString('base64'),
+      b.toString('base64').replace(/=+$/, ''),
+      b.toString('base64url'),
+      b.toString('hex'),
+      encodeURIComponent(v),
+      v.split('').reverse().join(''),
+    ];
+    const lower = raw.toLowerCase();
+    if (forms.some((f) => raw.includes(f) || lower.includes(f.toLowerCase())))
+      return 'a secret value this run holds';
   }
   const shape = SECRET_SHAPES.find((re) => re.test(raw));
   if (shape) return `a token-shaped string (${shape.source.slice(0, 16)}…)`;
   return '';
 }
 
-const INJECTION = [
-  /[\u202a-\u202e\u2066-\u2069]/,
-  /[\u200b-\u200d\u2060\ufeff]/,
-  /\b(?:ignore|disregard|forget|override)\b[^.\n]{0,40}\b(?:previous|prior|above|earlier|all|your|the)\b[^.\n]{0,20}\b(?:instructions?|prompt|rules?|guidelines?)\b/i,
-  /\bsystem prompt\b/i,
+const CONTROLS = /[\u202a-\u202e\u2066-\u2069\u200b-\u200d\u2060\ufeff]/;
+const REVIEWER =
+  /\b(?:cert(?:ification)?[- ]review(?:er)?|certifier|reviewer|the review|verdict|certify|certified)\b/i;
+const AIMED = [
   /["']?verdict["']?\s*[:=]\s*["']?(?:pass|success|certified)\b/i,
   /\bas the (?:cert(?:ification)?|security)? ?review(?:er)?\b/i,
   /\b(?:dear|attention|note to|hey) (?:ai|llm|claude|reviewer|certifier|model)\b/i,
   /\byou (?:are|must|should) (?:now )?(?:an? )?(?:ai|llm|language model|reviewer|certifier)\b/i,
+  /\b(?:pass|approve|certify|accept|mark)\b[^.\n]{0,30}\b(?:this|the)\b[^.\n]{0,20}\b(?:change|pull request|pr|diff)\b/i,
+];
+const GENERIC = [
+  /\b(?:ignore|disregard|forget|override)\b[^.\n]{0,40}\b(?:previous|prior|above|earlier|all|your|the)\b[^.\n]{0,20}\b(?:instructions?|prompt|rules?|guidelines?)\b/i,
+  /\bsystem prompt\b/i,
 ];
 
-export function injections(files, exempt) {
+export function injectionOf(text) {
+  if (CONTROLS.test(text)) return 'fail-control';
+  const generic = GENERIC.some((re) => re.test(text));
+  if (AIMED.some((re) => re.test(text)) || (generic && REVIEWER.test(text))) return 'fail-aimed';
+  if (generic) return 'note';
+  return '';
+}
+
+export function injections(files, exempt, allow = []) {
   const hits = [];
   for (const f of files) {
     if (matchesAny(f.path, exempt)) continue;
-    for (const l of f.lines)
-      if (l.kind === '+' && INJECTION.some((re) => re.test(l.text)))
+    const allowed = matchesAny(f.path, allow);
+    for (const l of f.lines) {
+      if (l.kind !== '+') continue;
+      const kind = injectionOf(l.text);
+      if (!kind) continue;
+      if (kind === 'fail-control')
         hits.push({
           path: f.path,
           line: l.right,
           side: 'RIGHT',
           severity: 'fail',
-          body: 'Possible prompt injection aimed at the certifier: text in the change addresses the reviewer or claims a verdict. Remove it; there is no override.',
+          body: 'An invisible bidirectional or zero-width control character in an added line: it can hide text from a human reviewer. Remove it; there is no override.',
         });
+      else if (kind === 'fail-aimed' && !allowed)
+        hits.push({
+          path: f.path,
+          line: l.right,
+          side: 'RIGHT',
+          severity: 'fail',
+          body: "Possible prompt injection aimed at the certifier: text in the change addresses the reviewer or claims a verdict. Remove it, or list the path in the caller's injection-allow (guard-protected) if it is a test fixture.",
+        });
+      else
+        hits.push({
+          path: f.path,
+          line: l.right,
+          side: 'RIGHT',
+          severity: 'note',
+          body: 'Instruction-shaped text (for example "system prompt" or "ignore previous instructions"). Not a failure by itself; the review was told to treat this line as suspect data.',
+        });
+    }
   }
   return hits;
 }
