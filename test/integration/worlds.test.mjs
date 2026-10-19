@@ -402,6 +402,7 @@ for (const transport of transports) {
       assert.equal(got.malformed, UNSEEN, phase);
       assert.equal(got.unknown, UNSEEN, phase);
     }
+    assert.ok(!JSON.stringify(run).includes(fixtureId), 'the content script world never answers');
     assert.deepEqual(run.enable, { result: {} });
     assert.ok(
       run.listed.some((c) => c.auxData?.isDefault === true && c.origin === 'https://ordinary.test'),
