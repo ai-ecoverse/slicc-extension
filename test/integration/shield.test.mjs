@@ -248,6 +248,11 @@ for (const transport of transports) {
     test(`${transport} C4 iframe: init script runs in a ${ordinary} iframe, never in a ${target} iframe`, async (t) => {
       const page = await client(t, transport);
       const control = `c4-control-${name}`;
+      const ordinaryHost = new URL(ordinary).hostname;
+      const protectedHost = new URL(origin).hostname;
+      const inners = (host, mark) =>
+        chrome.site.seen.slice(mark).filter((seen) => seen.host === host && seen.path === '/inner');
+      const controlMark = chrome.site.seen.length;
       const opened = await page.evaluate(
         async ({ tag, start }) => {
           const { targetId, sessionId } = await h.open(`${start}/start`);
@@ -269,9 +274,11 @@ for (const transport of transports) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       assert.ok(fromInner(), 'the iframe ran the script');
+      assert.equal(inners(ordinaryHost, controlMark).length, 1, 'control iframe is requested once');
       await page.evaluate((id) => h.close(id), opened.targetId);
 
       const tag = `c4-${name}`;
+      const guardedMark = chrome.site.seen.length;
       const guarded = await page.evaluate(
         async ({ tag, start, origin }) => {
           const { targetId, sessionId } = await h.open(`${start}/start`);
@@ -295,6 +302,11 @@ for (const transport of transports) {
         decodeURIComponent(seen.search ?? '').includes('/inner')
       );
       assert.deepEqual(fromFrame, [], 'no beacon from the protected iframe');
+      assert.deepEqual(
+        inners(protectedHost, guardedMark),
+        [],
+        'protected iframe document is never requested'
+      );
       assert.equal(guarded.alive, 2, 'the tab stays attached');
       assert.equal(guarded.detached, false, 'only the protected frame fails');
       await page.evaluate((id) => h.close(id), guarded.targetId);
