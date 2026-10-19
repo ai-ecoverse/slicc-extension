@@ -990,3 +990,30 @@ test('the prompt lists suspect lines for the review', async () => {
   assert.match(prompt, /- extension\/relay\.js R1/);
   assert.doesNotMatch(prompt, /\{\{[A-Z]+\}\}/);
 });
+
+test('the diff is taken against the workflow commit on main, not a stale base sha from the event', async () => {
+  reset();
+  git('checkout', '-q', '-B', 'main2', shas.base);
+  write('README.md', '# r\n\nmain moved\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'main2');
+  const main2 = git('rev-parse', 'HEAD');
+  git('checkout', '-q', '-B', 'rebased', main2);
+  write('extension/relay.js', 'export const r = 1;\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'rebased');
+  const head = git('rev-parse', 'HEAD');
+  const files = async (env) => {
+    const dir = join(scratch, `stale-${state.nextId++}`);
+    const r = await run('diff.mjs', {
+      GITHUB_EVENT_PATH: event('stale', head),
+      CERT_DIR: dir,
+      CERT_PROMPT: join(cert, 'review.txt'),
+      ...env,
+    });
+    assert.equal(r.code, 0, r.stdout);
+    return JSON.parse(readFileSync(join(dir, 'files.json'), 'utf8')).map((f) => f.path);
+  };
+  assert.deepEqual(await files({ BASE_SHA: main2 }), ['extension/relay.js']);
+  assert.deepEqual((await files({})).sort(), ['README.md', 'extension/relay.js']);
+});

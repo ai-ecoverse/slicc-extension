@@ -6,7 +6,7 @@ const env = process.env;
 const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
 const pull = event.pull_request;
 const head = sha(pull.head.sha);
-const base = sha(pull.base.sha);
+const base = sha(env.BASE_SHA || pull.base.sha);
 const out = env.CERT_DIR;
 const template = env.CERT_PROMPT;
 if (!out || !template) throw new Error('CERT_DIR and CERT_PROMPT are required');

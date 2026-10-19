@@ -21,7 +21,7 @@ if (
 }
 
 const fork = pull.head.repo?.full_name !== repo;
-const files = fork ? [] : diffOf(sha(pull.base.sha), head);
+const files = fork ? [] : diffOf(sha(env.BASE_SHA || pull.base.sha), head);
 const paths = touchedPaths(files);
 const d = decide({
   fork,
