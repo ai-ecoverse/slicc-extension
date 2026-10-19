@@ -399,7 +399,7 @@ export class Worlds {
     const aux = context?.auxData ?? {};
     const origin = typeof context?.origin === 'string' ? context.origin : '';
     if (aux.isDefault !== true && context?.name === ABOUT_WORLD) return 'ours';
-    if (aux.isDefault !== true && (extensionOrigin(origin) || protectedOrigin(origin))) {
+    if (aux.isDefault !== true && protectedOrigin(origin)) {
       return 'foreign';
     }
     if (aux.isDefault === true && protectedOrigin(origin) && aux.frameId !== mainFrameId) {
