@@ -393,7 +393,6 @@ export class TabShield {
   private readonly hiddenFrames = new Bounded<true>(1000);
   private readonly worlds = new Worlds();
   private clientFetch: ClientFetch | null = null;
-  private clientRuntime = false;
   private mainFrameId = '';
   private blockedFlag = false;
 
@@ -472,11 +471,7 @@ export class TabShield {
     const input = method === 'Runtime.addBinding' ? scopedBinding(params ?? {}) : (params ?? {});
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     await this.admit(method, input);
-    if (method === 'Runtime.enable') return this.enableRuntime();
-    if (method === 'Runtime.disable') {
-      this.clientRuntime = false;
-      return {};
-    }
+    if (method === 'Runtime.enable' || method === 'Runtime.disable') return {};
     const about = method === 'Page.navigate' ? aboutUrl(input['url']) : undefined;
     if (about) return this.openBlank(input, about);
     const rewritten = this.rewrite(method, input);
@@ -506,17 +501,8 @@ export class TabShield {
     return this.after(method, result ?? {});
   }
 
-  private async enableRuntime(): Promise<CDPPayload> {
-    if (this.clientRuntime) return {};
-    await this.send('Runtime.disable', {});
-    this.clientRuntime = true;
-    try {
-      await this.send('Runtime.enable', {});
-    } catch (err) {
-      this.block();
-      throw err;
-    }
-    return {};
+  visibleContexts(): CDPPayload[] {
+    return this.worlds.visible();
   }
 
   private async frameOf(frameId: string | undefined): Promise<CDPPayload | undefined> {
@@ -699,6 +685,7 @@ export class TabShield {
   }
 
   private after(method: string, result: CDPPayload): CDPPayload {
+    this.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') this.worlds.seen(result['executionContextId']);
     const stream = str(result['stream']);
     if (stream) this.streams.set(stream, true);
@@ -724,7 +711,6 @@ export class TabShield {
     if (method === 'Fetch.authRequired') return this.onAuth(p);
     this.track(p);
     if (this.watchCommit(method, p)) return [];
-    if (method.startsWith('Runtime.') && !this.clientRuntime) return [];
     if (profiled(method) && this.worlds.foreign) return [];
     if (this.worlds.hides(p)) return [];
     if (this.frameProtected(str(p['frameId']) ?? '')) return [];
@@ -905,6 +891,7 @@ export class TabShield {
       }
     }
     const released = id && this.requests.get(id) === false ? (this.held.delete(id) ?? []) : [];
+    this.worlds.learn(params);
     return [event, ...released];
   }
 }

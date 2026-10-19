@@ -1,6 +1,11 @@
 import { summary } from '@ai-ecoverse/slicc-browsers/guard-runner';
 
-export const capabilities = { autoAttach: false, browserSession: false, browserContexts: false };
+export const capabilities = {
+  autoAttach: false,
+  browserSession: false,
+  browserContexts: false,
+  extensionWorld: true,
+};
 
 export const entries = {
   seven: { origin: 'https://seven.sliccy.ai', path: '/doc?n=guard-client' },

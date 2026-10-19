@@ -43,6 +43,7 @@ import {
   scopedBinding,
   stripProtectedCookies,
   UNSEEN,
+  UNWATCHED,
   urlProtected,
   WORLD,
   Worlds,
@@ -663,10 +664,13 @@ class Connection {
         await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
         throw error;
       }
-      if (!(await this.inventory(tabId, tab)) || !(await this.watchRuntime(tabId))) {
+      const unwatched = !(await this.inventory(tabId, tab))
+        ? protectedRules.refusal
+        : await this.watchRuntime(tabId);
+      if (unwatched) {
         this.forget(tabId);
         await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
-        refusal();
+        throw new Error(unwatched);
       }
       await bounded(
         this.send(tabId, 'Target.setAutoAttach', {
@@ -690,10 +694,10 @@ class Connection {
 
   async watchRuntime(tabId) {
     try {
-      await bounded(this.send(tabId, 'Runtime.enable', {}), 5000, 'runtime');
-      return true;
+      await bounded(this.send(tabId, 'Runtime.enable', {}), 10000, 'runtime');
+      return undefined;
     } catch {
-      return false;
+      return UNWATCHED;
     }
   }
 
@@ -956,6 +960,7 @@ class Connection {
   }
 
   learn(tab, method, result) {
+    tab.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') tab.worlds.seen(result.executionContextId);
     if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
       this.pruneFrames(tab, result.frameTree);
@@ -1051,6 +1056,7 @@ class Connection {
   broadcast(tabId, method, params) {
     const tab = this.tabState(tabId);
     const runtime = method.startsWith('Runtime.');
+    tab?.worlds.learn(params);
     for (const sessionId of this.sessionsOf(tabId)) {
       if (runtime && !tab?.runtime.has(sessionId)) continue;
       this.post({ method, params, sessionId });

@@ -461,6 +461,88 @@ for (const transport of transports) {
     await page.evaluate((targetId) => h.close(targetId), targetId);
   });
 
+  test(`${transport} two client sessions on one tab each get their own Runtime state and replay of visible contexts`, async (t) => {
+    const page = await client(t, transport);
+    await page.evaluate(() => {
+      globalThis.first = globalThis.h;
+    });
+    await page.evaluate(install, transport, extId);
+    await page.evaluate(() => {
+      globalThis.second = globalThis.h;
+      globalThis.h = globalThis.first;
+    });
+    const url = `https://ordinary.test/doc?n=worlds-two-${transport}`;
+    const targetId = await opened(page, url);
+    const run = await page.evaluate(async (targetId) => {
+      const { first, second } = globalThis;
+      const attach = async (client) =>
+        (await client.attempt('Target.attachToTarget', { targetId, flatten: true })).result
+          ?.sessionId;
+      const created = (client, sessionId) =>
+        client.events
+          .filter(
+            (event) =>
+              event.sessionId === sessionId && event.method === 'Runtime.executionContextCreated'
+          )
+          .map((event) => event.params.context);
+      const logged = (client, sessionId, text) =>
+        client.events.filter(
+          (event) =>
+            event.sessionId === sessionId &&
+            event.method === 'Runtime.consoleAPICalled' &&
+            JSON.stringify(event.params).includes(text)
+        ).length;
+      const a = await attach(first);
+      await first.attempt('Runtime.enable', {}, a);
+      await first.sleep(300);
+      const b = await attach(second);
+      await first.sleep(300);
+      const silentB = created(second, b).length;
+      await second.attempt('Runtime.enable', {}, b);
+      await first.sleep(300);
+      const listedA = created(first, a);
+      const listedB = created(second, b);
+      await first.attempt('Runtime.disable', {}, a);
+      await second.attempt(
+        'Runtime.evaluate',
+        { expression: 'console.log("slicc-two-sessions"); 1' },
+        b
+      );
+      await first.sleep(500);
+      return {
+        a,
+        b,
+        silentB,
+        listedA,
+        listedB,
+        logA: logged(first, a, 'slicc-two-sessions'),
+        logB: logged(second, b, 'slicc-two-sessions'),
+        product: await second.evaluate(b, '6 * 7'),
+      };
+    }, targetId);
+    assert.equal(typeof run.a, 'string', JSON.stringify(run));
+    assert.equal(typeof run.b, 'string', JSON.stringify(run));
+    assert.equal(run.silentB, 0);
+    for (const listed of [run.listedA, run.listedB]) {
+      assert.ok(
+        listed.some((c) => c.auxData?.isDefault === true && c.origin === 'https://ordinary.test'),
+        JSON.stringify(listed)
+      );
+      assert.ok(
+        listed.every((c) => c.auxData?.isDefault === true),
+        JSON.stringify(listed)
+      );
+    }
+    assert.deepEqual(
+      run.listedB.map((c) => c.uniqueId),
+      run.listedA.map((c) => c.uniqueId)
+    );
+    assert.equal(run.logA, 0);
+    assert.equal(run.logB, 1);
+    assert.equal(run.product, 42);
+    await page.evaluate((targetId) => h.close(targetId), targetId);
+  });
+
   test(`${transport} the guard's own isolated world is never listed and refuses every selector, while a page without another extension keeps its profilers`, async (t) => {
     const page = await client(t, transport);
     const targetId = await page.evaluate(async () => {

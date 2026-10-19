@@ -374,7 +374,25 @@ export class Worlds {
     this.ids = new Map();
     this.uniques = new Map();
     this.names = new Set();
+    this.handles = new Map();
     this.foreign = false;
+  }
+
+  learn(value, depth = 0) {
+    if (depth > 16 || value === null || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) this.learn(item, depth + 1);
+      return;
+    }
+    for (const [key, item] of Object.entries(value)) {
+      if (OBJECT_KEY.test(key) && typeof item === 'string') {
+        this.handles.delete(item);
+        this.handles.set(item, true);
+        if (this.handles.size > 50000) this.handles.delete(this.handles.keys().next().value);
+      } else {
+        this.learn(item, depth + 1);
+      }
+    }
   }
 
   hideable(context, mainFrameId, protectedOrigin) {
@@ -439,13 +457,15 @@ export class Worlds {
         ? WORLD
         : undefined;
     }
-    let id = selector.value;
+    const id = selector.value;
     if (selector.kind === 'unique') {
       if (typeof id !== 'string' || !this.uniques.has(id)) return UNSEEN_CONTEXT;
       return this.uniques.get(id) ? WORLD : undefined;
     }
     if (selector.kind === 'object') {
-      id = typeof id === 'string' ? objectContext(id) : undefined;
+      const context = typeof id === 'string' ? objectContext(id) : undefined;
+      if (this.ids.get(context)?.hidden) return WORLD;
+      return typeof id === 'string' && this.handles.has(id) ? undefined : UNSEEN_CONTEXT;
     }
     const entry = typeof id === 'number' ? this.ids.get(id) : undefined;
     if (!entry) return UNSEEN_CONTEXT;
@@ -482,3 +502,6 @@ export function scopedBinding(params) {
   }
   return { ...params, executionContextName: '' };
 }
+
+export const UNWATCHED =
+  "slicc: refused: the guard couldn't start watching this tab's execution contexts, so it doesn't attach";

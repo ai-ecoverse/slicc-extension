@@ -87,7 +87,28 @@ export class Worlds {
   private readonly ids = new Map<number, Entry>();
   private readonly uniques = new Map<string, boolean>();
   private readonly names = new Set<string>();
+  private readonly handles = new Map<string, true>();
   foreign = false;
+
+  learn(value: unknown, depth = 0): void {
+    if (depth > 16 || typeof value !== 'object' || value === null) return;
+    if (Array.isArray(value)) {
+      for (const item of value) this.learn(item, depth + 1);
+      return;
+    }
+    for (const [key, item] of Object.entries(value)) {
+      if (OBJECT_KEY.test(key) && typeof item === 'string') {
+        this.handles.delete(item);
+        this.handles.set(item, true);
+        if (this.handles.size > 50000) {
+          const oldest = this.handles.keys().next().value;
+          if (oldest !== undefined) this.handles.delete(oldest);
+        }
+      } else {
+        this.learn(item, depth + 1);
+      }
+    }
+  }
 
   kindOf(context: CDPPayload, protectedOrigin: (origin: string) => boolean): WorldKind {
     const aux = isObj(context['auxData']) ? context['auxData'] : {};
@@ -137,6 +158,13 @@ export class Worlds {
     return typeof name === 'string' && this.names.has(name);
   }
 
+  visible(): CDPPayload[] {
+    return [...this.ids.entries()]
+      .filter(([, entry]) => !entry.hidden && entry.context !== undefined)
+      .sort(([a], [b]) => a - b)
+      .map(([, entry]) => entry.context as CDPPayload);
+  }
+
   private verdict(selector: Selector): string | undefined {
     if (selector.kind === 'deep') return UNSEEN_CONTEXT;
     if (selector.kind === 'name') {
@@ -149,8 +177,12 @@ export class Worlds {
       if (typeof unique !== 'string' || !this.uniques.has(unique)) return UNSEEN_CONTEXT;
       return this.uniques.get(unique) ? WORLD : undefined;
     }
-    let id = selector.value;
-    if (selector.kind === 'object') id = typeof id === 'string' ? objectContext(id) : undefined;
+    const id = selector.value;
+    if (selector.kind === 'object') {
+      const context = typeof id === 'string' ? objectContext(id) : undefined;
+      if (context !== undefined && this.ids.get(context)?.hidden) return WORLD;
+      return typeof id === 'string' && this.handles.has(id) ? undefined : UNSEEN_CONTEXT;
+    }
     const entry = typeof id === 'number' ? this.ids.get(id) : undefined;
     if (!entry) return UNSEEN_CONTEXT;
     return entry.hidden ? WORLD : undefined;
