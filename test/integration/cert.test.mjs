@@ -391,7 +391,7 @@ for (const [name, verdict] of [
   ['another head', v2({ head: shas.docs, verdict: 'pass', summary: 's', comments: [] })],
   ['a pass with a fail comment', v2({ verdict: 'pass', summary: 's', comments: [blocker] })],
   [
-    'a token-like string',
+    'an ABSK-shaped key',
     v2({
       verdict: 'pass',
       summary: 'key ABSKQmVkcm9ja0FQSUtleS1leGFtcGxlLXRva2VuMDEyMzQ1Njc4OQ== leaked',
@@ -908,4 +908,30 @@ test('the merge group fails closed on a second cert-review writer on its head', 
   assert.equal(ours.conclusion, 'failure');
   assert.equal(ours.output.title, 'another workflow wrote cert-review');
   assert.equal(state.issues.length, 1);
+});
+
+test('a lockfile integrity quote posts as written, a generic long mixed-case run is redacted in place, an ABSK key withholds', async () => {
+  const integrity = 'sha512-Q2VydGlmaWNhdGlvbkV4YW1wbGVJbnRlZ3JpdHlWYWx1ZTAxMjM0NTY3ODk=';
+  const blob = 'Zm9vYmFyQmF6UXV4MTIzNDU2Nzg5MEFCQ0RFRmdoaWprbG1u';
+  const ok = await post(
+    v2({
+      verdict: 'pass',
+      summary: 'fine',
+      comments: [
+        { ...blocker, severity: 'note', body: `lockfile ${integrity} and fixture ${blob}` },
+      ],
+    })
+  );
+  assert.equal(ok.r.code, 0, ok.r.stdout);
+  assert.equal(ok.check.conclusion, 'success');
+  const body = ok.review.comments[0].body;
+  assert.ok(body.includes(integrity));
+  assert.ok(!body.includes(blob));
+  assert.match(body, /\[redacted\]/);
+  assert.match(ok.review.body, /1 token-like string redacted/);
+  const absk = await post(
+    v2({ verdict: 'pass', summary: 'key ABSKQmVkcm9ja0FQSUtleS1leGFtcGxl', comments: [] })
+  );
+  assert.equal(absk.check.output.title, 'incomplete: verdict carries a secret');
+  assert.equal(state.reviews.length, 0);
 });

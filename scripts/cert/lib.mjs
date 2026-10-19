@@ -346,10 +346,33 @@ function closed(value, schema, at, problems) {
   else check(value, schema, at, problems);
 }
 
-const tokenish = (text) =>
-  (String(text).match(/[A-Za-z0-9+/=_-]{32,}/g) ?? []).some(
-    (run) => /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run)
-  );
+const RUN = /[A-Za-z0-9+/=_-]{32,}/g;
+const INTEGRITY = /^sha(?:256|384|512)-/;
+const generic = (run) =>
+  !INTEGRITY.test(run) && /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run);
+
+export function redact(text) {
+  let count = 0;
+  const out = String(text).replace(RUN, (run) => {
+    if (!generic(run)) return run;
+    count++;
+    return '[redacted]';
+  });
+  return { text: out, count };
+}
+
+export function redactVerdict(value) {
+  let count = 0;
+  const clean = (t) => {
+    const r = redact(t);
+    count += r.count;
+    return r.text;
+  };
+  const comments = value.comments.map((c) => ({ ...c, body: clean(c.body) }));
+  let summary = clean(value.summary);
+  if (count) summary = `${summary} (${count} token-like string${count === 1 ? '' : 's'} redacted)`;
+  return { value: { ...value, summary, comments }, count };
+}
 
 export function validate(text, head) {
   if (Buffer.byteLength(text) > 65536)
@@ -390,7 +413,6 @@ export function carriesSecret(text, secrets = []) {
   }
   const shape = SECRET_SHAPES.find((re) => re.test(raw));
   if (shape) return `a token-shaped string (${shape.source.slice(0, 16)}…)`;
-  if (tokenish(raw.replace(/"head"\s*:\s*"[0-9a-f]{40}"/, ''))) return 'a token-like string';
   return '';
 }
 

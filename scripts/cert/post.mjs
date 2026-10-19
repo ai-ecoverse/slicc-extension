@@ -14,6 +14,7 @@ import {
   output,
   place,
   quiet,
+  redactVerdict,
   reviewBody,
   setCheck,
   sha,
@@ -176,7 +177,7 @@ async function reviewed() {
       title: 'incomplete: verdict carries a secret',
       text: `The verdict was withheld because it carries ${v.secret}. Nothing from it is posted.`,
     };
-  const r = conclude(found, v.ok ? v.value : null, v.problem);
+  const r = conclude(found, v.ok ? redactVerdict(v.value).value : null, v.problem);
   await publish(r, files);
   return r;
 }
