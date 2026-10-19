@@ -90,6 +90,21 @@ async function rawIn(match, contextId, expression) {
   }
 }
 
+async function framesGone(match) {
+  const targetId = await rawTarget(match);
+  const { sessionId } = await chrome.cdp.send('Target.attachToTarget', { targetId, flatten: true });
+  try {
+    for (let i = 0; i < 100; i++) {
+      const { frameTree } = await chrome.cdp.send('Page.getFrameTree', {}, sessionId);
+      if (!frameTree.childFrames?.length) return true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  } finally {
+    await chrome.cdp.send('Target.detachFromTarget', { sessionId }).catch(() => undefined);
+  }
+}
+
 async function opened(page, url) {
   return page.evaluate(async (url) => {
     const created = await h.attempt('Target.createTarget', { url });
@@ -672,6 +687,7 @@ for (const transport of transports) {
       'new Promise((resolve) => { document.querySelectorAll("iframe").forEach((f) => f.remove()); setTimeout(() => resolve(document.querySelectorAll("iframe").length), 300); })'
     );
     assert.equal(removed, 0);
+    assert.equal(await framesGone((href) => href === url), true);
     const back = await attached(page, targetId);
     assert.equal(typeof back, 'string', JSON.stringify(back));
     const product = await page.evaluate((sessionId) => h.evaluate(sessionId, '6 * 7'), back);
