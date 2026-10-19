@@ -62,6 +62,18 @@ npm run pack
 
 `npm run build` bundles six's TypeScript source in `six/` into `extension/six-sw.js`, `sidepanel.js`, and `secrets.js` with esbuild. It fetches nothing, and a rebuild is byte-identical. `npm run typecheck` checks `six/`. `npm test` runs integration tests. `npm run pack [version]` writes `artifacts/slicc-extension.zip`. The manifest carries the production `key`, so the unpacked extension has Chrome Web Store ID `akjjllgokmbgpbdbmafpiefnhidlmbgf`.
 
+## Certification
+
+Every pull request is certified in the pull request, and a release needs nothing more: merged on main means certified.
+
+- **`cert-review` check run.** `.github/workflows/cert-review.yml` runs on `pull_request_target`, so the workflow, the prompt (`scripts/cert/review.txt`) and the scripts always come from main, and a pull request can't change its own certification. It never checks out or runs the pull request's code. It reads the diff with git as data. The result is a check run named `cert-review` on the head SHA, always `success` or `failure`:
+  - fork heads, drafts, and cert-path changes without the coordinator's `cert-review-approved` label (cert-self-guard v1.24.2; the paths are every workflow, `.github/actions/`, `scripts/cert/`, `scripts/gate.mjs`, `scripts/is-main.mjs`) fail without a review;
+  - a change that touches only `test/` or Markdown outside `extension/` and `six/` passes as `not behaviour` (the zip packs only `extension/`, built from `six/`, `scripts/` and the lockfile);
+  - everything else gets a Claude review on Bedrock against the extension's cert rules.
+- **Review, then post.** The review job has a read-only token and the Bedrock key, and Claude has Read, Glob and Grep only, scoped to main's tree and the diff (`--permission-mode dontAsk`). It returns a structured verdict in a closed schema (`scripts/cert/verdict.schema.json`). A separate job validates the verdict, binds it to the head and to its artifact by id and digest, scans added lines for prompt-injection text, and only then posts the review. That job holds `checks: write` and `pull-requests: write`; Claude never does. On a failure the review is REQUEST_CHANGES, with each finding on its diff line. Anything missing, unparseable or inconsistent is a failure.
+- **Merge queue.** On `merge_group` a code-only job sets `cert-review` on the group head. It passes only if every member's head has a completed `pull_request_target` run of this workflow whose `cert / post` job succeeded.
+- **Store verify.** `.github/workflows/cws-verify.yml` runs hourly on main. It checks that the crx the Chrome Web Store serves, minus `_metadata/` and the `update_url` line the store inserts, is byte-identical to the `slicc-extension.zip` of the release with that version, and that the release's tag is on main. It sets a `cws-verify` check run on the tag commit and fails through `scripts/gate.mjs` on any difference.
+
 ## Six source
 
 `six/extension/` is slicc's `packages/chrome-extension/src` and `six/shared-ts/` the `packages/shared-ts` modules it reaches, both imported from the slicc commit in [`six/upstream.json`](six/upstream.json) and edited here from then on. [`six/manifest.json`](six/manifest.json) is that release's manifest, the permission baseline when the live listing is unreachable; `six/upstream.json` pins its sha256. `@slicc/shared-ts` resolves through `paths` in `tsconfig.json`, which esbuild reads too; cherry is the exact-pinned npm package `@ai-ecoverse/cherry`, bundled at build time.
