@@ -370,13 +370,28 @@ export function validate(text, head) {
     return { ok: false, problem: `the verdict is pass but ${fails} comment(s) are fail` };
   if (value.verdict === 'fail' && !fails)
     return { ok: false, problem: 'the verdict is fail but no comment is fail' };
-  const texts = [value.summary, ...value.comments.flatMap((c) => [c.path, c.body])];
-  if (texts.some(tokenish))
-    return {
-      ok: false,
-      problem: 'the review text contains a token-like string, so none of it is posted',
-    };
   return { ok: true, value };
+}
+
+const SECRET_SHAPES = [
+  /gh[pousr]_[A-Za-z0-9]{20,}/,
+  /github_pat_[A-Za-z0-9_]{20,}/,
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
+  /ABSK[A-Za-z0-9+/=]{16,}/,
+  /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/,
+  /-----BEGIN [A-Z0-9 ]*-----/,
+];
+
+export function carriesSecret(text, secrets = []) {
+  const raw = String(text);
+  for (const v of secrets.filter((x) => typeof x === 'string' && x.length >= 8)) {
+    const forms = [v, JSON.stringify(v).slice(1, -1), Buffer.from(v).toString('base64')];
+    if (forms.some((f) => raw.includes(f))) return 'a secret value this run holds';
+  }
+  const shape = SECRET_SHAPES.find((re) => re.test(raw));
+  if (shape) return `a token-shaped string (${shape.source.slice(0, 16)}…)`;
+  if (tokenish(raw.replace(/"head"\s*:\s*"[0-9a-f]{40}"/, ''))) return 'a token-like string';
+  return '';
 }
 
 const INJECTION = [
@@ -472,11 +487,89 @@ export function api(repo, token = process.env.GH_TOKEN) {
   return { call, graphql };
 }
 
+const EXTERNAL = /^v2:[^:]+:([0-9a-f]{40}):(\d+):(\d+)$/;
+
+export async function foreignWriters(gh, ref, { event, job, repo }) {
+  const all = [];
+  for (let page = 1; page <= 10; page++) {
+    const data = await gh.call(
+      `commits/${sha(ref)}/check-runs?check_name=${CHECK}&filter=all&per_page=100&page=${page}`
+    );
+    all.push(...data.check_runs.filter((c) => c.name === CHECK));
+    if (data.check_runs.length < 100) break;
+  }
+  const foreign = [];
+  const seen = new Map();
+  for (const c of all) {
+    const why = (reason) =>
+      foreign.push({
+        id: c.id,
+        url: c.html_url ?? `check run ${c.id}`,
+        app: c.app?.slug ?? c.app?.id,
+        reason,
+      });
+    if (c.app?.id !== ACTIONS_APP) {
+      why('written by another app');
+      continue;
+    }
+    const m = EXTERNAL.exec(c.external_id ?? '');
+    if (!m || m[1] !== ref) {
+      why('names no run of this workflow for this head');
+      continue;
+    }
+    const key = `${m[2]}:${m[3]}`;
+    if (seen.has(key)) {
+      why(`a second check run for run ${m[2]} attempt ${m[3]}`);
+      continue;
+    }
+    seen.set(key, c.id);
+    let run;
+    try {
+      run = await gh.call(`actions/runs/${m[2]}`);
+    } catch {
+      why(`run ${m[2]} does not exist`);
+      continue;
+    }
+    if (
+      run.path !== WORKFLOW ||
+      run.event !== event ||
+      run.head_sha !== ref ||
+      run.repository?.full_name !== repo
+    ) {
+      why(`run ${m[2]} is ${run.path} on ${run.event}, not ${WORKFLOW} on ${event} for this head`);
+      continue;
+    }
+    const jobs = (await gh.call(`actions/runs/${run.id}/attempts/${m[3]}/jobs?per_page=100`)).jobs;
+    const writer = jobs.find((j) => j.name === job);
+    if (!writer) {
+      why(`run ${m[2]} has no ${job} job`);
+      continue;
+    }
+    if (writer.status !== 'completed') continue;
+    const said = c.conclusion === 'success';
+    const did = writer.conclusion === 'success';
+    if (said !== did && !(writer.conclusion === 'cancelled' && !said))
+      why(`says ${c.conclusion}, but run ${m[2]}'s ${job} job ended ${writer.conclusion}`);
+  }
+  return foreign;
+}
+
+export async function alert(gh, ref, foreign, runUrl) {
+  const title = `cert-review: another workflow wrote cert-review on ${ref.slice(0, 12)}`;
+  const open = await gh.call('issues?state=open&per_page=100');
+  if (open.some((i) => i.title === title)) return 'already open';
+  await gh.call('issues', 'POST', {
+    title,
+    body: `${foreign.map((f) => `- ${f.url} (${f.app}): ${f.reason}`).join('\n')}\n\nFound by ${runUrl}. The required cert-review check on ${ref} is failed until the foreign writer is removed.`,
+  });
+  return 'opened';
+}
+
 export function setCheck(gh, { pr, head, runId, runUrl, conclusion, title, summary }) {
   return gh.call('check-runs', 'POST', {
     name: CHECK,
     head_sha: sha(head),
-    external_id: `v2:${pr}:${head}:${runId}`,
+    external_id: `v2:${pr}:${head}:${runId}:${process.env.GITHUB_RUN_ATTEMPT ?? '1'}`,
     details_url: runUrl,
     status: 'completed',
     conclusion,

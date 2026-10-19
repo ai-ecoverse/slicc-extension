@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { api, output, setCheck, sha, summary, WORKFLOW } from './lib.mjs';
+import { alert, api, foreignWriters, output, setCheck, sha, summary, WORKFLOW } from './lib.mjs';
 
 const env = process.env;
 const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
@@ -98,12 +98,35 @@ try {
   problem = err.message;
   rows = [];
 }
+if (!problem) {
+  try {
+    const repo = env.GITHUB_REPOSITORY;
+    const spots = [{ ref: head, event: 'merge_group', job: 'cert / merge group' }];
+    for (const m of JSON.parse(env.RECEIPT).members)
+      spots.push({ ref: sha(m.head), event: 'pull_request_target', job: 'cert / post' });
+    for (const spot of spots) {
+      const foreign = await foreignWriters(gh, spot.ref, {
+        event: spot.event,
+        job: spot.job,
+        repo,
+      });
+      if (!foreign.length) continue;
+      const how = await alert(gh, spot.ref, foreign, runUrl);
+      problem = `another workflow wrote cert-review on ${spot.ref} (alert issue ${how}): ${foreign.map((f) => `${f.url} (${f.reason})`).join('; ')}`;
+      break;
+    }
+  } catch (err) {
+    problem = `listing the cert-review check runs failed: ${err.message}`;
+  }
+}
 const ok = !problem && rows.length > 0 && rows.every((r) => r.ok);
 const conclusion = ok ? 'success' : 'failure';
 const first = rows.find((r) => !r.ok);
 const title = ok
   ? `group: ${prs.join(' ')} certified`
-  : `group: not certified: ${problem || first?.line || 'no members'}`;
+  : problem.startsWith('another workflow')
+    ? 'another workflow wrote cert-review'
+    : `group: not certified: ${problem || first?.line || 'no members'}`;
 const text = problem
   ? `merge group lookup failed: ${problem}`
   : rows.map((r) => `- ${r.line}`).join('\n');

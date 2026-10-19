@@ -1,9 +1,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import {
+  alert,
   anchors,
   api,
+  carriesSecret,
   commentBody,
   diffOf,
+  foreignWriters,
   globs,
   injections,
   MARKER,
@@ -33,7 +36,10 @@ function verdictOf() {
     return { ok: false, problem: 'the verdict artifact is not the one the review job uploaded' };
   if (!env.VERDICT || !existsSync(env.VERDICT))
     return { ok: false, problem: 'the review left no verdict' };
-  return validate(readFileSync(env.VERDICT, 'utf8'), head);
+  const raw = readFileSync(env.VERDICT, 'utf8');
+  const secret = carriesSecret(raw, [env.GH_TOKEN, ...String(env.CERT_SECRETS ?? '').split('\n')]);
+  if (secret) return { ok: false, secret };
+  return validate(raw, head);
 }
 
 async function tidy() {
@@ -164,6 +170,12 @@ async function reviewed() {
     ...opaque(files, globs(env.QUIET), globs(env.LOUD)),
   ];
   const v = verdictOf();
+  if (v.secret)
+    return {
+      conclusion: 'failure',
+      title: 'incomplete: verdict carries a secret',
+      text: `The verdict was withheld because it carries ${v.secret}. Nothing from it is posted.`,
+    };
   const r = conclude(found, v.ok ? v.value : null, v.problem);
   await publish(r, files);
   return r;
@@ -209,6 +221,30 @@ try {
     conclusion: 'failure',
     title: 'incomplete: post; re-run',
     text: `The verdict could not be posted (${err.message.slice(0, 300)}).`,
+  };
+}
+try {
+  const foreign = await foreignWriters(gh, head, {
+    event: 'pull_request_target',
+    job: 'cert / post',
+    repo: env.GITHUB_REPOSITORY,
+  });
+  if (foreign.length) {
+    const how = await alert(gh, head, foreign, runUrl);
+    console.log(
+      `::error title=cert-review::another workflow wrote cert-review on ${head} (alert issue ${how})`
+    );
+    r = {
+      conclusion: 'failure',
+      title: 'another workflow wrote cert-review',
+      text: `Check runs named cert-review on this head that this workflow did not write: ${foreign.map((f) => `${f.url} (${f.reason})`).join('; ')}.`,
+    };
+  }
+} catch (err) {
+  r = {
+    conclusion: 'failure',
+    title: 'incomplete: writer check; re-run',
+    text: `Listing the cert-review check runs on this head failed (${err.message.slice(0, 200)}).`,
   };
 }
 await setCheck(gh, {

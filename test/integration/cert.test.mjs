@@ -93,6 +93,11 @@ function handle(req, res, body) {
     state.reviews.push({ pr: Number(m[1]), ...body });
     return reply(res, 200, { id: state.nextId++ });
   }
+  if (p === '/repos/o/r/issues' && req.method === 'GET') return reply(res, 200, state.issues);
+  if (p === '/repos/o/r/issues' && req.method === 'POST') {
+    state.issues.push({ ...body, number: state.nextId++ });
+    return reply(res, 201, state.issues.at(-1));
+  }
   if (p === '/repos/o/r/actions/workflows/cert-review.yml/runs')
     return reply(res, 200, {
       workflow_runs: state.workflowRuns.filter(
@@ -204,6 +209,7 @@ function reset() {
   state.artifacts = [];
   state.workflowRuns = [];
   state.jobs = {};
+  state.issues = [];
 }
 
 async function plan(name, head, extra, guard = 'PASS', rec = receipt(head)) {
@@ -309,9 +315,15 @@ test('a plan that left nothing fails the check', async () => {
   assert.equal(state.checks.at(-1).conclusion, 'failure');
 });
 
-async function post(verdict) {
+async function post(verdict, setup = () => {}, env2 = {}) {
   reset();
-  const env = { GITHUB_EVENT_PATH: event('post', shas.code), KIND: 'review', ARTIFACTS: 'success' };
+  setup();
+  const env = {
+    GITHUB_EVENT_PATH: event('post', shas.code),
+    KIND: 'review',
+    ARTIFACTS: 'success',
+    ...env2,
+  };
   if (verdict !== undefined) {
     const file = join(scratch, `verdict-${state.nextId++}.json`);
     writeFileSync(file, typeof verdict === 'string' ? verdict : JSON.stringify(verdict));
@@ -765,4 +777,135 @@ test('cws-verify refuses a zip entry whose bytes fail its CRC', () => {
     out = err.stdout;
   }
   assert.match(out, /cws-verify: FAIL .*CRC/);
+});
+
+const bedrock = 'bedrock-key-value-5f3a9c1e7b';
+
+for (const [name, text] of [
+  ['the Bedrock key this run holds', `fine ${bedrock}`],
+  ['a GitHub token', 'fine ghp_abcdefghijklmnopqrstuvwxyz0123'],
+  ['a fine-grained PAT', 'fine github_pat_11ABCDEFG0123456789_abcdef'],
+  ['an AWS key id', 'fine AKIAABCDEFGHIJKLMNOP'],
+  ['a Bedrock-shaped key', 'fine ABSKQmVkcm9ja0FQSUtleQ=='],
+  ['a JWT', 'fine eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJlLXZhbHVl'],
+  ['a PEM block', 'fine -----BEGIN PRIVATE KEY----- abc'],
+]) {
+  test(`a verdict carrying ${name} is withheld and fails the check`, async () => {
+    const { r, check } = await post(
+      v2({ verdict: 'pass', summary: text, comments: [] }),
+      undefined,
+      {
+        CERT_SECRETS: bedrock,
+      }
+    );
+    assert.equal(r.code, 1, r.stdout);
+    assert.equal(check.conclusion, 'failure');
+    assert.equal(check.output.title, 'incomplete: verdict carries a secret');
+    assert.equal(state.reviews.length, 0);
+    assert.doesNotMatch(
+      JSON.stringify(state.checks),
+      /bedrock-key-value|ghp_|AKIAABCD|BEGIN PRIVATE/
+    );
+  });
+}
+
+function writer(id, path, eventName, postConclusion, headSha = shas.code) {
+  state.runs[String(id)] = {
+    id,
+    run_attempt: 1,
+    path,
+    event: eventName,
+    head_sha: headSha,
+    repository: { full_name: 'o/r' },
+  };
+  state.jobs[String(id)] = [
+    { name: 'cert / post', status: 'completed', conclusion: postConclusion },
+  ];
+}
+
+const spoofCheck = (extra) => ({
+  id: 500 + state.nextId++,
+  name: 'cert-review',
+  head_sha: shas.code,
+  status: 'completed',
+  conclusion: 'success',
+  app: { id: 15368, slug: 'github-actions' },
+  ...extra,
+});
+
+for (const [name, setup] of [
+  [
+    'another app',
+    () => state.checks.push(spoofCheck({ app: { id: 1, slug: 'x' }, external_id: '' })),
+  ],
+  ['no run named', () => state.checks.push(spoofCheck({ external_id: 'whatever' }))],
+  [
+    'a run of another workflow',
+    () => {
+      writer(555, '.github/workflows/spoof.yml', 'pull_request', 'success');
+      state.checks.push(spoofCheck({ external_id: `v2:7:${shas.code}:555:1` }));
+    },
+  ],
+  [
+    'a success over a run whose post failed',
+    () => {
+      writer(556, '.github/workflows/cert-review.yml', 'pull_request_target', 'failure');
+      state.checks.push(spoofCheck({ external_id: `v2:7:${shas.code}:556:1` }));
+    },
+  ],
+  [
+    'a second check run for one real run',
+    () => {
+      writer(557, '.github/workflows/cert-review.yml', 'pull_request_target', 'success');
+      state.checks.push(spoofCheck({ external_id: `v2:7:${shas.code}:557:1` }));
+      state.checks.push(spoofCheck({ external_id: `v2:7:${shas.code}:557:1` }));
+    },
+  ],
+]) {
+  test(`post fails closed on a second cert-review writer: ${name}`, async () => {
+    const { r } = await post(v2({ verdict: 'pass', summary: 'fine', comments: [] }), setup);
+    assert.equal(r.code, 1, r.stdout);
+    const ours = state.checks.at(-1);
+    assert.equal(ours.conclusion, 'failure');
+    assert.equal(ours.output.title, 'another workflow wrote cert-review');
+    assert.equal(state.issues.length, 1);
+    assert.match(state.issues[0].title, /another workflow wrote cert-review/);
+  });
+}
+
+test('an earlier check run of this workflow is not a second writer (control)', async () => {
+  const { r, check } = await post(v2({ verdict: 'pass', summary: 'fine', comments: [] }), () => {
+    writer(558, '.github/workflows/cert-review.yml', 'pull_request_target', 'failure');
+    state.checks.push(
+      spoofCheck({ external_id: `v2:7:${shas.code}:558:1`, conclusion: 'failure' })
+    );
+  });
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(check.conclusion, 'success');
+  assert.equal(state.issues.length, 0);
+});
+
+test('the merge group fails closed on a second cert-review writer on its head', async () => {
+  const runs = [runOf(1, '2026-10-19T00:00:00Z')];
+  reset();
+  state.workflowRuns = runs;
+  state.jobs = { 1: [{ name: 'cert / post', conclusion: 'success' }] };
+  state.checks.push(spoofCheck({ head_sha: shas.docs, external_id: 'spoofed' }));
+  const file = join(scratch, 'group3.json');
+  writeFileSync(file, JSON.stringify({ merge_group: { head_sha: shas.docs } }));
+  const r = await run('group.mjs', {
+    GITHUB_EVENT_PATH: file,
+    GUARD: 'PASS',
+    CERT_GROUP_WAIT_MS: '1',
+    RECEIPT: JSON.stringify({
+      status: 'PASS',
+      head: shas.docs,
+      members: [{ pr: 7, head: shas.code, status: 'PASS' }],
+    }),
+  });
+  assert.equal(r.code, 1, r.stdout);
+  const ours = state.checks.at(-1);
+  assert.equal(ours.conclusion, 'failure');
+  assert.equal(ours.output.title, 'another workflow wrote cert-review');
+  assert.equal(state.issues.length, 1);
 });
