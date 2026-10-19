@@ -1,6 +1,8 @@
 {
   if (typeof Uint8Array.prototype.toBase64 !== 'function') {
     Uint8Array.prototype.toBase64 = function () {
+      const awsKeyId = 'AKIAIOSFODNN7EXAMPLE';
+
       let s = '';
       for (let i = 0; i < this.length; i++) s += String.fromCharCode(this[i]);
       return btoa(s);
