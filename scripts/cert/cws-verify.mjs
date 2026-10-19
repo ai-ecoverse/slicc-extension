@@ -175,6 +175,11 @@ export async function probe({ repo, token, item }) {
   const { version, crx, hash } = await live(item);
   const tag = `v${version}`;
   const commit = await tagCommit(gh, tag);
+  const onMain = (await gh.call(`compare/main...${commit}`)).status;
+  if (!['identical', 'behind'].includes(onMain))
+    throw new Error(
+      `the store serves ${version}, and ${tag} (${commit}) is not on main (${onMain})`
+    );
   return {
     gh,
     version,

@@ -475,9 +475,74 @@ test('the merge group passes only on a member cert-review that main’s pull_req
   });
   assert.equal(staging.check.conclusion, 'failure');
   assert.match(staging.check.output.summary, /not for #7 into main/);
-  const pending = await group('success', undefined, undefined, { status: 'in_progress' });
+  const pending = await groupOf([runOf(9, '2026-10-19T00:00:00Z', { status: 'in_progress' })], {});
   assert.equal(pending.check.conclusion, 'failure');
   assert.match(pending.check.output.summary, /still in_progress/);
+});
+
+function runOf(id, created, extra = {}) {
+  return {
+    id,
+    run_attempt: 1,
+    path: '.github/workflows/cert-review.yml',
+    event: 'pull_request_target',
+    head_sha: shas.code,
+    status: 'completed',
+    conclusion: 'success',
+    created_at: created,
+    repository: { full_name: 'o/r' },
+    pull_requests: [{ number: 7, base: { ref: 'main' } }],
+    ...extra,
+  };
+}
+
+async function groupOf(runs, jobs) {
+  reset();
+  state.workflowRuns = runs;
+  state.jobs = jobs;
+  const groupHead = shas.docs;
+  const file = join(scratch, 'group2.json');
+  writeFileSync(file, JSON.stringify({ merge_group: { head_sha: groupHead } }));
+  const r = await run('group.mjs', {
+    GITHUB_EVENT_PATH: file,
+    GUARD: 'PASS',
+    CERT_GROUP_WAIT_MS: '1',
+    RECEIPT: JSON.stringify({
+      status: 'PASS',
+      head: groupHead,
+      members: [{ pr: 7, head: shas.code, status: 'PASS' }],
+    }),
+  });
+  return { r, check: state.checks.find((c) => c.head_sha === groupHead) };
+}
+
+const skippedAll = [
+  { name: 'cert / self-guard', conclusion: 'skipped' },
+  { name: 'cert / plan', conclusion: 'skipped' },
+  { name: 'cert / post', conclusion: 'skipped' },
+];
+
+test('the merge group skips only noop runs: a newer cancelled run is never passed over for an older success', async () => {
+  const older = runOf(1, '2026-10-19T00:00:00Z');
+  const okJobs = [{ name: 'cert / post', conclusion: 'success' }];
+  const noop = await groupOf([older, runOf(2, '2026-10-19T01:00:00Z')], {
+    1: okJobs,
+    2: skippedAll,
+  });
+  assert.equal(noop.check.conclusion, 'success', noop.r.stdout);
+  const cancelled = await groupOf(
+    [older, runOf(3, '2026-10-19T01:00:00Z', { conclusion: 'cancelled' })],
+    {
+      1: okJobs,
+      3: [
+        { name: 'cert / plan', conclusion: 'success' },
+        { name: 'cert / review', conclusion: 'cancelled' },
+        { name: 'cert / post', conclusion: 'cancelled' },
+      ],
+    }
+  );
+  assert.equal(cancelled.check.conclusion, 'failure');
+  assert.match(cancelled.check.output.summary, /did not certify it \(post: cancelled\)/);
 });
 
 test('a pull request into another branch is refused, and an edit that keeps the base is a noop', async () => {

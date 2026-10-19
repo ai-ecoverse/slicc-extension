@@ -9,12 +9,15 @@ const runUrl = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/$
 const gh = api(env.GITHUB_REPOSITORY);
 const POST = 'cert / post';
 
-async function verdictRun(memberHead, pr) {
+const NOOP = ['cert / self-guard', 'cert / plan'];
+const WAIT = Number(env.CERT_GROUP_WAIT_MS ?? 15000);
+
+async function runsOf(memberHead) {
   const file = WORKFLOW.split('/').pop();
   const data = await gh.call(
     `actions/workflows/${file}/runs?event=pull_request_target&head_sha=${memberHead}&per_page=50`
   );
-  const runs = data.workflow_runs
+  return data.workflow_runs
     .filter(
       (r) =>
         r.path === WORKFLOW &&
@@ -23,24 +26,44 @@ async function verdictRun(memberHead, pr) {
         r.repository?.full_name === env.GITHUB_REPOSITORY
     )
     .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
-  for (const r of runs) {
-    if (r.status !== 'completed')
-      return { problem: `run ${r.id} on this head is still ${r.status}` };
+}
+
+async function settled(memberHead) {
+  for (let i = 0; ; i++) {
+    const runs = await runsOf(memberHead);
+    if (runs[0]?.status === 'completed' || !runs.length || i >= 6) return runs;
+    await new Promise((r) => setTimeout(r, WAIT));
+  }
+}
+
+async function verdictRun(memberHead, pr) {
+  for (const r of await settled(memberHead)) {
+    const url = r.html_url ?? `run ${r.id}`;
+    if (r.status !== 'completed') return { problem: `${url} on this head is still ${r.status}` };
+    const jobs = (await gh.call(`actions/runs/${r.id}/attempts/${r.run_attempt}/jobs?per_page=100`))
+      .jobs;
+    const noop =
+      r.conclusion !== 'cancelled' &&
+      jobs.length > 0 &&
+      jobs.every((j) => j.conclusion === 'skipped') &&
+      NOOP.every((n) => jobs.some((j) => j.name === n));
+    if (noop) continue;
     const prs = r.pull_requests ?? [];
     if (
       !prs.some((p) => p.number === pr && p.base?.ref === 'main') ||
       prs.some((p) => p.base?.ref !== 'main')
     )
       return {
-        problem: `run ${r.id} is not for #${pr} into main (${prs.map((p) => `#${p.number}→${p.base?.ref}`).join(', ') || 'no pull request'})`,
+        problem: `${url} is not for #${pr} into main (${prs.map((p) => `#${p.number}→${p.base?.ref}`).join(', ') || 'no pull request'})`,
       };
-    const jobs = (await gh.call(`actions/runs/${r.id}/attempts/${r.run_attempt}/jobs?per_page=100`))
-      .jobs;
     const post = jobs.find((j) => j.name === POST);
-    if (post && post.conclusion !== 'skipped' && post.conclusion !== 'cancelled')
-      return { run: r, post };
+    if (post?.conclusion !== 'success')
+      return {
+        problem: `the newest cert-review on this head, ${url}, did not certify it (post: ${post?.conclusion ?? 'missing'})`,
+      };
+    return { run: r, post };
   }
-  return { problem: `no completed cert-review run of ${WORKFLOW} on this head` };
+  return { problem: `no cert-review run of ${WORKFLOW} on this head` };
 }
 
 async function member(m) {
@@ -52,9 +75,10 @@ async function member(m) {
     };
   const found = await verdictRun(sha(m.head), m.pr);
   if (found.problem) return { ok: false, line: `${at}: ${found.problem}` };
-  if (found.post.conclusion !== 'success')
-    return { ok: false, line: `${at}: cert-review ${found.post.conclusion} (run ${found.run.id})` };
-  return { ok: true, line: `${at}: cert-review success (run ${found.run.id})` };
+  return {
+    ok: true,
+    line: `${at}: cert-review success (${found.run.html_url ?? `run ${found.run.id}`})`,
+  };
 }
 
 let rows = [];

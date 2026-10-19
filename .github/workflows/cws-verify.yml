@@ -12,19 +12,22 @@ concurrency:
   group: cws-verify
   cancel-in-progress: false
 
+env:
+  LEFTHOOK: "0"
+
 jobs:
-  verify:
-    name: store crx = release zip = rebuild
+  probe:
+    name: the version the store serves, on main
     if: github.ref == 'refs/heads/main'
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 20
+    timeout-minutes: 10
     permissions:
       contents: read
-      checks: write
-    env:
-      LEFTHOOK: "0"
-      GH_TOKEN: ${{ github.token }}
-      ITEM_ID: ${{ vars.CHROME_WEB_STORE_ITEM_ID }}
+      checks: read
+    outputs:
+      version: ${{ steps.probe.outputs.version }}
+      tag: ${{ steps.probe.outputs.tag }}
+      recorded: ${{ steps.probe.outputs.recorded }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -35,33 +38,81 @@ jobs:
           node-version-file: .node-version
 
       - id: probe
-        name: The version the store serves, and whether it is verified already
-        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ITEM_ID: ${{ vars.CHROME_WEB_STORE_ITEM_ID }}
         run: node scripts/cert/cws-verify.mjs --probe
 
-      - name: Rebuild that release from its tag
-        if: steps.probe.outputs.recorded != 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+  rebuild:
+    name: rebuild the release from its tag, without a token that can write
+    needs: probe
+    if: needs.probe.outputs.recorded == 'false'
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ steps.probe.outputs.tag }}
-          path: rebuild
+          ref: ${{ needs.probe.outputs.tag }}
           persist-credentials: false
 
-      - if: steps.probe.outputs.recorded != 'true'
-        shell: bash
-        working-directory: rebuild
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+
+      - shell: bash
         env:
-          VERSION: ${{ steps.probe.outputs.version }}
+          VERSION: ${{ needs.probe.outputs.version }}
         run: |
           npm ci --no-audit --no-fund
           npm run build
           node scripts/pack.mjs "$VERSION"
 
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cws-verify-rebuild
+          path: artifacts/slicc-extension.zip
+          if-no-files-found: error
+          overwrite: true
+
+  verify:
+    name: store crx = release zip = rebuild
+    needs: [probe, rebuild]
+    if: ${{ !cancelled() && needs.probe.result == 'success' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+
+      - if: needs.probe.outputs.recorded == 'false'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.rebuild.outputs.id }}
+          path: ${{ runner.temp }}/rebuild
+          digest-mismatch: error
+
       - name: The store's crx, minus _metadata/ and update_url, is byte-identical to the release zip and to the rebuild
         shell: bash
         env:
-          VERSION: ${{ steps.probe.outputs.version }}
-          REBUILT: ${{ steps.probe.outputs.recorded != 'true' && 'rebuild/artifacts/slicc-extension.zip' || '' }}
+          GH_TOKEN: ${{ github.token }}
+          ITEM_ID: ${{ vars.CHROME_WEB_STORE_ITEM_ID }}
+          VERSION: ${{ needs.probe.outputs.version }}
+          REBUILT: ${{ needs.probe.outputs.recorded == 'false' && format('{0}/rebuild/slicc-extension.zip', runner.temp) || '' }}
         run: |
           args=(--expect "$VERSION")
           [ -n "$REBUILT" ] && args+=(--rebuilt "$REBUILT")

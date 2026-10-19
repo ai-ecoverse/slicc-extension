@@ -164,14 +164,14 @@ export function decide({
     };
   if (size > MAX_DIFF_LINES)
     return failure(
-      `fail: too large to certify (${size} diff lines); split it`,
-      `The diff has ${size} lines, more than the ${MAX_DIFF_LINES} one review can read in full. Split the pull request.`
+      `fail: too large to certify (${size} annotated diff lines); split it`,
+      `The annotated diff has ${size} lines, more than the ${MAX_DIFF_LINES} one review reads in full. Split the pull request.`
     );
   return { kind: 'review', behaviour };
 }
 
 export function diffSize(files) {
-  return files.reduce((n, f) => n + f.lines.length, 0);
+  return annotate(files).split('\n').length;
 }
 
 export function opaque(files, quiet, loud) {
