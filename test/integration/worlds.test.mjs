@@ -469,7 +469,13 @@ for (const transport of transports) {
     });
     const sessionId = await attached(page, targetId);
     assert.equal(typeof sessionId, 'string', JSON.stringify(sessionId));
-    const contexts = await rawContexts((href) => href === 'about:blank');
+    const mark = `about:blank#ours-${transport}`;
+    const moved = await page.evaluate(
+      ({ sessionId, mark }) => h.attempt('Page.navigate', { url: mark }, sessionId),
+      { sessionId, mark }
+    );
+    assert.equal(typeof moved.result?.frameId, 'string', JSON.stringify(moved));
+    const contexts = await rawContexts((href) => href === mark);
     const ours = contexts.filter((c) => c.name === 'slicc-navigate');
     assert.ok(ours.length > 0, `the guard's world exists: ${JSON.stringify(contexts)}`);
     const run = await page.evaluate(
