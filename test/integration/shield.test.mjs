@@ -507,6 +507,60 @@ for (const transport of transports) {
   }
 }
 
+test('six-bridge C6.clear-cookies: Network.clearBrowserCookies and Storage.clearCookies are refused; protected cookie survives; ordinary cookie clears via deleteCookies', async (t) => {
+  const origin = targets.seven;
+  const raw = await chrome.visit(t, `${origin}/cookie?name=c6clear`);
+  assert.ok(
+    await raw.evaluate(() => document.cookie.includes('c6clear')),
+    'protected cookie planted'
+  );
+  const page = await client(t, 'six-bridge');
+  const answer = await page.evaluate(async (ordinary) => {
+    const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+    const set = await h.attempt(
+      'Network.setCookie',
+      { name: 'c6plain', value: 'ok', url: `${ordinary}/` },
+      sessionId
+    );
+    const clearBrowser = await h.attempt('Network.clearBrowserCookies', {}, sessionId);
+    const clearStorage = await h.attempt('Storage.clearCookies', {}, sessionId);
+    const afterRefuse = await h.attempt(
+      'Network.getCookies',
+      { urls: [`${ordinary}/`] },
+      sessionId
+    );
+    const deletePlain = await h.attempt(
+      'Network.deleteCookies',
+      { name: 'c6plain', url: `${ordinary}/` },
+      sessionId
+    );
+    const afterDelete = await h.attempt(
+      'Network.getCookies',
+      { urls: [`${ordinary}/`] },
+      sessionId
+    );
+    await h.close(targetId);
+    return { set, clearBrowser, clearStorage, afterRefuse, deletePlain, afterDelete };
+  }, ordinary);
+  assert.equal(answer.set.error, undefined, 'control setCookie');
+  assert.match(answer.clearBrowser.error ?? '', /^slicc: refused: /, 'Network.clearBrowserCookies');
+  assert.match(answer.clearStorage.error ?? '', /^slicc: refused: /, 'Storage.clearCookies');
+  assert.ok(
+    answer.afterRefuse.result.cookies.some((c) => c.name === 'c6plain'),
+    'ordinary cookie survived the refused clears'
+  );
+  assert.equal(answer.deletePlain.error, undefined, 'control deleteCookies');
+  assert.equal(
+    answer.afterDelete.result.cookies.some((c) => c.name === 'c6plain'),
+    false,
+    'ordinary cookie cleared through deleteCookies'
+  );
+  assert.ok(
+    await raw.evaluate(() => document.cookie.includes('c6clear')),
+    'protected cookie untouched'
+  );
+});
+
 test('browser-wide and origin-keyed commands are refused; the same commands work on an ordinary origin', async (t) => {
   const page = await client(t);
   const answer = await page.evaluate(async (ordinary) => {
