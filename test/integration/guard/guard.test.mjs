@@ -31,6 +31,9 @@ const hosts = [
   'sliccy.ai',
   'ordinary.test',
   'cross.test',
+  'exa%20mple.sliccy.ai',
+  'xn--1ug.sliccy.ai',
+  'xn--a.sliccy.ai',
 ];
 const binding = '__sliccGuardEvent';
 const cachesAuth = (vector) => JSON.stringify([vector.setup, vector.trigger]).includes('/auth/');

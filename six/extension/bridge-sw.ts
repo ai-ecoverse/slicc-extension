@@ -21,6 +21,7 @@ import {
   isProtectedUrl,
   PROTECTED_REFUSAL,
   PROTECTED_RULES,
+  refuseUnparseableDestination,
 } from './protected-origins.js';
 
 interface BridgeTargetAttachResult extends CDPPayload {
@@ -890,6 +891,7 @@ async function cdpCreateTarget(
   deps: BridgeSwDeps
 ): Promise<BridgeTargetCreateResult> {
   const url = readCreateTargetUrl(params);
+  refuseUnparseableDestination(url);
   if (!URL.canParse(url)) throw new Error(RELATIVE_REFUSAL);
   if (wrapsAbout(url, PROTECTED_RULES.innerSchemes)) throw new Error(ABOUT_WRAPPED);
   if (isProtectedTarget(url)) {

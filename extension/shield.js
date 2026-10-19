@@ -116,13 +116,13 @@ export function webSocketAsHttp(url) {
   return url;
 }
 
-export function urlProtected(guard, text) {
+export function urlProtected(guard, text, options = {}) {
   if (typeof text !== 'string' || text === '') return false;
-  return guard.url(text) || guard.url(webSocketAsHttp(text));
+  return guard.url(text, options) || guard.url(webSocketAsHttp(text), options);
 }
 
 function storageNamed(guard, key, item) {
-  if (ORIGIN_KEYS.has(key) && urlProtected(guard, item)) return true;
+  if (ORIGIN_KEYS.has(key) && urlProtected(guard, item, { readOnly: true })) return true;
   if ((key === 'storageKey' || key === 'storageKeys') && guard.storageKey(item)) return true;
   return key === 'cacheId' && guard.storageKey(item.split('|')[0] ?? '');
 }
@@ -176,6 +176,46 @@ export function cookieRefused(guard, params) {
   return cookieProtected(guard, p);
 }
 
+const FORBIDDEN_HOST = /[\u0000-\u0020%\u007f#/:<>?@[\\\]^|]/;
+
+function parsed(text) {
+  try {
+    return new URL(text);
+  } catch {
+    return null;
+  }
+}
+
+export function strictGuard(base, rules) {
+  const noncanonical = (text) => {
+    if (typeof text !== 'string') return false;
+    let u = parsed(text);
+    for (let i = 0; u && rules.innerSchemes.includes(u.protocol.slice(0, -1)) && i < 8; i += 1) {
+      u = parsed(u.href.slice(u.protocol.length));
+    }
+    if (!u?.hostname || u.hostname.startsWith('[')) return false;
+    return FORBIDDEN_HOST.test(u.hostname);
+  };
+  const failClosed = rules.unparseable === 'protected';
+  return {
+    ...base,
+    url: (text, options = {}) =>
+      base.url(text, options) || (failClosed && !options.readOnly && noncanonical(text)),
+    target: (info) => base.target(info) || (failClosed && noncanonical(info?.url)),
+    unparseable: (text) => base.unparseable(text) || noncanonical(text),
+  };
+}
+
+export function cookieUrlUnparseable(guard, params) {
+  const p = params ?? {};
+  const urls = [
+    ...(Array.isArray(p.urls) ? p.urls : []),
+    p.url,
+    ...(Array.isArray(p.cookies) ? p.cookies.map((cookie) => cookie?.url) : []),
+  ];
+  return urls.some((url) => typeof url === 'string' && guard.unparseable(url));
+}
+
 export function dropProtectedCookies(guard, result) {
   if (!result || !Array.isArray(result.cookies)) return result;
   return { ...result, cookies: result.cookies.filter((cookie) => !cookieProtected(guard, cookie)) };
@@ -213,7 +253,7 @@ export function patternProtected(guard, domains, pattern) {
   const lower = text.toLowerCase();
   if (domains.some((d) => lower.includes(d))) return true;
   const concrete = text.replace(/\\(.)/g, '$1').replace(/\*/g, '').replace(/\?/g, 'a');
-  return urlProtected(guard, concrete);
+  return urlProtected(guard, concrete, { readOnly: true });
 }
 
 function globRegExp(pattern) {
