@@ -53,6 +53,7 @@ jobs:
     if: always() && vars.CWS_PUBLISH_ENABLED == 'true' && (needs.release.result == 'success' || (inputs.publish_tag != '' && needs.release.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: chrome-web-store
     permissions:
       contents: read
     steps:
