@@ -49,7 +49,7 @@ before(async () => {
 });
 
 after(async () => {
-  await Promise.all(pool.map(async (browser) => (await browser)?.close()));
+  await Promise.allSettled(pool.map(async (browser) => (await browser)?.close()));
   await fixture?.close();
   if (dir) await rm(dir, { recursive: true, force: true });
 });
