@@ -80,7 +80,7 @@ async function browser() {
   const chrome = await launch({
     roots: [['/', 'test/integration/page/']],
     coverage: [],
-    extensions: ['extension/', 'test/integration/fixture-extension/'],
+    extensions: ['extension/'],
     args: ['--ignore-certificate-errors', `--host-resolver-rules=${rules}`],
   });
   const cdp = chrome.cdp;
