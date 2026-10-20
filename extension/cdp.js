@@ -365,8 +365,15 @@ class Connection {
 
   post(message) {
     if (this.closed) return;
+    let out;
     try {
-      this.port.postMessage(redacted(message));
+      out = redacted(message);
+    } catch (error) {
+      if (typeof message?.id !== 'number') return;
+      out = { id: message.id, error: String(error?.message ?? error) };
+    }
+    try {
+      this.port.postMessage(out);
     } catch {
       return undefined;
     }

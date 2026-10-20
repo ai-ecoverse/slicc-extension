@@ -213,6 +213,10 @@ const SCHEME = /[a-z0-9+.-]/i;
 const URL_END = /[\s"'<>`\u0000-\u001f]/;
 const BOUNDARY = /[\s<>"'`=,;([{]/;
 const SLASHES = /[\\/]{2}/g;
+const JOINS = new Set([',', ';', '(', ')']);
+const NEXT_URL = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]{2}[^\\/]/i;
+export const KEY_COLLISION =
+  'slicc: refused: two keys of this payload reduce to the same protected origin';
 const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
 const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
 const TARGETS = new Set(['location', 'content-location', 'refresh', 'link']);
@@ -246,9 +250,19 @@ function judged(text: string, start: number, end: number, prefix: string): Span 
   return { start, end, url, hit: urlProtected(url) };
 }
 
+function urlEnd(text: string, from: number): number {
+  let end = from;
+  while (end < text.length && !URL_END.test(text[end] ?? '')) {
+    if (JOINS.has(text[end] ?? '') && NEXT_URL.test(text.slice(end + 1, end + 40))) {
+      return text[end - 1] === ')' && end - 1 > from ? end - 1 : end;
+    }
+    end += 1;
+  }
+  return end;
+}
+
 function urlAt(text: string, at: number): Span {
-  let end = at + 2;
-  while (end < text.length && !URL_END.test(text[end] ?? '')) end += 1;
+  const end = urlEnd(text, at + 2);
   const miss = { start: at, end, url: '', hit: false };
   if (end === at + 2 || /[\\/]/.test(text[at + 2] ?? '')) return miss;
   if (text[at - 1] !== ':') {
@@ -272,7 +286,7 @@ function spans(text: unknown): Span[] {
   for (let found = SLASHES.exec(text); found; found = SLASHES.exec(text)) {
     const span = urlAt(text, found.index);
     if (span.hit) out.push(span);
-    SLASHES.lastIndex = Math.max(span.end, found.index + 2);
+    SLASHES.lastIndex = span.hit ? Math.max(span.end, found.index + 2) : found.index + 2;
   }
   return out;
 }
@@ -417,6 +431,14 @@ function withHeaders(value: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+function redactKeys(source: Record<string, unknown>): Record<string, unknown> {
+  const keys = Object.keys(source);
+  const renamed = keys.map((key) => redactText(key));
+  if (renamed.every((key, index) => key === keys[index])) return source;
+  if (new Set(renamed).size !== renamed.length) throw new Error(KEY_COLLISION);
+  return Object.fromEntries(keys.map((key, index) => [renamed[index], source[key]]));
+}
+
 export function redactProtected<T>(value: T): T {
   if (typeof value === 'string') return redactText(value) as T;
   if (value === null || typeof value !== 'object') return value;
@@ -431,7 +453,7 @@ export function redactProtected<T>(value: T): T {
     return out as T;
   }
   const original = value as Record<string, unknown>;
-  const source = withHeaders(original);
+  const source = redactKeys(withHeaders(original));
   let out = source;
   for (const [key, item] of Object.entries(source)) {
     const next = redactProtected(item);
