@@ -34,7 +34,7 @@
     "esbuild": "0.28.2",
     "fake-indexeddb": "6.2.5",
     "jsdom": "30.1.2",
-    "lefthook": "2.2.1",
+    "lefthook": "2.2.2",
     "playwright-core": "1.64.0",
     "semantic-release": "25.0.9",
     "typescript": "7.0.2",
