@@ -72,6 +72,30 @@ function handle(req, res, body) {
         (c) => c.head_sha === m[1] && c.name === url.searchParams.get('check_name')
       ),
     });
+  if ((m = /^\/repos\/o\/r\/statuses\/([0-9a-f]{40})$/.exec(p)) && req.method === 'POST') {
+    const st = {
+      ...body,
+      id: state.nextId++,
+      creator: { login: 'github-actions[bot]' },
+      sha: m[1],
+    };
+    state.statuses.unshift(st);
+    state.verdicts.push({
+      name: body.context,
+      head_sha: m[1],
+      status: 'completed',
+      conclusion: body.state,
+      output: { title: body.description, summary: body.description },
+      target_url: body.target_url,
+    });
+    return reply(res, 201, st);
+  }
+  if ((m = /^\/repos\/o\/r\/commits\/([0-9a-f]{40})\/statuses$/.exec(p)))
+    return reply(
+      res,
+      200,
+      state.statuses.filter((x) => x.sha === m[1])
+    );
   if (p === '/repos/o/r/check-runs' && req.method === 'POST') {
     const c = {
       ...body,
@@ -209,6 +233,8 @@ const receipt = (head, status = 'PASS', touched = []) =>
 
 function reset() {
   state.checks = [];
+  state.verdicts = [];
+  state.statuses = [];
   state.reviews = [];
   state.artifacts = [];
   state.workflowRuns = [];
@@ -236,7 +262,7 @@ async function decided(p) {
     SUMMARY: p.outputs.summary ?? '',
     ARTIFACTS: 'success',
   });
-  return { r, check: state.checks.at(-1) };
+  return { r, check: state.verdicts.at(-1) };
 }
 
 test('a docs and tests pull request gets an explicit cert-review success without a review', async () => {
@@ -318,7 +344,7 @@ test('a plan that left nothing fails the check', async () => {
     ARTIFACTS: 'success',
   });
   assert.equal(r.code, 1);
-  assert.equal(state.checks.at(-1).conclusion, 'failure');
+  assert.equal(state.verdicts.at(-1).conclusion, 'failure');
 });
 
 async function post(verdict, setup = () => {}, env2 = {}) {
@@ -336,7 +362,7 @@ async function post(verdict, setup = () => {}, env2 = {}) {
     env.VERDICT = file;
   }
   const r = await run('post.mjs', env);
-  return { r, check: state.checks.at(-1), review: state.reviews.at(-1) };
+  return { r, check: state.verdicts.at(-1), review: state.reviews.at(-1) };
 }
 
 const v2 = (extra) => ({ schema: 'cert-review/v2', head: shas.code, ...extra });
@@ -474,7 +500,7 @@ async function group(
       members: [{ pr: 7, head: shas.code, status: 'PASS' }],
     }),
   });
-  return { r, check: state.checks.find((c) => c.head_sha === groupHead) };
+  return { r, check: state.verdicts.find((c) => c.head_sha === groupHead) };
 }
 
 test('the merge group passes only on a member cert-review that main’s pull_request_target run certified', async () => {
@@ -493,10 +519,10 @@ test('the merge group passes only on a member cert-review that main’s pull_req
     pull_requests: [{ number: 7, base: { ref: 'staging' } }],
   });
   assert.equal(staging.check.conclusion, 'failure');
-  assert.match(staging.check.output.summary, /not for #7 into main/);
+  assert.match(staging.r.stdout, /not for #7 into main/);
   const pending = await groupOf([runOf(9, '2026-10-19T00:00:00Z', { status: 'in_progress' })], {});
   assert.equal(pending.check.conclusion, 'failure');
-  assert.match(pending.check.output.summary, /still in_progress/);
+  assert.match(pending.r.stdout, /still in_progress/);
 });
 
 function runOf(id, created, extra = {}) {
@@ -535,7 +561,7 @@ async function groupOf(runs, jobs, extra = {}) {
       members: [{ pr: 7, head: shas.code, status: 'PASS' }],
     }),
   });
-  return { r, check: state.checks.find((c) => c.head_sha === groupHead) };
+  return { r, check: state.verdicts.find((c) => c.head_sha === groupHead) };
 }
 
 const skippedAll = [
@@ -564,7 +590,7 @@ test('the merge group skips only noop runs: a newer cancelled run is never passe
     }
   );
   assert.equal(cancelled.check.conclusion, 'failure');
-  assert.match(cancelled.check.output.summary, /did not certify it \(post: cancelled\)/);
+  assert.match(cancelled.r.stdout, /did not certify it \(post: cancelled\)/);
 });
 
 test('a pull request into another branch is refused, and an edit that keeps the base is a noop', async () => {
@@ -635,7 +661,7 @@ test('injection text in a docs-only pull request fails it, though no review runs
     ARTIFACTS: 'success',
   });
   assert.equal(r.code, 1, r.stdout);
-  assert.equal(state.checks.at(-1).conclusion, 'failure');
+  assert.equal(state.verdicts.at(-1).conclusion, 'failure');
   assert.deepEqual(
     state.reviews.at(-1).comments.map((c) => [c.path, c.line]),
     [['README.md', 3]]
@@ -667,7 +693,7 @@ test('an injection string in an added line fails the change even when the review
     VERDICT: file,
   });
   assert.equal(r.code, 1, r.stdout);
-  assert.equal(state.checks.at(-1).conclusion, 'failure');
+  assert.equal(state.verdicts.at(-1).conclusion, 'failure');
   const review = state.reviews.at(-1);
   assert.equal(review.event, 'REQUEST_CHANGES');
   assert.deepEqual(
@@ -816,7 +842,7 @@ for (const [name, text] of [
     assert.equal(check.output.title, 'incomplete: verdict carries a secret');
     assert.equal(state.reviews.length, 0);
     assert.doesNotMatch(
-      JSON.stringify(state.checks),
+      JSON.stringify(state.verdicts),
       /bedrock-key-value|ghp_|AKIAABCD|BEGIN PRIVATE/
     );
   });
@@ -879,7 +905,7 @@ for (const [name, setup] of [
   test(`post fails closed on a second cert-review writer: ${name}`, async () => {
     const { r } = await post(v2({ verdict: 'pass', summary: 'fine', comments: [] }), setup);
     assert.equal(r.code, 1, r.stdout);
-    const ours = state.checks.at(-1);
+    const ours = state.verdicts.at(-1);
     assert.equal(ours.conclusion, 'failure');
     assert.equal(ours.output.title, 'another workflow wrote cert-review');
     assert.equal(state.issues.length, 1);
@@ -918,7 +944,7 @@ test('the merge group fails closed on a second cert-review writer on its head', 
     }),
   });
   assert.equal(r.code, 1, r.stdout);
-  const ours = state.checks.at(-1);
+  const ours = state.verdicts.at(-1);
   assert.equal(ours.conclusion, 'failure');
   assert.equal(ours.output.title, 'another workflow wrote cert-review');
   assert.equal(state.issues.length, 1);
@@ -964,7 +990,7 @@ async function generic(verdict) {
     env.VERDICT = file;
   }
   const r = await run('post.mjs', env);
-  return { r, check: state.checks.at(-1), review: state.reviews.at(-1) };
+  return { r, check: state.verdicts.at(-1), review: state.reviews.at(-1) };
 }
 
 test('generic instruction-shaped text is a note, not a failure, and is flagged to the review as suspect', async () => {
@@ -1065,7 +1091,7 @@ test('the merge group waits for a queued member run that then completes, under o
     { deadline: '50' }
   );
   assert.equal(stuck.check.conclusion, 'failure');
-  assert.match(stuck.check.output.summary, /still queued/);
+  assert.match(stuck.r.stdout, /still queued/);
 });
 
 test('runs are found by path, not by workflow name: a required-workflow run with a blank name and a ref-pinned path counts', async () => {
@@ -1100,7 +1126,7 @@ test('a run whose workflow lives in another repository never counts, even with t
     { 31: [{ name: 'cert / post', conclusion: 'success' }] }
   );
   assert.equal(foreign.check.conclusion, 'failure');
-  assert.match(foreign.check.output.summary, /no cert-review run of/);
+  assert.match(foreign.r.stdout, /no cert-review run of/);
   const staging = await groupOf(
     [
       runOf(32, '2026-10-19T04:00:00Z', {
@@ -1109,5 +1135,58 @@ test('a run whose workflow lives in another repository never counts, even with t
     ],
     { 32: [{ name: 'cert / post', conclusion: 'success' }] }
   );
-  assert.match(staging.check.output.summary, /no cert-review run of/);
+  assert.match(staging.r.stdout, /no cert-review run of/);
+});
+
+const statusOf = (extra) => ({
+  id: 900 + state.nextId++,
+  sha: shas.code,
+  context: 'cert-review',
+  state: 'success',
+  description: 'pass',
+  creator: { login: 'github-actions[bot]' },
+  ...extra,
+});
+
+for (const [name, setup] of [
+  [
+    'a status from another account',
+    () => state.statuses.push(statusOf({ creator: { login: 'someone' }, target_url: '' })),
+  ],
+  [
+    'a status naming no run',
+    () => state.statuses.push(statusOf({ target_url: 'https://github.example/o/r/pull/7' })),
+  ],
+  [
+    'a success status over a run whose post failed',
+    () => {
+      writer(560, '.github/workflows/cert-review.yml', 'pull_request_target', 'failure');
+      state.statuses.push(
+        statusOf({ target_url: 'https://github.example/o/r/actions/runs/560/attempts/1' })
+      );
+    },
+  ],
+]) {
+  test(`post fails closed on a second cert-review status writer: ${name}`, async () => {
+    const { r } = await post(v2({ verdict: 'pass', summary: 'fine', comments: [] }), setup);
+    assert.equal(r.code, 1, r.stdout);
+    assert.equal(state.verdicts.at(-1).output.title, 'another workflow wrote cert-review');
+    assert.equal(state.issues.length, 1);
+  });
+}
+
+test('the verdict is a commit status bound to the run attempt, and an earlier genuine status is not a second writer', async () => {
+  const { r, check } = await post(v2({ verdict: 'pass', summary: 'fine', comments: [] }), () => {
+    writer(561, '.github/workflows/cert-review.yml', 'pull_request_target', 'failure');
+    state.statuses.push(
+      statusOf({
+        state: 'failure',
+        target_url: 'https://github.example/o/r/actions/runs/561/attempts/1',
+      })
+    );
+  });
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(check.conclusion, 'success');
+  assert.equal(check.target_url, 'https://github.example/o/r/actions/runs/4242/attempts/1');
+  assert.equal(state.issues.length, 0);
 });
