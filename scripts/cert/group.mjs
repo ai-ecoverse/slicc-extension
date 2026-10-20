@@ -1,5 +1,15 @@
 import { readFileSync } from 'node:fs';
-import { alert, api, foreignWriters, output, setCheck, sha, summary, WORKFLOW } from './lib.mjs';
+import {
+  alert,
+  api,
+  foreignWriters,
+  ourRun,
+  output,
+  setCheck,
+  sha,
+  summary,
+  WORKFLOW,
+} from './lib.mjs';
 
 const env = process.env;
 const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
@@ -13,14 +23,13 @@ const NOOP = ['cert / self-guard', 'cert / plan'];
 const WAIT = Number(env.CERT_GROUP_WAIT_MS ?? 15000);
 
 async function runsOf(memberHead) {
-  const file = WORKFLOW.split('/').pop();
   const data = await gh.call(
-    `actions/workflows/${file}/runs?event=pull_request_target&head_sha=${memberHead}&per_page=50`
+    `actions/runs?event=pull_request_target&head_sha=${memberHead}&per_page=100`
   );
   return data.workflow_runs
     .filter(
       (r) =>
-        r.path === WORKFLOW &&
+        ourRun(r, env.GITHUB_REPOSITORY) &&
         r.event === 'pull_request_target' &&
         r.head_sha === memberHead &&
         r.repository?.full_name === env.GITHUB_REPOSITORY

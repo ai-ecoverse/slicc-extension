@@ -32,9 +32,9 @@ env:
     scripts/is-main.mjs
   FALLBACK: |
     const e = process.env;
-    const run = `${e.GITHUB_SERVER_URL}/${e.GITHUB_REPOSITORY}/actions/runs/${e.GITHUB_RUN_ID}`;
-    const body = { name: 'cert-review', head_sha: e.HEAD_SHA, external_id: `v2:${e.PR}:${e.HEAD_SHA}:${e.GITHUB_RUN_ID}:${e.GITHUB_RUN_ATTEMPT}`, details_url: run, status: 'completed', conclusion: 'failure', completed_at: new Date().toISOString(), output: { title: `incomplete: ${e.STAGE}; re-run`, summary: `cert-review did not finish its ${e.STAGE}: re-run the failed jobs (${run}).` } };
-    const r = await fetch(`${e.GITHUB_API_URL}/repos/${e.GITHUB_REPOSITORY}/check-runs`, { method: 'POST', headers: { authorization: `Bearer ${e.GH_TOKEN}`, accept: 'application/vnd.github+json' }, body: JSON.stringify(body) });
+    const run = `${e.GITHUB_SERVER_URL}/${e.GITHUB_REPOSITORY}/actions/runs/${e.GITHUB_RUN_ID}/attempts/${e.GITHUB_RUN_ATTEMPT}`;
+    const body = { state: 'failure', context: 'cert-review', description: `incomplete: ${e.STAGE}; re-run`, target_url: run };
+    const r = await fetch(`${e.GITHUB_API_URL}/repos/${e.GITHUB_REPOSITORY}/statuses/${e.HEAD_SHA}`, { method: 'POST', headers: { authorization: `Bearer ${e.GH_TOKEN}`, accept: 'application/vnd.github+json' }, body: JSON.stringify(body) });
     console.log(`cert-review: failure on ${e.HEAD_SHA} (incomplete: ${e.STAGE}), HTTP ${r.status}`);
     process.exit(1);
 
@@ -208,7 +208,8 @@ jobs:
     permissions:
       contents: read
       actions: read
-      checks: write
+      checks: read
+      statuses: write
       issues: write
       pull-requests: write
     steps:
@@ -276,7 +277,8 @@ jobs:
     permissions:
       contents: read
       actions: read
-      checks: write
+      checks: read
+      statuses: write
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
