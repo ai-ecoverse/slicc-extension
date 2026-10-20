@@ -1241,3 +1241,34 @@ test('the merge group reads every page of runs on a member head', async () => {
   );
   assert.equal(r.check.conclusion, 'success', r.r.stdout);
 });
+
+test('the plan reads the live pull request, so a re-run after marking ready reviews it and a moved head fails that run', async () => {
+  reset();
+  const file = event('rerun', shas.code, { pull: { draft: true }, event: { action: 'opened' } });
+  state.pulls['7'] = { ...state.pulls['7'], draft: false };
+  const ready = await run('plan.mjs', {
+    GITHUB_EVENT_PATH: file,
+    GUARD: 'PASS',
+    RECEIPT: receipt(shas.code),
+  });
+  assert.equal(ready.outputs.kind, 'review', ready.stdout);
+  state.pulls['7'] = { ...state.pulls['7'], draft: true };
+  const again = await run('plan.mjs', {
+    GITHUB_EVENT_PATH: file,
+    GUARD: 'PASS',
+    RECEIPT: receipt(shas.code),
+  });
+  assert.equal(again.outputs.title, 'draft: not reviewed (mark ready)');
+  state.pulls['7'] = {
+    ...state.pulls['7'],
+    draft: false,
+    head: { sha: shas.docs, repo: { full_name: 'o/r' } },
+  };
+  const moved = await run('plan.mjs', {
+    GITHUB_EVENT_PATH: file,
+    GUARD: 'PASS',
+    RECEIPT: receipt(shas.code),
+  });
+  assert.equal(moved.outputs.conclusion, 'failure');
+  assert.match(moved.outputs.title, /head moved/);
+});

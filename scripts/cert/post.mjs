@@ -89,8 +89,16 @@ async function tidy() {
 
 async function current() {
   const live = await gh.call(`pulls/${n}`);
-  if (live.state === 'open' && live.head.sha === head) return true;
-  console.log(`not posting: #${n} is ${live.state} at ${live.head.sha}, this run is for ${head}`);
+  if (
+    live.state === 'open' &&
+    live.head.sha === head &&
+    live.base?.ref === 'main' &&
+    live.draft !== true
+  )
+    return true;
+  console.log(
+    `not posting: #${n} is ${live.state}${live.draft ? ' draft' : ''} at ${live.head.sha} into ${live.base?.ref}, this run is for ${head}`
+  );
   return false;
 }
 

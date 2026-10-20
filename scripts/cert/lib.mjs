@@ -694,6 +694,15 @@ export async function alert(gh, ref, foreign, runUrl) {
   return 'opened';
 }
 
+export async function livePull(gh, event) {
+  const live = await gh.call(`pulls/${event.number}`);
+  if (live.head?.sha !== event.head.sha)
+    throw new Error(
+      `#${event.number} is now at ${live.head?.sha}, this run is for ${event.head.sha}`
+    );
+  return live;
+}
+
 export function setCheck(gh, { head, runUrl, conclusion, title }) {
   const attempt = process.env.GITHUB_RUN_ATTEMPT ?? '1';
   return gh.call(`statuses/${sha(head)}`, 'POST', {

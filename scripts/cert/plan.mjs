@@ -1,10 +1,12 @@
 import { readFileSync } from 'node:fs';
 import {
+  api,
   baseOf,
   decide,
   diffOf,
   diffSize,
   globs,
+  livePull,
   noop,
   output,
   sha,
@@ -30,15 +32,28 @@ if (
   process.exit(0);
 }
 
-const fork = pull.head.repo?.full_name !== repo;
+let live;
+try {
+  live = await livePull(api(repo), pull);
+} catch (err) {
+  console.log(`cert-review plan: failure #${pull.number} ${head}: ${err.message}`);
+  output({
+    kind: 'decided',
+    conclusion: 'failure',
+    title: 'incomplete: the head moved; a newer run reviews it',
+    summary: `${err.message}. This run's head is not the pull request's head any more.`,
+  });
+  process.exit(0);
+}
+const fork = live.head.repo?.full_name !== repo;
 const files = fork ? [] : diffOf(baseOf(env, pull), head);
 const paths = touchedPaths(files);
 const d = decide({
   fork,
   repo,
-  baseRef: pull.base.ref,
+  baseRef: live.base.ref,
   size: diffSize(files),
-  draft: pull.draft === true,
+  draft: live.draft === true,
   approval: env.APPROVAL,
   guard: env.GUARD,
   receipt: env.RECEIPT,
