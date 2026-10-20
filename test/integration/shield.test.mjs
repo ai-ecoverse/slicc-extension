@@ -182,8 +182,12 @@ for (const transport of transports) {
           if (guardedId) await h.close(guardedId);
           const openerAlive = await h.evaluate(sessionId, '1 + 1');
           const openerDetached = h.detached(sessionId);
+          const own = [sessionId, attached.result?.sessionId, guarded.attach.result?.sessionId];
           const attachedTo = h.events
-            .filter((event) => event.method === 'Target.attachedToTarget')
+            .filter(
+              (event) =>
+                event.method === 'Target.attachedToTarget' && !own.includes(event.params?.sessionId)
+            )
             .map((event) => event.params?.targetInfo?.url);
           if (plainId) await h.close(plainId);
           await h.close(targetId);

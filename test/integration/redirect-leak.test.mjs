@@ -337,11 +337,12 @@ for (const transport of transports) {
           const separate = fragments([run.events, run.replies], n);
           assert.deepEqual(separate, [], `a urlFragment carries the token: ${separate}`);
           if (how !== 'link') {
-            const attached = run.events.filter((e) => e.method === 'Target.attachedToTarget');
-            for (const event of attached) {
-              const info = event.params.targetInfo;
-              assert.deepEqual([info?.url, info?.title], [origin, origin], JSON.stringify(info));
-            }
+            const again = reply(run, 'Target.attachToTarget')?.result?.sessionId;
+            const attached = run.events.filter(
+              (e) => e.method === 'Target.attachedToTarget' && e.params.sessionId === again
+            );
+            const fresh = attached.at(-1)?.params.targetInfo;
+            assert.deepEqual([fresh?.url, fresh?.title], [origin, origin], JSON.stringify(fresh));
             const info = reply(run, 'Target.getTargetInfo')?.result?.targetInfo;
             assert.deepEqual([info?.url, info?.title], [origin, origin], JSON.stringify(info));
             const tree = reply(run, 'Page.getFrameTree')?.result?.frameTree;
@@ -500,12 +501,13 @@ for (const transport of transports) {
 
   for (const stage of ['Request', 'Response']) {
     const method = stage === 'Request' ? 'Fetch.continueRequest' : 'Fetch.continueResponse';
-    test(`${transport} control: ${method} overriding the url to an ordinary callback answers`, async (t) => {
+    test(`${transport} control: ${method} overriding the ${stage === 'Request' ? 'url to an ordinary callback is refused too, since the guard cannot see where it redirects' : 'headers with an ordinary Location answers'}`, async (t) => {
       const page = await client(t, transport);
       const n = unique(`${transport}overrideordinary${stage}`);
       const run = await override(page, n, 'ordinary', stage);
       const answer = replies(run, method)[0];
-      assert.ok(answer && !answer.error, `${method}: ${JSON.stringify(answer)}`);
+      if (stage === 'Request') assert.ok(refused(answer), `${method}: ${JSON.stringify(answer)}`);
+      else assert.ok(answer && !answer.error, `${method}: ${JSON.stringify(answer)}`);
     });
   }
 }

@@ -249,8 +249,8 @@ for (const transport of transports) {
     } else {
       assert.match(
         String(run.discover.error),
-        /^No tab attached for sessionId/,
-        'six offers no browser-wide discovery, so it has nothing to announce'
+        /^slicc: refused: /,
+        'six refuses browser-wide discovery, so it has nothing to announce'
       );
       assert.ok(run.discoverOnSession.error, 'six has no discovery on a page session either');
       assert.deepEqual(run.discovered, [], 'six announced nothing');

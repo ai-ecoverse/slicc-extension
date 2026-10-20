@@ -846,7 +846,7 @@ test('pending url, opener, and a later navigation stay off protected origins', a
     params: { expression: '1' },
     sessionId: '8',
   });
-  assert.match(later.error, /No tab attached/);
+  assert.match(later.error, /^slicc: refused: /);
   assert.equal(user(api).length, 0);
   api.fire(8, 'Runtime.consoleAPICalled', { type: 'log' });
   assert.equal(
@@ -911,7 +911,7 @@ test('pending url, opener, and a later navigation stay off protected origins', a
     params: { expression: '1' },
     sessionId: '8',
   });
-  assert.match(moved.error, /No tab attached/);
+  assert.match(moved.error, /^slicc: refused: /);
   cdp.close();
 });
 
@@ -1492,7 +1492,7 @@ test('S7-3 setDiscoverTargets emits created, changed and destroyed, and detaches
     params: {},
     sessionId: '20',
   });
-  assert.match(after.error, /No tab attached/);
+  assert.match(after.error, /^slicc: refused: /);
   api.gone(8);
   await tick();
   assert.deepEqual(
