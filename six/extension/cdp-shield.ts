@@ -257,6 +257,16 @@ export function redactText(text: string): string {
   return last === 0 ? text : out + text.slice(last);
 }
 
+export function namesProtectedUrl(text: unknown): boolean {
+  if (typeof text !== 'string' || !text.includes('://')) return false;
+  for (let at = text.indexOf('://'); at >= 0; ) {
+    const span = urlAt(text, at);
+    if (span.hit) return true;
+    at = text.indexOf('://', Math.max(span.end, at + 3));
+  }
+  return false;
+}
+
 function urlNamed(text: unknown): boolean {
   return typeof text === 'string' && text !== '' && urlProtected(text);
 }
@@ -287,6 +297,23 @@ export function redactProtected<T>(value: T): T {
     delete out['urlFragment'];
   }
   return out as T;
+}
+
+export function headersNameProtected(headers: unknown): boolean {
+  if (Array.isArray(headers)) {
+    return headers.some((header) => isObj(header) && namesProtectedUrl(header['value']));
+  }
+  if (!isObj(headers)) return false;
+  return Object.values(headers).some(namesProtectedUrl);
+}
+
+function responseNamesProtected(method: string, params: CDPPayload): boolean {
+  const response = params['response'];
+  const redirect = params['redirectResponse'];
+  if (isObj(response) && headersNameProtected(response['headers'])) return true;
+  if (isObj(redirect) && headersNameProtected(redirect['headers'])) return true;
+  if (!method.endsWith('responseReceivedExtraInfo')) return false;
+  return headersNameProtected(params['headers']) || namesProtectedUrl(params['headersText']);
 }
 
 export function mentions(value: unknown): boolean {
@@ -490,6 +517,7 @@ export class TabShield {
   private readonly streams = new Bounded<true>(500);
   private readonly failedDocuments = new Bounded<true>(200);
   private readonly hiddenFrames = new Bounded<true>(1000);
+  private readonly namedBodies = new Bounded<true>(2000);
   private readonly worlds = new Worlds();
   private clientFetch: ClientFetch | null = null;
   private mainFrameId = '';
@@ -739,6 +767,7 @@ export class TabShield {
       const id = str(params['requestId']);
       if (!id || !this.forwarded.has(id)) refuse(PAUSE_REFUSAL);
       if (FETCH_READS.has(method)) {
+        if (this.namedBodies.has(id)) refuse(PROTECTED_RULES.refusal);
         const read = this.bodyReads.get(id);
         if (read !== undefined && read !== method) refuse(BODY_READ_REFUSAL);
         this.bodyReads.set(id, method);
@@ -848,6 +877,10 @@ export class TabShield {
       this.failedDocuments.set((requestUrl(paused) ?? '').split('#')[0] ?? '', true);
       this.answer('Fetch.failRequest', { requestId: id, errorReason: 'BlockedByClient' });
       return [];
+    }
+    if (headersNameProtected(paused['responseHeaders'])) {
+      this.namedBodies.set(id, true);
+      if (networkId) this.requests.set(networkId, true);
     }
     const wanted =
       this.clientFetch?.patterns.some((pattern) => patternMatches(pattern, paused)) === true;
@@ -984,7 +1017,13 @@ export class TabShield {
       this.held.delete(id);
       return [];
     }
-    if (mentions(params)) return [];
+    if (mentions(params) || responseNamesProtected(event.method, params)) {
+      if (id) {
+        this.requests.set(id, true);
+        this.held.delete(id);
+      }
+      return [];
+    }
     if (id && event.method.endsWith('ExtraInfo')) {
       stripProtectedAssociated(params);
       if (this.requests.get(id) === undefined) {

@@ -30,6 +30,7 @@ import {
   extensionOrigin,
   foreignFrame,
   frameIn,
+  headersNameProtected,
   initScriptPrefix,
   namesProtectedStorage,
   PROFILED,
@@ -41,6 +42,7 @@ import {
   refusedOutright,
   requestKey,
   requestUrl,
+  responseNamesProtected,
   sameDocument,
   scopedBinding,
   strictGuard,
@@ -833,6 +835,8 @@ class Connection {
       await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
       return;
     }
+    const named = headersNameProtected(params.responseHeaders, anyProtected);
+    if (named && typeof params.networkId === 'string') tab.requests.set(params.networkId, true);
     const [first] = this.candidates(tabId, params);
     if (first === undefined) {
       if (method === 'Fetch.authRequired') {
@@ -845,7 +849,7 @@ class Connection {
       await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
       return;
     }
-    tab.paused.set(requestId, { owner: first, params, method });
+    tab.paused.set(requestId, { owner: first, params, method, named });
     this.post({ method, params, sessionId: first });
   }
 
@@ -909,6 +913,7 @@ class Connection {
     const entry = tab.paused.get(textOf(params.requestId));
     if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
     if (FETCH_READS.has(method)) {
+      if (entry.named) refusal();
       if (entry.read !== undefined && entry.read !== method) throw new Error(BODY_READ);
       entry.read = method;
     }
@@ -1113,7 +1118,13 @@ class Connection {
     }
     let out = params;
     if (method.startsWith('Network.')) out = stripProtectedCookies(guard, out);
-    if (this.mentions(out)) return;
+    if (this.mentions(out) || responseNamesProtected(method, out, anyProtected)) {
+      if (id !== undefined) {
+        tab.requests.set(id, true);
+        tab.held.delete(id);
+      }
+      return;
+    }
     if (id !== undefined && method.endsWith('ExtraInfo') && known !== false) {
       const held = tab.held.get(id) ?? [];
       held.push([method, out]);

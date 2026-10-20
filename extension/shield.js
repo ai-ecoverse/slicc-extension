@@ -170,6 +170,16 @@ export function redactText(text, isProtected) {
   return last === 0 ? text : out + text.slice(last);
 }
 
+export function namesProtectedUrl(text, isProtected) {
+  if (typeof text !== 'string' || !text.includes('://')) return false;
+  for (let at = text.indexOf('://'); at >= 0; ) {
+    const span = urlAt(text, at, isProtected);
+    if (span.hit) return true;
+    at = text.indexOf('://', Math.max(span.end, at + 3));
+  }
+  return false;
+}
+
 function urlNamed(text, isProtected) {
   return typeof text === 'string' && text !== '' && isProtected(text);
 }
@@ -199,6 +209,24 @@ export function redactProtected(value, isProtected) {
     delete out.urlFragment;
   }
   return out;
+}
+
+export function headersNameProtected(headers, isProtected) {
+  if (Array.isArray(headers)) {
+    return headers.some((header) => namesProtectedUrl(header?.value, isProtected));
+  }
+  if (headers === null || typeof headers !== 'object') return false;
+  return Object.values(headers).some((value) => namesProtectedUrl(value, isProtected));
+}
+
+export function responseNamesProtected(method, params, isProtected) {
+  if (headersNameProtected(params?.response?.headers, isProtected)) return true;
+  if (headersNameProtected(params?.redirectResponse?.headers, isProtected)) return true;
+  if (!method.endsWith('responseReceivedExtraInfo')) return false;
+  return (
+    headersNameProtected(params.headers, isProtected) ||
+    namesProtectedUrl(params.headersText, isProtected)
+  );
 }
 
 function storageNamed(guard, key, item) {
