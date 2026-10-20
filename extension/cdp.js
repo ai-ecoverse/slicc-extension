@@ -71,6 +71,9 @@ const FETCH_ANSWERS = new Set([
   'Fetch.continueWithAuth',
 ]);
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+const REROUTE =
+  'slicc: refused: Fetch.continueRequest cannot send a request to another url, since the guard cannot see where that url redirects';
 const BODY_READ = 'slicc: refused: this paused response body was already read the other way';
 const ERROR_PAGE_READS = new Set([
   'Page.captureSnapshot',
@@ -713,6 +716,7 @@ class Connection {
         runtime: new Set(),
         requests: new Map(),
         held: new Map(),
+        hops: new Map(),
         paused: new Map(),
       };
       this.state.tabs.set(tabId, tab);
@@ -953,6 +957,7 @@ class Connection {
   checkPaused(tab, method, params, sessionId) {
     const entry = tab.paused.get(textOf(params.requestId));
     if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
+    if (method === 'Fetch.continueRequest' && params.url !== undefined) throw new Error(REROUTE);
     if (FETCH_ANSWERS.has(method) && headersProtected(params, requestUrl(entry.params))) refusal();
     if (FETCH_READS.has(method)) {
       if (entry.named) refusal();
@@ -1161,9 +1166,38 @@ class Connection {
     }
   }
 
+  hop(tabId, tab, method, p) {
+    if (method !== 'Network.requestWillBeSent' || typeof p.requestId !== 'string') return false;
+    const from = textOf(p.redirectResponse?.url);
+    if (!from || urlProtected(guard, from) || !urlProtected(guard, textOf(p.request?.url))) {
+      return false;
+    }
+    if (this.frameProtected(tab, p.frameId) || tab.worlds.hides(p)) return true;
+    tab.requests.set(p.requestId, true);
+    tab.held.delete(p.requestId);
+    if (tab.hops.get(p.requestId) !== 'done') tab.hops.set(p.requestId, 'await');
+    if (tab.hops.size > 500) tab.hops.delete(tab.hops.keys().next().value);
+    this.broadcast(tabId, method, stripProtectedCookies(guard, p));
+    return true;
+  }
+
+  redirectExtra(tabId, tab, method, params, known) {
+    if (method !== 'Network.responseReceivedExtraInfo') return false;
+    if (!REDIRECTS.has(params.statusCode) || typeof params.requestId !== 'string') return false;
+    const id = params.requestId;
+    const awaited = tab.hops.get(id) === 'await';
+    const named = responseNamesProtected(method, params, anyProtected);
+    if (known === true ? !awaited : !named) return false;
+    tab.hops.set(id, 'done');
+    tab.requests.set(id, true);
+    this.broadcast(tabId, method, stripProtectedCookies(guard, params));
+    return true;
+  }
+
   deliver(tabId, tab, method, params) {
     const id = typeof params?.requestId === 'string' ? params.requestId : undefined;
     const known = this.classify(tab, params);
+    if (this.redirectExtra(tabId, tab, method, params, known)) return;
     if (known === true) {
       tab.held.delete(id);
       return;
@@ -1333,6 +1367,7 @@ class Connection {
       this.watchChild(tabId, method, p);
       return;
     }
+    if (this.hop(tabId, tab, method, p)) return;
     if (this.watch(tabId, tab, method, p)) return;
     if (profiled(method) && tab.worlds.foreign) return;
     if (tab.worlds.hides(p)) return;

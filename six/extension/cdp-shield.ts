@@ -131,6 +131,9 @@ const STREAM_REFUSAL = 'slicc: refused: stream handle was not opened through the
 const BODY_READ_REFUSAL =
   'slicc: refused: this paused response body was already read the other way';
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+const REROUTE_REFUSAL =
+  'slicc: refused: Fetch.continueRequest cannot send a request to another url, since the guard cannot see where that url redirects';
 const PAUSE_REFUSAL = 'slicc: refused: request was not paused toward this client';
 
 export const GUARD_FETCH_PATTERN: CDPPayload = {
@@ -719,6 +722,7 @@ export class TabShield {
   private readonly failedDocuments = new Bounded<true>(200);
   private readonly hiddenFrames = new Bounded<true>(1000);
   private readonly namedBodies = new Bounded<true>(2000);
+  private readonly hops = new Bounded<string>(500);
   private readonly worlds = new Worlds();
   private clientFetch: ClientFetch | null = null;
   private mainFrameId = '';
@@ -968,6 +972,7 @@ export class TabShield {
   }
 
   private admitPaused(method: string, id: string, params: CDPPayload): void {
+    if (method === 'Fetch.continueRequest' && params['url'] !== undefined) refuse(REROUTE_REFUSAL);
     if (answerNamesProtected(params, this.pausedUrls.get(id) ?? '')) {
       refuse(PROTECTED_RULES.refusal);
     }
@@ -1227,9 +1232,40 @@ export class TabShield {
     return { method, params: { ...params, targetInfo: redacted(info) } };
   }
 
+  private redirectHop(params: CDPPayload, id: string): boolean {
+    const redirect = params['redirectResponse'];
+    const from = isObj(redirect) ? str(redirect['url']) : undefined;
+    if (!from || urlProtected(from) || !urlProtected(requestUrl(params) ?? '')) return false;
+    this.requests.set(id, true);
+    this.held.delete(id);
+    if (this.hops.get(id) !== 'done') this.hops.set(id, 'await');
+    return true;
+  }
+
+  private redirectExtra(params: CDPPayload, id: string): boolean {
+    const status = params['statusCode'];
+    if (typeof status !== 'number' || !REDIRECTS.has(status)) return false;
+    const awaited = this.hops.get(id) === 'await';
+    const named = responseNamesProtected('Network.responseReceivedExtraInfo', params);
+    if (this.requests.get(id) === true ? !awaited : !named) return false;
+    this.hops.set(id, 'done');
+    this.requests.set(id, true);
+    stripProtectedAssociated(params);
+    return true;
+  }
+
+  private redirected(event: ShieldEvent, id: string | undefined): boolean {
+    const params = event.params ?? {};
+    if (!id) return false;
+    if (event.method === 'Network.requestWillBeSent') return this.redirectHop(params, id);
+    if (event.method === 'Network.responseReceivedExtraInfo') return this.redirectExtra(params, id);
+    return false;
+  }
+
   private deliver(event: ShieldEvent): ShieldEvent[] {
     const params = event.params ?? {};
     const id = str(params['requestId']);
+    if (this.redirected(event, id)) return [event];
     if (id && this.requests.get(id) === true) {
       this.held.delete(id);
       return [];
