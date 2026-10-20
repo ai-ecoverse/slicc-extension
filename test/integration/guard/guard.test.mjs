@@ -118,10 +118,42 @@ async function browser() {
     return id ?? tabId;
   }
 
+  const given = new Map();
+
+  function asGiven(value) {
+    if (Array.isArray(value)) return value.map(asGiven);
+    if (!value || typeof value !== 'object') return value;
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      out[key] = key === 'targetId' && given.has(item) ? given.get(item) : asGiven(item);
+    }
+    return out;
+  }
+
+  async function tabOf(targetId) {
+    const expression = `chrome.debugger.getTargets().then((list) => list.find((target) => target.id === ${JSON.stringify(targetId)})?.tabId)`;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const tabId = await evaluate(cdp, await workerSession(), expression).catch(() => {
+        worker = undefined;
+        return undefined;
+      });
+      if (typeof tabId === 'number') {
+        real.set(String(tabId), targetId);
+        given.set(String(tabId), targetId);
+        return String(tabId);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return targetId;
+  }
+
   const observer = {
     async send(method, params = {}, sessionId) {
       const tab = typeof params.targetId === 'string' && /^\d+$/.test(params.targetId);
-      const mapped = tab ? { ...params, targetId: await realTarget(params.targetId) } : params;
+      const ids = tab ? { ...params, targetId: await realTarget(params.targetId) } : params;
+      const apart =
+        method === 'Target.createTarget' && !ids.browserContextId && ids.newWindow === undefined;
+      const mapped = apart ? { ...ids, newWindow: true } : ids;
       if (method === 'Runtime.enable') await cdp.send('Runtime.disable', {}, sessionId);
       return cdp.send(method, mapped, sessionId);
     },
@@ -143,7 +175,7 @@ async function browser() {
     const off = cdp.on(({ method, params, sessionId: from }) => {
       if (method !== 'Runtime.bindingCalled' || from !== sessionId || params.name !== binding)
         return;
-      const event = JSON.parse(params.payload);
+      const event = asGiven(JSON.parse(params.payload));
       events.push(event);
       for (const listener of listeners) listener(event);
     });
@@ -180,13 +212,18 @@ async function browser() {
       transport,
       events,
       async send(method, params, session) {
-        const args = [method, params ?? {}, ...(session === undefined ? [] : [session])];
+        const raw = params?.targetId;
+        const local =
+          typeof raw === 'string' && /^[0-9A-F]{32}$/.test(raw)
+            ? { ...params, targetId: await tabOf(raw) }
+            : (params ?? {});
+        const args = [method, local, ...(session === undefined ? [] : [session])];
         const answer = await evaluate(
           cdp,
           sessionId,
           `h.cdp.send(...${JSON.stringify(args)}).then((result) => ({ ok: true, result: result ?? {} }), (error) => ({ ok: false, message: String(error?.message ?? error), code: error?.code }))`
         );
-        if (answer.ok) return answer.result;
+        if (answer.ok) return asGiven(answer.result);
         const error = new Error(answer.message);
         error.cdp = {
           message: answer.message,
