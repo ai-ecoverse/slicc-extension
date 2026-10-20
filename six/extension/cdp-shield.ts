@@ -211,13 +211,14 @@ const URL_END = /[\s"'<>`\\\u0000-\u001f]/;
 const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
 const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
 
+const AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i;
+
 function originOf(text: string): string {
   try {
     const origin = new URL(text).origin;
-    return origin && origin !== 'null' ? origin : 'about:blank';
-  } catch {
-    return 'about:blank';
-  }
+    if (origin && origin !== 'null') return origin;
+  } catch {}
+  return AUTHORITY.exec(text)?.[0] ?? 'about:blank';
 }
 
 interface Span {
