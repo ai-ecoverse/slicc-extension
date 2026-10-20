@@ -8,9 +8,9 @@
   }
   if (typeof Uint8Array.fromBase64 !== 'function') {
     Uint8Array.fromBase64 = function (b64) {
-      const bin = atob(b64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
       return bytes;
     };
   }
