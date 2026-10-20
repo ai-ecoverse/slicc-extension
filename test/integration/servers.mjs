@@ -75,6 +75,17 @@ export async function pages(tls) {
     if (pathname === '/llms.txt') {
       return response.writeHead(200, { 'content-type': 'text/plain' }).end('# llms');
     }
+    if (pathname === '/hop') {
+      const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
+      const to = {
+        seven: `https://seven.sliccy.ai/auth/callback/p-${mark}?code=${mark}&state=${mark}#f-${mark}`,
+        vault: `https://vault.sliccy.ai/oauth/mcp-callback/p-${mark}?code=${mark}&state=${mark}#f-${mark}`,
+        ordinary: `https://ordinary.test/landing/p-${mark}?code=${mark}&state=${mark}#f-${mark}`,
+      }[searchParams.get('to') ?? 'ordinary'];
+      return response
+        .writeHead(302, { location: to, 'content-type': 'text/html; charset=utf-8' })
+        .end(`<a href="${to}">${to}</a>`);
+    }
     if (pathname === '/redirect') {
       return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();
     }
