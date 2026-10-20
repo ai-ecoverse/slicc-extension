@@ -145,10 +145,9 @@ function handle(req, res, body) {
     return reply(res, 200, { jobs: state.jobs[m[1]] ?? [] });
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/artifacts$/.exec(p)))
     return reply(res, 200, { artifacts: state.artifacts });
-  if (p === '/repos/o/r/commits')
-    return reply(res, 200, [
-      { commit: { committer: { date: state.certChanged ?? '2026-10-01T00:00:00Z' } } },
-    ]);
+  if (p === '/repos/o/r/pulls') return reply(res, 200, state.merged ?? []);
+  if ((m = /^\/repos\/o\/r\/pulls\/(\d+)\/files$/.exec(p)))
+    return reply(res, 200, state.mergedFiles?.[m[1]] ?? []);
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/rerun$/.exec(p)) && req.method === 'POST') {
     state.reruns.push(Number(m[1]));
     return reply(res, 201, {});
@@ -1296,9 +1295,10 @@ test('post never sets success while the live pull request is a draft', async () 
   assert.equal(check.output.title, 'incomplete: not current; re-run');
 });
 
-async function rerunWith(runs, pullExtra = {}, eventExtra = {}, certChanged) {
+async function rerunWith(runs, pullExtra = {}, eventExtra = {}, history = {}) {
   reset();
-  state.certChanged = certChanged;
+  state.merged = history.merged ?? [];
+  state.mergedFiles = history.files ?? {};
   state.workflowRuns = runs;
   const file = event('rerun-helper', shas.code, eventExtra);
   state.pulls['7'] = { ...state.pulls['7'], ...pullExtra };
@@ -1346,9 +1346,24 @@ test('cert-rerun fails visibly when there is no cert-review run to re-run', asyn
   assert.deepEqual(state.reruns, []);
 });
 
-test('cert-rerun refuses to replay a run older than the current cert-review code', async () => {
-  const r = await rerunWith([runOf(49, '2026-10-19T06:00:00Z')], {}, {}, '2026-10-19T07:00:00Z');
-  assert.equal(r.code, 0, r.stdout);
+test('cert-rerun refuses to replay a run whose cert code was overtaken by a later merge, judged by merge time, not commit date', async () => {
+  const runAt = '2026-10-20T04:30:00Z';
+  const merged = [
+    { number: 144, updated_at: '2026-10-20T09:05:00Z', merged_at: '2026-10-20T09:05:00Z' },
+    { number: 139, updated_at: '2026-10-20T04:00:00Z', merged_at: '2026-10-20T04:00:00Z' },
+  ];
+  const files = { 144: [{ filename: 'scripts/cert/plan.mjs' }] };
+  const stale = await rerunWith([runOf(49, runAt)], {}, {}, { merged, files });
+  assert.equal(stale.code, 0, stale.stdout);
   assert.deepEqual(state.reruns, []);
-  assert.match(r.stdout, /cert-review rerun: stale .*push a commit/);
+  assert.match(stale.stdout, /cert-review rerun: stale .*#144 merged/);
+  const docs = await rerunWith(
+    [runOf(50, runAt)],
+    {},
+    {},
+    { merged, files: { 144: [{ filename: 'README.md' }] } }
+  );
+  assert.deepEqual(state.reruns, [50], docs.stdout);
+  const before = await rerunWith([runOf(51, '2026-10-20T09:30:00Z')], {}, {}, { merged, files });
+  assert.deepEqual(state.reruns, [51], before.stdout);
 });

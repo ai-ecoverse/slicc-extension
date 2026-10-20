@@ -38,15 +38,28 @@ if (newest.status !== 'completed')
     'skipped',
     `run ${newest.id} on ${head} is still ${newest.status}, and its post reads the live pull request`
   );
-let changed = 0;
-for (const path of ['.github/workflows/cert-review.yml', 'scripts/cert']) {
-  const [last] = await gh.call(`commits?sha=main&path=${encodeURIComponent(path)}&per_page=1`);
-  changed = Math.max(changed, Date.parse(last?.commit?.committer?.date ?? 0) || 0);
+const CERT = [/^\.github\/workflows\/cert-review\.yml$/, /^scripts\/cert\//];
+const since = Date.parse(newest.created_at);
+let later = '';
+scan: for (let page = 1; page <= 10; page++) {
+  const pulls = await gh.call(
+    `pulls?state=closed&base=main&sort=updated&direction=desc&per_page=50&page=${page}`
+  );
+  for (const p of pulls) {
+    if (Date.parse(p.updated_at) < since) break scan;
+    if (!p.merged_at || Date.parse(p.merged_at) <= since) continue;
+    const files = await gh.call(`pulls/${p.number}/files?per_page=100`);
+    if (files.length >= 100 || files.some((f) => CERT.some((re) => re.test(f.filename)))) {
+      later = `#${p.number} merged ${p.merged_at}`;
+      break scan;
+    }
+  }
+  if (pulls.length < 50) break;
 }
-if (Date.parse(newest.created_at) < changed)
+if (later)
   done(
     'stale',
-    `run ${newest.id} on ${head} predates main's current cert-review code, so a re-run would replay old code: push a commit to re-certify`
+    `run ${newest.id} on ${head} predates cert-review code that reached main later (${later}), so a re-run would replay old code: push a commit to re-certify`
   );
 try {
   await gh.call(`actions/runs/${newest.id}/rerun`, 'POST', {});
