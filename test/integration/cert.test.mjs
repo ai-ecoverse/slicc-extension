@@ -127,9 +127,14 @@ function handle(req, res, body) {
     if (state.settleAfter && state.polls >= state.settleAfter)
       for (const r of state.workflowRuns) r.status = 'completed';
     return reply(res, 200, {
-      workflow_runs: state.workflowRuns.filter(
-        (r) => r.head_sha === url.searchParams.get('head_sha')
-      ),
+      workflow_runs: state.workflowRuns
+        .filter((r) => r.head_sha === url.searchParams.get('head_sha'))
+        .slice(
+          (Number(url.searchParams.get('page') ?? 1) - 1) *
+            Number(url.searchParams.get('per_page') ?? 100),
+          Number(url.searchParams.get('page') ?? 1) *
+            Number(url.searchParams.get('per_page') ?? 100)
+        ),
     });
   }
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/attempts\/(\d+)\/jobs$/.exec(p)))
@@ -1221,3 +1226,18 @@ for (const [name, setup] of [
     assert.equal(state.verdicts.at(-1).output.title, 'another workflow wrote cert-review');
   });
 }
+
+test('the merge group reads every page of runs on a member head', async () => {
+  const filler = Array.from({ length: 100 }, (_, i) =>
+    runOf(5000 + i, `2026-10-19T00:${String(i % 60).padStart(2, '0')}:00Z`, {
+      path: '.github/workflows/other.yml',
+    })
+  );
+  const ours = runOf(4999, '2026-10-18T00:00:00Z');
+  const r = await groupOf(
+    [...filler, ours],
+    { 4999: [{ name: 'cert / post', conclusion: 'success' }] },
+    { pageSize: 100 }
+  );
+  assert.equal(r.check.conclusion, 'success', r.r.stdout);
+});

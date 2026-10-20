@@ -23,13 +23,15 @@ env:
   LOUD: |
     extension/**
     six/**
-  INJECTION_ALLOW: ""
+  INJECTION_ALLOW: |
+    test/integration/cert.test.mjs
   GUARD_PATHS: |
     .github/workflows/**
     .github/actions/**
     scripts/cert/**
     scripts/gate.mjs
     scripts/is-main.mjs
+    test/integration/cert.test.mjs
   FALLBACK: |
     const e = process.env;
     const run = `${e.GITHUB_SERVER_URL}/${e.GITHUB_REPOSITORY}/actions/runs/${e.GITHUB_RUN_ID}/attempts/${e.GITHUB_RUN_ATTEMPT}`;
