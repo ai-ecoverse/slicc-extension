@@ -3,6 +3,7 @@ import {
   alert,
   anchors,
   api,
+  baseOf,
   carriesSecret,
   commentBody,
   diffOf,
@@ -26,7 +27,7 @@ const env = process.env;
 const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
 const pull = event.pull_request;
 const head = sha(pull.head.sha);
-const base = sha(pull.base.sha);
+const base = baseOf(env, pull);
 const n = pull.number;
 const runId = env.GITHUB_RUN_ID;
 const runUrl = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${runId}`;

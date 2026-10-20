@@ -24,6 +24,12 @@ export function sha(value) {
   return value;
 }
 
+export function baseOf(env, pull) {
+  if (env.GITHUB_ACTIONS === 'true' && !env.BASE_SHA)
+    throw new Error('BASE_SHA (the workflow commit) is not set');
+  return sha(env.BASE_SHA || pull.base.sha);
+}
+
 export function mergeBase(base, head) {
   return sha(git('merge-base', sha(base), sha(head)).trim());
 }
