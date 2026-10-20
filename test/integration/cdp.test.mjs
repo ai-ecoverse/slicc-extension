@@ -362,8 +362,8 @@ test('target commands list, open, activate, and close tabs', async () => {
     {
       targetId: '7',
       type: 'page',
-      title: '',
-      url: 'https://seven.sliccy.ai/',
+      title: 'https://seven.sliccy.ai',
+      url: 'https://seven.sliccy.ai',
       attached: false,
       canAccessOpener: false,
       active: true,
@@ -938,7 +938,7 @@ test('a sliccy.ai page can list and open targets, and flatten is required', asyn
     const { targetInfos } = await globalThis.sliccExtension.cdp.send('Target.getTargets');
     return {
       some: targetInfos.length > 0,
-      seven: targetInfos.some((target) => target.url.startsWith('https://seven.sliccy.ai/')),
+      seven: targetInfos.some((target) => target.url === 'https://seven.sliccy.ai'),
     };
   });
   assert.deepEqual(listed, { some: true, seven: true });
@@ -1414,8 +1414,8 @@ test('S7-3 Target.getTargetInfo reports type, url and openerId for every tab', a
   });
   assert.equal(
     seven.result.targetInfo.url,
-    'https://seven.sliccy.ai/',
-    'the guard sees the real url'
+    'https://seven.sliccy.ai',
+    'the guard sees only the protected origin'
   );
   api.locations.set(12, { url: 'about:blank', openerTabId: 7 });
   const inherited = await command(cdp, connection, {
@@ -1462,7 +1462,7 @@ test('S7-3 setDiscoverTargets emits created, changed and destroyed, and detaches
     ['7', '8', '20', '21']
   );
   assert.equal(created[2].openerId, '8');
-  assert.equal(created[3].url, 'https://vault.sliccy.ai/');
+  assert.equal(created[3].url, 'https://vault.sliccy.ai');
   api.visit(20, { url: 'https://example.test/a', title: 'a' });
   await tick();
   api.visit(20, { url: 'https://example.test/b', title: 'a' });
@@ -1480,7 +1480,7 @@ test('S7-3 setDiscoverTargets emits created, changed and destroyed, and detaches
   await tick();
   assert.equal(
     events(connection, 'Target.targetInfoChanged').at(-1).params.targetInfo.url,
-    'https://seven.sliccy.ai/x'
+    'https://seven.sliccy.ai'
   );
   assert.deepEqual(
     events(connection, 'Target.detachedFromTarget').map((e) => e.params.sessionId),

@@ -88,6 +88,11 @@ function relative(url) {
   return typeof url === 'string' && url !== '' && !URL.canParse(url);
 }
 
+function unfragmented(url) {
+  const at = url.indexOf('#');
+  return at < 0 ? url : url.slice(0, at);
+}
+
 function redactedUrl(url) {
   try {
     const origin = new URL(url).origin;
@@ -364,10 +369,14 @@ class Connection {
     return this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, method, params));
   }
 
+  failedAt(tabId, url) {
+    const failed = this.state.failed.get(tabId);
+    return Boolean(failed) && unfragmented(textOf(url)) === failed;
+  }
+
   view(tab) {
-    const failed = this.state.failed.get(tab?.id);
-    if (!failed || textOf(tab.url) !== failed) return tab;
-    const pendingUrl = textOf(tab.pendingUrl) === failed ? '' : tab.pendingUrl;
+    if (!this.failedAt(tab?.id, tab?.url)) return tab;
+    const pendingUrl = this.failedAt(tab.id, tab.pendingUrl) ? '' : tab.pendingUrl;
     return { ...tab, url: ERROR_PAGE, title: '', pendingUrl };
   }
 
@@ -375,16 +384,17 @@ class Connection {
     return this.view(await readTab(this.api, tabId));
   }
 
-  info(raw) {
-    const tab = this.view(raw);
-    const hidden =
-      urlProtected(guard, textOf(tab.url)) || urlProtected(guard, textOf(tab.pendingUrl));
-    const url = tab.url || tab.pendingUrl || '';
+  info(tab) {
+    const url = textOf(tab.url);
+    const pending = textOf(tab.pendingUrl);
+    const shown = urlProtected(guard, url) ? redactedUrl(url) : url;
+    const hidden = shown !== url || urlProtected(guard, pending);
+    const reported = shown || (urlProtected(guard, pending) ? redactedUrl(pending) : pending);
     const out = {
       targetId: String(tab.id),
       type: 'page',
-      title: hidden ? '' : (tab.title ?? ''),
-      url: hidden && !/^https?:/i.test(url) ? redactedUrl(url) : url,
+      title: hidden ? (reported === url ? '' : reported) : (tab.title ?? ''),
+      url: reported,
       attached: this.sessionsOf(tab.id).length > 0,
       canAccessOpener: false,
     };
@@ -395,6 +405,7 @@ class Connection {
 
   forget(tabId) {
     this.drop(tabId);
+    this.state.failed.delete(tabId);
     const tab = this.tabState(tabId);
     if (tab) for (const sessionId of tab.sessions) this.state.sessions.delete(sessionId);
     this.state.tabs.delete(tabId);
@@ -460,7 +471,7 @@ class Connection {
       };
     }
     const tabId = tabFrom(params.targetId);
-    const tab = await this.read(tabId);
+    const tab = await readTab(this.api, tabId);
     this.state.seen.add(tabId);
     return { targetInfo: this.info(tab) };
   }
@@ -1106,7 +1117,7 @@ class Connection {
   }
 
   async protectedDocument(tabId, tab, requestId, frameId, url) {
-    if (this.isMain(tab, frameId)) this.state.failed.set(tabId, url);
+    if (this.isMain(tab, frameId)) this.state.failed.set(tabId, unfragmented(url));
     await this.send(tabId, 'Fetch.failRequest', {
       requestId,
       errorReason: 'BlockedByClient',
@@ -1282,9 +1293,9 @@ class Connection {
     const t = this.tabState(tabId);
     if (t || this.state.ownedTabs.has(tabId)) {
       const probe = t ?? { pageUrl: '' };
-      const failed = this.state.failed.get(tabId);
-      if (change.url !== undefined && change.url !== failed) this.state.failed.delete(tabId);
-      if (change.url !== failed && this.leaves(probe, textOf(change.url))) {
+      const same = change.url !== undefined && this.failedAt(tabId, change.url);
+      if (change.url !== undefined && !same) this.state.failed.delete(tabId);
+      if (!same && this.leaves(probe, textOf(change.url))) {
         this.release(tabId);
       } else {
         void this.recheck(tabId);
