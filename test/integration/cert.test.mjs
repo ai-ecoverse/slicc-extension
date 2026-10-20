@@ -98,7 +98,7 @@ function handle(req, res, body) {
     state.issues.push({ ...body, number: state.nextId++ });
     return reply(res, 201, state.issues.at(-1));
   }
-  if (p === '/repos/o/r/actions/workflows/cert-review.yml/runs') {
+  if (p === '/repos/o/r/actions/runs') {
     state.polls = (state.polls ?? 0) + 1;
     if (state.settleAfter && state.polls >= state.settleAfter)
       for (const r of state.workflowRuns) r.status = 'completed';
@@ -1063,4 +1063,25 @@ test('the merge group waits for a queued member run that then completes, under o
   );
   assert.equal(stuck.check.conclusion, 'failure');
   assert.match(stuck.check.output.summary, /still queued/);
+});
+
+test('runs are found by path, not by workflow name: a required-workflow run with a blank name and a ref-pinned path counts', async () => {
+  const req = runOf(21, '2026-10-19T03:00:00Z', {
+    name: '',
+    path: '.github/workflows/cert-review.yml@refs/heads/main',
+  });
+  const ok = await groupOf([req], { 21: [{ name: 'cert / post', conclusion: 'success' }] });
+  assert.equal(ok.check.conclusion, 'success', ok.r.stdout);
+  const other = await groupOf(
+    [
+      runOf(22, '2026-10-19T03:00:00Z', {
+        name: 'cert-review-pr',
+        path: '.github/workflows/cert-review.yml@refs/heads/staging',
+      }),
+    ],
+    {
+      22: [{ name: 'cert / post', conclusion: 'success' }],
+    }
+  );
+  assert.equal(other.check.conclusion, 'failure');
 });
