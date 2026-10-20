@@ -13,7 +13,6 @@ import {
   type TargetInfo,
 } from '@slicc/shared-ts';
 import { ABOUT_WRAPPED, redacted, TabShield, wrapsAbout } from './cdp-shield.js';
-import { EXTENSION_FRAME, foreignFrameError } from './cdp-worlds.js';
 import { tabHasProtectedFrame } from './protected-frames-sw.js';
 import {
   isProtectedTab,
@@ -208,9 +207,7 @@ interface PortState {
   sessionToTab: Map<string, number>;
   attachRefCounts: Map<number, number>;
   ownedTabs: Set<number>;
-  runtimeTabs: Set<number>;
   unsubscribeEvents: (() => void) | null;
-  emit: (tabId: number, method: string, params?: CDPPayload) => void;
 }
 
 const welcomedLeaderPorts = new Map<ChromeRuntimePort, string>();
@@ -222,7 +219,6 @@ function invalidatePortDebuggerAttachment(state: PortState, tabId: number): void
   for (const [sessionId, attachedTabId] of state.sessionToTab) {
     if (attachedTabId === tabId) state.sessionToTab.delete(sessionId);
   }
-  state.runtimeTabs.delete(tabId);
 }
 
 export function notifyBridgeDebuggerDetached(tabId: number): void {
@@ -572,9 +568,7 @@ export async function handleBridgePortConnect(
     sessionToTab: new Map(),
     attachRefCounts: new Map(),
     ownedTabs: new Set(),
-    runtimeTabs: new Set(),
     unsubscribeEvents: null,
-    emit: () => {},
   };
 
   let pinned = false;
@@ -610,7 +604,6 @@ export async function handleBridgePortConnect(
     }
     state.ownedTabs.clear();
     state.sessionToTab.clear();
-    state.runtimeTabs.clear();
     state.attachRefCounts.clear();
     for (const tabId of usedTabs) releaseTabShield(tabId, deps).catch(() => {});
   });
@@ -677,7 +670,7 @@ async function handleBridgeMessage(
     }
     state.channelId = env.channelId;
     liveBridgePortStates.set(port, state);
-    state.emit = (tabId, method, params) => {
+    state.unsubscribeEvents = subscribeShieldedEvents(deps, (tabId, method, params) => {
       let sessionId: string | undefined;
       for (const [sid, tid] of state.sessionToTab) {
         if (tid === tabId) {
@@ -698,10 +691,6 @@ async function handleBridgeMessage(
           sessionId,
         } satisfies ExtensionBridgeEnvelope);
       } catch {}
-    };
-    state.unsubscribeEvents = subscribeShieldedEvents(deps, (tabId, method, params) => {
-      if (method.startsWith('Runtime.') && !state.runtimeTabs.has(tabId)) return;
-      state.emit(tabId, method, params);
     });
     port.postMessage({
       bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
@@ -779,20 +768,9 @@ async function dispatchCdpCommand(
   }
   const shield = tabShields.get(tabId);
   if (!shield) throw new Error(`${PROTECTED_REFUSAL} (the tab is not guarded)`);
-  const result = await shield.command(method, params, async (m, p) =>
+  return shield.command(method, params, async (m, p) =>
     deps.sendDebuggerCommand(tabId, m, await deps.maybeUnmaskCdpFrame(tabId, m, p))
   );
-  switchRuntime(method, tabId, state, shield);
-  return result;
-}
-
-function switchRuntime(method: string, tabId: number, state: PortState, shield: TabShield): void {
-  if (method === 'Runtime.disable') state.runtimeTabs.delete(tabId);
-  if (method !== 'Runtime.enable' || state.runtimeTabs.has(tabId)) return;
-  state.runtimeTabs.add(tabId);
-  for (const context of shield.visibleContexts()) {
-    state.emit(tabId, 'Runtime.executionContextCreated', { context });
-  }
 }
 
 async function cdpGetTargets(
@@ -824,10 +802,7 @@ async function cdpAttachToTarget(
   const targetId = readTargetIdParam(params);
   const tabId = await guardedTab(params, deps);
   if (!state.ownedTabs.has(tabId)) {
-    const attachedByThisPort = await deps.attachDebugger(tabId).catch((err: unknown) => {
-      if (foreignFrameError(err)) throw new Error(EXTENSION_FRAME);
-      throw err;
-    });
+    const attachedByThisPort = await deps.attachDebugger(tabId);
     if (attachedByThisPort) state.ownedTabs.add(tabId);
   }
   if (await isProtectedTab(await deps.getTab(tabId), deps.getTab)) {
@@ -876,7 +851,6 @@ async function cdpDetachFromTarget(
   for (const [sid, attachedTabId] of state.sessionToTab) {
     if (attachedTabId === tabId) state.sessionToTab.delete(sid);
   }
-  state.runtimeTabs.delete(tabId);
   if (state.ownedTabs.has(tabId)) {
     state.ownedTabs.delete(tabId);
     tabShields.delete(tabId);
@@ -1053,7 +1027,6 @@ async function cdpCloseTarget(
   for (const [sid, tid] of state.sessionToTab) {
     if (tid === tabId) state.sessionToTab.delete(sid);
   }
-  state.runtimeTabs.delete(tabId);
   state.attachRefCounts.delete(tabId);
   if (state.ownedTabs.has(tabId)) {
     state.ownedTabs.delete(tabId);
