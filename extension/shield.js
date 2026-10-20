@@ -121,6 +121,86 @@ export function urlProtected(guard, text, options = {}) {
   return guard.url(text, options) || guard.url(webSocketAsHttp(text), options);
 }
 
+const SCHEME = /[a-z0-9+.-]/i;
+const URL_END = /[\s"'<>`\\\u0000-\u001f]/;
+const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
+const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
+
+function originOf(text) {
+  try {
+    const origin = new URL(text).origin;
+    return origin && origin !== 'null' ? origin : 'about:blank';
+  } catch {
+    return 'about:blank';
+  }
+}
+
+function urlAt(text, at, isProtected) {
+  let start = at;
+  while (start > 0 && at - start < 32 && SCHEME.test(text[start - 1])) start -= 1;
+  while (start < at && !/[a-z]/i.test(text[start])) start += 1;
+  let end = at + 3;
+  while (end < text.length && !URL_END.test(text[end])) end += 1;
+  if (start === at) return { start, end, hit: false };
+  if (isProtected(text.slice(start, end))) return { start, end, hit: true };
+  const scheme = text.slice(start, at).toLowerCase();
+  const inner = WEB_SCHEMES.find((s) => scheme.length > s.length && scheme.endsWith(s));
+  if (inner === undefined) return { start, end, hit: false };
+  const from = at - inner.length;
+  return { start: from, end, hit: isProtected(text.slice(from, end)) };
+}
+
+export function redactText(text, isProtected) {
+  if (typeof text !== 'string' || !text.includes('://')) return text;
+  let out = '';
+  let last = 0;
+  let at = text.indexOf('://');
+  while (at >= 0) {
+    const span = urlAt(text, at, isProtected);
+    if (span.hit) {
+      const match = text.slice(span.start, span.end);
+      const origin = originOf(match);
+      if (match !== origin && match !== `${origin}/`) {
+        out += text.slice(last, span.start) + origin;
+        last = span.end;
+      }
+    }
+    at = text.indexOf('://', Math.max(span.end, at + 3));
+  }
+  return last === 0 ? text : out + text.slice(last);
+}
+
+function urlNamed(text, isProtected) {
+  return typeof text === 'string' && text !== '' && isProtected(text);
+}
+
+export function redactProtected(value, isProtected) {
+  if (typeof value === 'string') return redactText(value, isProtected);
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    let out = value;
+    value.forEach((item, index) => {
+      const next = redactProtected(item, isProtected);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  let out = value;
+  for (const [key, item] of Object.entries(value)) {
+    const next = redactProtected(item, isProtected);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  if ('urlFragment' in value && URL_KEYS.some((k) => urlNamed(value[k], isProtected))) {
+    if (out === value) out = { ...value };
+    delete out.urlFragment;
+  }
+  return out;
+}
+
 function storageNamed(guard, key, item) {
   if (ORIGIN_KEYS.has(key) && urlProtected(guard, item, { readOnly: true })) return true;
   if ((key === 'storageKey' || key === 'storageKeys') && guard.storageKey(item)) return true;

@@ -202,6 +202,93 @@ export function urlProtected(text: string, readOnly = false): boolean {
   return isProtectedUrl(text, readOnly) || isProtectedUrl(webSocketAsHttp(text), readOnly);
 }
 
+const SCHEME = /[a-z0-9+.-]/i;
+const URL_END = /[\s"'<>`\\\u0000-\u001f]/;
+const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
+const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
+
+function originOf(text: string): string {
+  try {
+    const origin = new URL(text).origin;
+    return origin && origin !== 'null' ? origin : 'about:blank';
+  } catch {
+    return 'about:blank';
+  }
+}
+
+interface Span {
+  start: number;
+  end: number;
+  hit: boolean;
+}
+
+function urlAt(text: string, at: number): Span {
+  let start = at;
+  while (start > 0 && at - start < 32 && SCHEME.test(text[start - 1] ?? '')) start -= 1;
+  while (start < at && !/[a-z]/i.test(text[start] ?? '')) start += 1;
+  let end = at + 3;
+  while (end < text.length && !URL_END.test(text[end] ?? '')) end += 1;
+  if (start === at) return { start, end, hit: false };
+  if (urlProtected(text.slice(start, end))) return { start, end, hit: true };
+  const scheme = text.slice(start, at).toLowerCase();
+  const inner = WEB_SCHEMES.find((s) => scheme.length > s.length && scheme.endsWith(s));
+  if (inner === undefined) return { start, end, hit: false };
+  const from = at - inner.length;
+  return { start: from, end, hit: urlProtected(text.slice(from, end)) };
+}
+
+export function redactText(text: string): string {
+  if (!text.includes('://')) return text;
+  let out = '';
+  let last = 0;
+  let at = text.indexOf('://');
+  while (at >= 0) {
+    const span = urlAt(text, at);
+    if (span.hit) {
+      const match = text.slice(span.start, span.end);
+      const origin = originOf(match);
+      if (match !== origin && match !== `${origin}/`) {
+        out += text.slice(last, span.start) + origin;
+        last = span.end;
+      }
+    }
+    at = text.indexOf('://', Math.max(span.end, at + 3));
+  }
+  return last === 0 ? text : out + text.slice(last);
+}
+
+function urlNamed(text: unknown): boolean {
+  return typeof text === 'string' && text !== '' && urlProtected(text);
+}
+
+export function redactProtected<T>(value: T): T {
+  if (typeof value === 'string') return redactText(value) as T;
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    let out: unknown[] = value;
+    value.forEach((item: unknown, index) => {
+      const next = redactProtected(item);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out as T;
+  }
+  const source = value as Record<string, unknown>;
+  let out = source;
+  for (const [key, item] of Object.entries(source)) {
+    const next = redactProtected(item);
+    if (next === item) continue;
+    if (out === source) out = { ...source };
+    out[key] = next;
+  }
+  if ('urlFragment' in source && URL_KEYS.some((k) => urlNamed(source[k]))) {
+    if (out === source) out = { ...source };
+    delete out['urlFragment'];
+  }
+  return out as T;
+}
+
 export function mentions(value: unknown): boolean {
   if (typeof value === 'string') return value.includes('://') && urlProtected(value, true);
   if (Array.isArray(value)) return value.some(mentions);

@@ -12,7 +12,14 @@ import {
   SLICC_HOSTED_ORIGIN,
   type TargetInfo,
 } from '@slicc/shared-ts';
-import { ABOUT_WRAPPED, redacted, TabShield, wrapsAbout } from './cdp-shield.js';
+import {
+  ABOUT_WRAPPED,
+  redacted,
+  redactProtected,
+  redactText,
+  TabShield,
+  wrapsAbout,
+} from './cdp-shield.js';
 import { EXTENSION_FRAME, foreignFrameError } from './cdp-worlds.js';
 import { tabHasProtectedFrame } from './protected-frames-sw.js';
 import {
@@ -694,7 +701,7 @@ async function handleBridgeMessage(
           channelId,
           kind: 'cdp.event',
           method,
-          params,
+          params: redactProtected(params),
           sessionId,
         } satisfies ExtensionBridgeEnvelope);
       } catch {}
@@ -729,7 +736,7 @@ async function handleBridgeMessage(
       channelId: state.channelId,
       kind: 'cdp.response',
       id,
-      result,
+      result: redactProtected(result),
     } satisfies ExtensionBridgeEnvelope);
   } catch (err) {
     port.postMessage({
@@ -737,7 +744,7 @@ async function handleBridgeMessage(
       channelId: state.channelId,
       kind: 'cdp.response',
       id,
-      error: err instanceof Error ? err.message : String(err),
+      error: redactText(err instanceof Error ? err.message : String(err)),
     } satisfies ExtensionBridgeEnvelope);
   }
 }

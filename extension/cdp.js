@@ -37,6 +37,7 @@ import {
   patternProtected,
   profiled,
   RESERVED_WORLD,
+  redactProtected,
   refusedOutright,
   requestKey,
   requestUrl,
@@ -66,6 +67,14 @@ const FETCH_ANSWERS = new Set([
 ]);
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
 const BODY_READ = 'slicc: refused: this paused response body was already read the other way';
+
+function anyProtected(text) {
+  return urlProtected(guard, text);
+}
+
+function redacted(value) {
+  return redactProtected(value, anyProtected);
+}
 
 function textOf(value) {
   return typeof value === 'string' ? value : '';
@@ -326,7 +335,7 @@ class Connection {
   post(message) {
     if (this.closed) return;
     try {
-      this.port.postMessage(message);
+      this.port.postMessage(redacted(message));
     } catch {
       return undefined;
     }
@@ -882,13 +891,7 @@ class Connection {
       if (urlProtected(guard, textOf(entry?.url))) refusal();
     }
     if (FETCH_ANSWERS.has(method) || FETCH_READS.has(method)) {
-      const entry = tab.paused.get(textOf(params.requestId));
-      if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
-      if (FETCH_READS.has(method)) {
-        if (entry.read !== undefined && entry.read !== method) throw new Error(BODY_READ);
-        entry.read = method;
-      }
-      if (FETCH_ANSWERS.has(method)) entry.claimed = true;
+      this.checkPaused(tab, method, params, sessionId);
     } else if (bodyMethod(method)) {
       const known = tab.requests.get(textOf(requestKey(params)));
       if (known === true) refusal();
@@ -900,6 +903,16 @@ class Connection {
     ) {
       throw new Error(UNSEEN);
     }
+  }
+
+  checkPaused(tab, method, params, sessionId) {
+    const entry = tab.paused.get(textOf(params.requestId));
+    if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
+    if (FETCH_READS.has(method)) {
+      if (entry.read !== undefined && entry.read !== method) throw new Error(BODY_READ);
+      entry.read = method;
+    }
+    if (FETCH_ANSWERS.has(method)) entry.claimed = true;
   }
 
   async admit(tabId, tab, method, params, sessionId) {
