@@ -1,0 +1,39 @@
+name: cert-rerun
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [ready_for_review, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cert-rerun-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  rerun:
+    name: re-run the newest cert-review run
+    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft && (github.event.action == 'ready_for_review' || github.event.label.name == 'cert-review-approved')
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+
+      - name: Re-run every job of the newest cert-review run on the live head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/cert/rerun.mjs

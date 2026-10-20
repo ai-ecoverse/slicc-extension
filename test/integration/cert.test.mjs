@@ -145,6 +145,10 @@ function handle(req, res, body) {
     return reply(res, 200, { jobs: state.jobs[m[1]] ?? [] });
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/artifacts$/.exec(p)))
     return reply(res, 200, { artifacts: state.artifacts });
+  if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/rerun$/.exec(p)) && req.method === 'POST') {
+    state.reruns.push(Number(m[1]));
+    return reply(res, 201, {});
+  }
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)$/.exec(p)))
     return reply(res, 200, state.runs[m[1]]);
   return reply(res, 404, { message: `no route ${req.method} ${p}` });
@@ -242,6 +246,7 @@ const receipt = (head, status = 'PASS', touched = []) =>
 
 function reset() {
   state.checks = [];
+  state.reruns = [];
   state.verdicts = [];
   state.statuses = [];
   state.reviews = [];
@@ -1285,4 +1290,53 @@ test('post never sets success while the live pull request is a draft', async () 
   assert.equal(r.code, 1, r.stdout);
   assert.equal(check.conclusion, 'failure');
   assert.equal(check.output.title, 'incomplete: not current; re-run');
+});
+
+async function rerunWith(runs, pullExtra = {}, eventExtra = {}) {
+  reset();
+  state.workflowRuns = runs;
+  const file = event('rerun-helper', shas.code, eventExtra);
+  state.pulls['7'] = { ...state.pulls['7'], ...pullExtra };
+  return run('rerun.mjs', { GITHUB_EVENT_PATH: file });
+}
+
+test('cert-rerun re-runs every job of the newest cert-review run on the live head, and only that', async () => {
+  const older = runOf(41, '2026-10-19T05:00:00Z');
+  const newer = runOf(42, '2026-10-19T06:00:00Z');
+  const other = runOf(43, '2026-10-19T07:00:00Z', { path: '.github/workflows/cert-rerun.yml' });
+  const r = await rerunWith([older, newer, other]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.deepEqual(state.reruns, [42]);
+  assert.match(r.stdout, /cert-review rerun: rerun #7/);
+});
+
+test('cert-rerun skips a run still in progress, and does nothing for a fork, a draft or a closed pull request', async () => {
+  const busy = await rerunWith([runOf(44, '2026-10-19T06:00:00Z', { status: 'in_progress' })]);
+  assert.equal(busy.code, 0, busy.stdout);
+  assert.deepEqual(state.reruns, []);
+  assert.match(busy.stdout, /skipped/);
+  const fork = await rerunWith(
+    [runOf(45, '2026-10-19T06:00:00Z')],
+    {},
+    {
+      pull: { head: { sha: shas.code, repo: { full_name: 'x/r' } } },
+    }
+  );
+  assert.deepEqual(state.reruns, []);
+  assert.match(fork.stdout, /noop .*fork/);
+  const draft = await rerunWith([runOf(46, '2026-10-19T06:00:00Z')], { draft: true });
+  assert.deepEqual(state.reruns, []);
+  assert.match(draft.stdout, /noop .*draft/);
+  const closed = await rerunWith([runOf(47, '2026-10-19T06:00:00Z')], { state: 'closed' });
+  assert.deepEqual(state.reruns, []);
+  assert.match(closed.stdout, /noop .*closed/);
+});
+
+test('cert-rerun fails visibly when there is no cert-review run to re-run', async () => {
+  const r = await rerunWith([
+    runOf(48, '2026-10-19T06:00:00Z', { path: '.github/workflows/other.yml' }),
+  ]);
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /cert-review rerun: failure/);
+  assert.deepEqual(state.reruns, []);
 });
