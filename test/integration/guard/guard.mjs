@@ -43,7 +43,7 @@ export function report(set, results, sha, transport) {
       id: row.id,
       target: row.target,
       variant: row.variant,
-      verdict: verdict(row),
+      legs: verdict(row),
       ran: row.ran,
       notes: row.notes,
     }));
