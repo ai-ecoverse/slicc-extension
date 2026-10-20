@@ -501,13 +501,12 @@ for (const transport of transports) {
 
   for (const stage of ['Request', 'Response']) {
     const method = stage === 'Request' ? 'Fetch.continueRequest' : 'Fetch.continueResponse';
-    test(`${transport} control: ${method} overriding the ${stage === 'Request' ? 'url to an ordinary callback is refused too, since the guard cannot see where it redirects' : 'headers with an ordinary Location answers'}`, async (t) => {
+    test(`${transport} control: ${method} overriding the url to an ordinary callback answers`, async (t) => {
       const page = await client(t, transport);
       const n = unique(`${transport}overrideordinary${stage}`);
       const run = await override(page, n, 'ordinary', stage);
       const answer = replies(run, method)[0];
-      if (stage === 'Request') assert.ok(refused(answer), `${method}: ${JSON.stringify(answer)}`);
-      else assert.ok(answer && !answer.error, `${method}: ${JSON.stringify(answer)}`);
+      assert.ok(answer && !answer.error, `${method}: ${JSON.stringify(answer)}`);
     });
   }
 }

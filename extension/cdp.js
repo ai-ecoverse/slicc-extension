@@ -73,7 +73,7 @@ const FETCH_ANSWERS = new Set([
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const REROUTE =
-  'slicc: refused: Fetch.continueRequest cannot send a request to another url, since the guard cannot see where that url redirects';
+  'slicc: refused: the rewritten request answered with a protected url, so the guard failed it';
 const BODY_READ = 'slicc: refused: this paused response body was already read the other way';
 const ERROR_PAGE_READS = new Set([
   'Page.captureSnapshot',
@@ -717,6 +717,7 @@ class Connection {
         requests: new Map(),
         held: new Map(),
         hops: new Map(),
+        reroutes: new Map(),
         paused: new Map(),
       };
       this.state.tabs.set(tabId, tab);
@@ -851,10 +852,40 @@ class Connection {
     await this.answer(tabId, 'Fetch.continueRequest', { requestId });
   }
 
+  async rerouted(tabId, tab, requestId, params) {
+    const waiting = tab.reroutes.get(requestId);
+    if (!waiting || params.responseStatusCode === undefined) return false;
+    tab.reroutes.delete(requestId);
+    const url = requestUrl(params);
+    const named =
+      urlProtected(guard, url) || headersNameProtected(params.responseHeaders, anyProtected, url);
+    if (named && typeof params.networkId === 'string') tab.requests.set(params.networkId, true);
+    waiting(!named);
+    if (!named) return false;
+    await this.send(tabId, 'Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
+    return true;
+  }
+
+  async reroute(tabId, tab, requestId, params) {
+    const seen = new Promise((resolve) => tab.reroutes.set(requestId, resolve));
+    try {
+      await this.answer(tabId, 'Fetch.continueRequest', { ...params, interceptResponse: true });
+    } catch (error) {
+      tab.reroutes.delete(requestId);
+      throw error;
+    }
+    const late = new Promise((resolve) => setTimeout(resolve, 10000, true));
+    const allowed = await Promise.race([seen, late]);
+    tab.reroutes.delete(requestId);
+    if (!allowed) throw new Error(REROUTE);
+    return {};
+  }
+
   async onPaused(tabId, method, params) {
     const tab = this.tabState(tabId);
     if (!tab) return;
     const requestId = textOf(params?.requestId);
+    if (await this.rerouted(tabId, tab, requestId, params ?? {})) return;
     const url = requestUrl(params);
     const frameId = textOf(params?.frameId);
     const isProtected = urlProtected(guard, url) || tab.frames.get(frameId) === true;
@@ -957,7 +988,6 @@ class Connection {
   checkPaused(tab, method, params, sessionId) {
     const entry = tab.paused.get(textOf(params.requestId));
     if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
-    if (method === 'Fetch.continueRequest' && params.url !== undefined) throw new Error(REROUTE);
     if (FETCH_ANSWERS.has(method) && headersProtected(params, requestUrl(entry.params))) refusal();
     if (FETCH_READS.has(method)) {
       if (entry.named) refusal();
@@ -1039,6 +1069,9 @@ class Connection {
         return {};
       }
       tab.paused.delete(requestId);
+      if (method === 'Fetch.continueRequest' && params.url !== undefined) {
+        return this.reroute(tabId, tab, requestId, params);
+      }
       return this.answer(tabId, method, params);
     }
     const forwarded = outgoing(message, params);

@@ -133,7 +133,7 @@ const BODY_READ_REFUSAL =
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const REROUTE_REFUSAL =
-  'slicc: refused: Fetch.continueRequest cannot send a request to another url, since the guard cannot see where that url redirects';
+  'slicc: refused: the rewritten request answered with a protected url, so the guard failed it';
 const PAUSE_REFUSAL = 'slicc: refused: request was not paused toward this client';
 
 export const GUARD_FETCH_PATTERN: CDPPayload = {
@@ -723,6 +723,7 @@ export class TabShield {
   private readonly hiddenFrames = new Bounded<true>(1000);
   private readonly namedBodies = new Bounded<true>(2000);
   private readonly hops = new Bounded<string>(500);
+  private readonly reroutes = new Map<string, (allowed: boolean) => void>();
   private readonly worlds = new Worlds();
   private clientFetch: ClientFetch | null = null;
   private mainFrameId = '';
@@ -816,6 +817,7 @@ export class TabShield {
       this.forwarded.delete(pauseId);
       read = this.bodyReads.delete(pauseId);
     }
+    const reroute = this.pendingReroute(method, input, pauseId);
     let result: CDPPayload;
     try {
       result = await forward(
@@ -823,14 +825,46 @@ export class TabShield {
         params === undefined && rewritten === input ? undefined : rewritten
       );
     } catch (err) {
+      this.reroutes.delete(pauseId);
       if (settles && !/Invalid InterceptionId/i.test(String(err))) {
         this.forwarded.set(pauseId, true);
         if (read !== undefined) this.bodyReads.set(pauseId, read);
       }
       throw err;
     }
+    if (reroute !== undefined) await this.settleReroute(pauseId, reroute);
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     return this.after(method, result ?? {});
+  }
+
+  private pendingReroute(
+    method: string,
+    params: CDPPayload,
+    id: string
+  ): Promise<boolean> | undefined {
+    if (method !== 'Fetch.continueRequest' || params['url'] === undefined) return undefined;
+    return new Promise<boolean>((resolve) => this.reroutes.set(id, resolve));
+  }
+
+  private async settleReroute(id: string, reroute: Promise<boolean>): Promise<void> {
+    const late = new Promise<boolean>((resolve) => setTimeout(resolve, 10000, true));
+    const allowed = await Promise.race([reroute, late]);
+    this.reroutes.delete(id);
+    if (!allowed) refuse(REROUTE_REFUSAL);
+  }
+
+  private rerouted(paused: CDPPayload, id: string): boolean {
+    const waiting = this.reroutes.get(id);
+    if (!waiting || paused['responseStatusCode'] === undefined) return false;
+    this.reroutes.delete(id);
+    const url = requestUrl(paused) ?? '';
+    const named = urlProtected(url) || headersNameProtected(paused['responseHeaders'], url);
+    waiting(!named);
+    if (!named) return false;
+    const networkId = str(paused['networkId']);
+    if (networkId) this.requests.set(networkId, true);
+    this.answer('Fetch.failRequest', { requestId: id, errorReason: 'BlockedByClient' });
+    return true;
   }
 
   visibleContexts(): CDPPayload[] {
@@ -972,7 +1006,6 @@ export class TabShield {
   }
 
   private admitPaused(method: string, id: string, params: CDPPayload): void {
-    if (method === 'Fetch.continueRequest' && params['url'] !== undefined) refuse(REROUTE_REFUSAL);
     if (answerNamesProtected(params, this.pausedUrls.get(id) ?? '')) {
       refuse(PROTECTED_RULES.refusal);
     }
@@ -1021,6 +1054,9 @@ export class TabShield {
       this.clientFetch = null;
       void this.send('Fetch.enable', this.fetchParams()).catch(() => this.block());
       return null;
+    }
+    if (method === 'Fetch.continueRequest' && params['url'] !== undefined) {
+      return { ...params, interceptResponse: true };
     }
     if (method === 'Page.addScriptToEvaluateOnNewDocument') {
       return { ...params, source: initScriptGuard() + (str(params['source']) ?? '') };
@@ -1089,6 +1125,7 @@ export class TabShield {
 
   private onPaused(paused: CDPPayload): ShieldEvent[] {
     const id = str(paused['requestId']) ?? '';
+    if (this.rerouted(paused, id)) return [];
     const protectedUrl = urlProtected(requestUrl(paused) ?? '');
     const tainted = protectedUrl || this.initiatedByProtected(paused);
     this.requests.set(id, tainted);
