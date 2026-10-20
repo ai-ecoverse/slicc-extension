@@ -9,8 +9,8 @@ permissions: {}
 
 jobs:
   rerun:
-    uses: ai-ecoverse/slicc-shared-web/.github/workflows/cert-rerun.yml@d6905ade35cae4418fde21cb7d947cad7ea96b1d
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/cert-rerun.yml@a7a7e2534cfeef729288354994656875a2ea7c16
     permissions:
       actions: write
     with:
-      tools-ref: d6905ade35cae4418fde21cb7d947cad7ea96b1d
+      tools-ref: a7a7e2534cfeef729288354994656875a2ea7c16
