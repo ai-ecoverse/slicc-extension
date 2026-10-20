@@ -1,4 +1,10 @@
 export async function install(kind = 'seven', extId = '') {
+  const messages = [];
+  const taps = new Set();
+  function heard(text) {
+    messages.push(text);
+    for (const tap of taps) tap(text);
+  }
   async function bridge(extId) {
     const port = chrome.runtime.connect(extId, { name: 'slicc.cdp-bridge' });
     const channelId = crypto.randomUUID();
@@ -6,6 +12,7 @@ export async function install(kind = 'seven', extId = '') {
     const pending = new Map();
     let next = 0;
     port.onMessage.addListener((msg) => {
+      if (msg.kind === 'cdp.response' || msg.kind === 'cdp.event') heard(JSON.stringify(msg));
       if (msg.kind === 'cdp.response') {
         const done = pending.get(msg.id);
         pending.delete(msg.id);
@@ -54,7 +61,27 @@ export async function install(kind = 'seven', extId = '') {
     };
   }
 
-  const cdp = kind === 'six-bridge' ? await bridge(extId) : globalThis.sliccExtension.cdp;
+  function recorded(raw) {
+    let next = 0;
+    raw.on((event) => heard(JSON.stringify(event)));
+    return {
+      on: (listener) => raw.on(listener),
+      send(method, params, sessionId) {
+        const id = ++next;
+        return raw.send(method, params, sessionId).then(
+          (result) => {
+            heard(JSON.stringify({ id, result }));
+            return result;
+          },
+          (error) => {
+            heard(JSON.stringify({ id, error: { message: String(error?.message ?? error) } }));
+            throw error;
+          }
+        );
+      },
+    };
+  }
+  const cdp = kind === 'six-bridge' ? await bridge(extId) : recorded(globalThis.sliccExtension.cdp);
   const events = [];
   cdp.on((event) => events.push(event));
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -130,6 +157,8 @@ export async function install(kind = 'seven', extId = '') {
     );
   }
   globalThis.h = {
+    messages,
+    tap: (fn) => taps.add(fn),
     content,
     cdp,
     events,

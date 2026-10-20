@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash, createPublicKey } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,6 +41,7 @@ const cachesAuth = (vector) => JSON.stringify([vector.setup, vector.trigger]).in
 
 let dir;
 let fixture;
+let spki;
 const pool = [];
 
 before(async () => {
@@ -48,7 +50,11 @@ before(async () => {
     force: true,
   });
   dir = await mkdtemp(join(tmpdir(), 'slicc-extension-guard-'));
-  fixture = await fixtureServer({ tls: await certificate(dir) });
+  const tls = await certificate(dir);
+  spki = createHash('sha256')
+    .update(createPublicKey(tls.cert).export({ type: 'spki', format: 'der' }))
+    .digest('base64');
+  fixture = await fixtureServer({ tls });
 });
 
 after(async () => {
@@ -84,7 +90,7 @@ async function browser() {
     roots: [['/', 'test/integration/page/']],
     coverage: [],
     extensions: ['extension/'],
-    args: ['--ignore-certificate-errors', `--host-resolver-rules=${rules}`],
+    args: [`--ignore-certificate-errors-spki-list=${spki}`, `--host-resolver-rules=${rules}`],
   });
   const cdp = chrome.cdp;
   const real = new Map();
@@ -147,7 +153,10 @@ async function browser() {
     return targetId;
   }
 
+  const heard = [];
+  cdp.on((message) => heard.push(JSON.stringify(message)));
   const observer = {
+    messages: heard,
     async send(method, params = {}, sessionId) {
       const tab = typeof params.targetId === 'string' && /^\d+$/.test(params.targetId);
       const ids = tab ? { ...params, targetId: await realTarget(params.targetId) } : params;
@@ -155,7 +164,14 @@ async function browser() {
         method === 'Target.createTarget' && !ids.browserContextId && ids.newWindow === undefined;
       const mapped = apart ? { ...ids, newWindow: true } : ids;
       if (method === 'Runtime.enable') await cdp.send('Runtime.disable', {}, sessionId);
-      return cdp.send(method, mapped, sessionId);
+      try {
+        const result = await cdp.send(method, mapped, sessionId);
+        heard.push(JSON.stringify({ result }));
+        return result;
+      } catch (error) {
+        heard.push(JSON.stringify({ error: { message: String(error?.message ?? error) } }));
+        throw error;
+      }
     },
     on: (listener) => cdp.on(listener),
     off: (listener) => cdp.off(listener),
@@ -171,11 +187,17 @@ async function browser() {
     const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     const events = [];
+    const messages = [];
     const listeners = new Set();
     const off = cdp.on(({ method, params, sessionId: from }) => {
       if (method !== 'Runtime.bindingCalled' || from !== sessionId || params.name !== binding)
         return;
-      const event = asGiven(JSON.parse(params.payload));
+      const payload = JSON.parse(params.payload);
+      if (typeof payload.text === 'string') {
+        messages.push(payload.text);
+        return;
+      }
+      const event = asGiven(payload.event);
       events.push(event);
       for (const listener of listeners) listener(event);
     });
@@ -202,7 +224,7 @@ async function browser() {
       await evaluate(
         cdp,
         sessionId,
-        `(h.cdp.on((event) => globalThis.${binding}(JSON.stringify(event))), true)`
+        `(h.tap((text) => globalThis.${binding}(JSON.stringify({ text }))), h.cdp.on((event) => globalThis.${binding}(JSON.stringify({ event }))), true)`
       );
     } catch (error) {
       await close();
@@ -211,6 +233,7 @@ async function browser() {
     const client = {
       transport,
       events,
+      messages,
       async send(method, params, session) {
         const raw = params?.targetId;
         const local =
