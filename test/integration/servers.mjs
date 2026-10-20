@@ -78,7 +78,28 @@ export async function pages(tls) {
     if (/^\/(auth\/callback|oauth\/mcp-callback|landing)(\/|$)/.test(pathname)) {
       return response
         .writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-        .end('<!doctype html><title>callback</title><p>signed in</p>');
+        .end(`<!doctype html><title>callback</title><p>signed in at ${request.url}</p>`);
+    }
+    if (pathname === '/hop') {
+      const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
+      const base = {
+        seven: 'https://seven.sliccy.ai/auth/callback',
+        vault: 'https://vault.sliccy.ai/oauth/mcp-callback',
+        ordinary: 'https://ordinary.test/landing',
+      }[searchParams.get('to') ?? 'ordinary'];
+      const to = {
+        fragment: `${base}?nonce=n#access_token=${mark}&token_type=bearer`,
+        query: `${base}?code=${mark}&state=${mark}`,
+        path: `${base}/${mark}`,
+      }[searchParams.get('form') ?? 'query'];
+      const body = `<!doctype html><title>hop</title><p>${to}</p>`;
+      const how = searchParams.get('how') ?? 'location';
+      const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
+      if (how === 'location')
+        return response.writeHead(302, { ...headers, location: to }).end(body);
+      if (how === 'link')
+        return response.writeHead(200, { ...headers, link: `<${to}>; rel="next"` }).end(body);
+      return response.writeHead(200, { ...headers, refresh: `0; url=${to}` }).end(body);
     }
     if (pathname === '/signin') {
       const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
