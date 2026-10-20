@@ -257,6 +257,22 @@ try {
     text: `Listing the cert-review check runs on this head failed (${err.message.slice(0, 200)}).`,
   };
 }
+if (r.conclusion === 'success') {
+  try {
+    if (!(await current()))
+      r = {
+        conclusion: 'failure',
+        title: 'incomplete: not current; re-run',
+        text: 'The pull request is no longer open, ready, into main and at this head, so this run does not certify it.',
+      };
+  } catch (err) {
+    r = {
+      conclusion: 'failure',
+      title: 'incomplete: post; re-run',
+      text: `Reading the live pull request failed (${err.message.slice(0, 200)}).`,
+    };
+  }
+}
 await setCheck(gh, {
   pr: n,
   head,

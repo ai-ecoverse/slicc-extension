@@ -40,8 +40,12 @@ try {
   output({
     kind: 'decided',
     conclusion: 'failure',
-    title: 'incomplete: the head moved; a newer run reviews it',
-    summary: `${err.message}. This run's head is not the pull request's head any more.`,
+    title: err.moved
+      ? 'incomplete: the head moved; a newer run reviews it'
+      : 'incomplete: plan; re-run',
+    summary: err.moved
+      ? `${err.message}. This run's head is not the pull request's head any more.`
+      : `Reading the live pull request failed: ${err.message}.`,
   });
   process.exit(0);
 }

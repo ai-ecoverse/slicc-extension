@@ -111,7 +111,11 @@ function handle(req, res, body) {
     Object.assign(c, body);
     return reply(res, 200, c);
   }
-  if ((m = /^\/repos\/o\/r\/pulls\/(\d+)$/.exec(p))) return reply(res, 200, state.pulls[m[1]]);
+  if ((m = /^\/repos\/o\/r\/pulls\/(\d+)$/.exec(p)))
+    return reply(res, 200, {
+      ...state.pulls[m[1]],
+      ...(state.pullDraftAfterPlan ? { draft: true } : {}),
+    });
   if ((m = /^\/repos\/o\/r\/pulls\/(\d+)\/reviews$/.exec(p))) {
     if (req.method === 'GET') return reply(res, 200, []);
     state.reviews.push({ pr: Number(m[1]), ...body });
@@ -1271,4 +1275,14 @@ test('the plan reads the live pull request, so a re-run after marking ready revi
   });
   assert.equal(moved.outputs.conclusion, 'failure');
   assert.match(moved.outputs.title, /head moved/);
+});
+
+test('post never sets success while the live pull request is a draft', async () => {
+  const { r, check } = await post(v2({ verdict: 'pass', summary: 'fine', comments: [] }), () => {
+    state.pullDraftAfterPlan = true;
+  });
+  state.pullDraftAfterPlan = false;
+  assert.equal(r.code, 1, r.stdout);
+  assert.equal(check.conclusion, 'failure');
+  assert.equal(check.output.title, 'incomplete: not current; re-run');
 });
