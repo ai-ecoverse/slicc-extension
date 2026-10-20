@@ -75,6 +75,25 @@ export async function pages(tls) {
     if (pathname === '/llms.txt') {
       return response.writeHead(200, { 'content-type': 'text/plain' }).end('# llms');
     }
+    if (/^\/(auth\/callback|oauth\/mcp-callback|landing)(\/|$)/.test(pathname)) {
+      return response
+        .writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        .end('<!doctype html><title>callback</title><p>signed in</p>');
+    }
+    if (pathname === '/signin') {
+      const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
+      const base = {
+        seven: 'https://seven.sliccy.ai/auth/callback',
+        vault: 'https://vault.sliccy.ai/oauth/mcp-callback',
+        ordinary: 'https://ordinary.test/landing',
+      }[searchParams.get('to') ?? 'ordinary'];
+      const to = {
+        fragment: `${base}?nonce=n#access_token=${mark}&token_type=bearer&expires_in=86399`,
+        query: `${base}?code=${mark}&state=${mark}`,
+        path: `${base}/${mark}`,
+      }[searchParams.get('form') ?? 'query'];
+      return response.writeHead(302, { location: to }).end();
+    }
     if (pathname === '/redirect') {
       return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();
     }
