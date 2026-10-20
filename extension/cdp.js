@@ -95,10 +95,10 @@ function snapshotChecked(result) {
   if (redactText(data, anyProtected) !== data) refusal();
 }
 
-function headersProtected(params) {
+function headersProtected(params, base) {
   return (
-    headersNameProtected(params.responseHeaders, anyProtected) ||
-    headersNameProtected(params.headers, anyProtected) ||
+    headersNameProtected(params.responseHeaders, anyProtected, base) ||
+    headersNameProtected(params.headers, anyProtected, base) ||
     binaryHeadersNameProtected(params.binaryResponseHeaders, anyProtected)
   );
 }
@@ -860,7 +860,7 @@ class Connection {
       await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
       return;
     }
-    const named = headersNameProtected(params.responseHeaders, anyProtected);
+    const named = headersNameProtected(params.responseHeaders, anyProtected, url);
     if (named && typeof params.networkId === 'string') tab.requests.set(params.networkId, true);
     const [first] = this.candidates(tabId, params);
     if (first === undefined) {
@@ -938,7 +938,7 @@ class Connection {
   checkPaused(tab, method, params, sessionId) {
     const entry = tab.paused.get(textOf(params.requestId));
     if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
-    if (FETCH_ANSWERS.has(method) && headersProtected(params)) refusal();
+    if (FETCH_ANSWERS.has(method) && headersProtected(params, requestUrl(entry.params))) refusal();
     if (FETCH_READS.has(method)) {
       if (entry.named) refusal();
       if (entry.read !== undefined && entry.read !== method) throw new Error(BODY_READ);

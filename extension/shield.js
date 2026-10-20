@@ -126,9 +126,12 @@ export function urlProtected(guard, text, options = {}) {
 }
 
 const SCHEME = /[a-z0-9+.-]/i;
-const URL_END = /[\s"'<>`\\\u0000-\u001f]/;
+const URL_END = /[\s"'<>`\u0000-\u001f]/;
+const BOUNDARY = /[\s<>"'`=,;([{]/;
+const SLASHES = /[\\/]{2}/g;
 const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
 const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
+const TARGETS = new Set(['location', 'content-location', 'refresh', 'link']);
 
 const AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i;
 
@@ -140,53 +143,183 @@ function originOf(text) {
   return AUTHORITY.exec(text)?.[0] ?? 'about:blank';
 }
 
+function slashed(text) {
+  return text.replace(/\\/g, '/');
+}
+
+function schemeStart(text, colon) {
+  let start = colon;
+  while (start > 0 && colon - start < 32 && SCHEME.test(text[start - 1])) start -= 1;
+  while (start < colon && !/[a-z]/i.test(text[start])) start += 1;
+  return start;
+}
+
+function judged(text, start, end, prefix, isProtected) {
+  const url = prefix + slashed(text.slice(start, end));
+  return { start, end, url, hit: isProtected(url) };
+}
+
 function urlAt(text, at, isProtected) {
-  let start = at;
-  while (start > 0 && at - start < 32 && SCHEME.test(text[start - 1])) start -= 1;
-  while (start < at && !/[a-z]/i.test(text[start])) start += 1;
-  let end = at + 3;
+  let end = at + 2;
   while (end < text.length && !URL_END.test(text[end])) end += 1;
-  if (start === at) return { start, end, hit: false };
-  if (isProtected(text.slice(start, end))) return { start, end, hit: true };
-  const scheme = text.slice(start, at).toLowerCase();
+  const miss = { start: at, end, url: '', hit: false };
+  if (end === at + 2 || /[\\/]/.test(text[at + 2])) return miss;
+  if (text[at - 1] !== ':') {
+    if (at > 0 && !BOUNDARY.test(text[at - 1])) return miss;
+    return judged(text, at, end, 'https:', isProtected);
+  }
+  const start = schemeStart(text, at - 1);
+  if (start === at - 1) return miss;
+  const whole = judged(text, start, end, '', isProtected);
+  if (whole.hit) return whole;
+  const scheme = text.slice(start, at - 1).toLowerCase();
   const inner = WEB_SCHEMES.find((s) => scheme.length > s.length && scheme.endsWith(s));
-  if (inner === undefined) return { start, end, hit: false };
-  const from = at - inner.length;
-  return { start: from, end, hit: isProtected(text.slice(from, end)) };
+  if (inner === undefined) return miss;
+  return judged(text, at - 1 - inner.length, end, '', isProtected);
+}
+
+function spans(text, isProtected) {
+  const out = [];
+  if (typeof text !== 'string' || !/[\\/]{2}/.test(text)) return out;
+  SLASHES.lastIndex = 0;
+  for (let found = SLASHES.exec(text); found; found = SLASHES.exec(text)) {
+    const span = urlAt(text, found.index, isProtected);
+    if (span.hit) out.push(span);
+    SLASHES.lastIndex = Math.max(span.end, found.index + 2);
+  }
+  return out;
 }
 
 export function redactText(text, isProtected) {
-  if (typeof text !== 'string' || !text.includes('://')) return text;
   let out = '';
   let last = 0;
-  let at = text.indexOf('://');
-  while (at >= 0) {
-    const span = urlAt(text, at, isProtected);
-    if (span.hit) {
-      const match = text.slice(span.start, span.end);
-      const origin = originOf(match);
-      if (match !== origin && match !== `${origin}/`) {
-        out += text.slice(last, span.start) + origin;
-        last = span.end;
-      }
-    }
-    at = text.indexOf('://', Math.max(span.end, at + 3));
+  for (const span of spans(text, isProtected)) {
+    const origin = originOf(span.url);
+    if (span.url === origin || span.url === `${origin}/`) continue;
+    out += text.slice(last, span.start) + origin;
+    last = span.end;
   }
   return last === 0 ? text : out + text.slice(last);
 }
 
 export function namesProtectedUrl(text, isProtected) {
-  if (typeof text !== 'string' || !text.includes('://')) return false;
-  for (let at = text.indexOf('://'); at >= 0; ) {
-    const span = urlAt(text, at, isProtected);
-    if (span.hit) return true;
-    at = text.indexOf('://', Math.max(span.end, at + 3));
+  return spans(text, isProtected).length > 0;
+}
+
+function cleaned(target) {
+  return target
+    .replace(/[\t\n\r]/g, '')
+    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '')
+    .replace(/^(['"])(.*)\1$/s, '$2');
+}
+
+function resolved(target, base) {
+  try {
+    return new URL(cleaned(target), base || 'https://slicc.invalid/').href;
+  } catch {
+    return '';
   }
-  return false;
+}
+
+function targetSpans(name, line) {
+  const lower = name.toLowerCase();
+  if (lower === 'link') {
+    return [...line.matchAll(/<([^>]*)>/g)].map((m) => [m.index + 1, m.index + 1 + m[1].length]);
+  }
+  if (lower !== 'refresh') return [[line.length - line.trimStart().length, line.length]];
+  const named = /url\s*=\s*/i.exec(line);
+  if (named) return [[named.index + named[0].length, line.length]];
+  const bare = /^[\s\d.]*[;,]\s*/.exec(line);
+  return bare ? [[bare[0].length, line.length]] : [];
+}
+
+function redactLine(name, line, base, isProtected) {
+  let out = '';
+  let last = 0;
+  let hit = false;
+  for (const [start, end] of targetSpans(name, line)) {
+    const url = resolved(line.slice(start, end), base);
+    if (!url || !isProtected(url)) continue;
+    hit = true;
+    out += line.slice(last, start) + originOf(url);
+    last = end;
+  }
+  return { text: last === 0 ? line : out + line.slice(last), hit };
+}
+
+function headerTarget(name, value, base, isProtected) {
+  if (typeof name !== 'string' || typeof value !== 'string' || !TARGETS.has(name.toLowerCase())) {
+    return { text: value, hit: false };
+  }
+  const lines = value.split('\n').map((line) => redactLine(name, line, base, isProtected));
+  return { text: lines.map((l) => l.text).join('\n'), hit: lines.some((l) => l.hit) };
+}
+
+function headerNamed(name, value, base, isProtected) {
+  return namesProtectedUrl(value, isProtected) || headerTarget(name, value, base, isProtected).hit;
+}
+
+export function redactHeaders(headers, base, isProtected) {
+  if (Array.isArray(headers)) {
+    let out = headers;
+    headers.forEach((header, index) => {
+      const next = headerTarget(header?.name, header?.value, base, isProtected).text;
+      if (next === header?.value) return;
+      if (out === headers) out = [...headers];
+      out[index] = { ...header, value: next };
+    });
+    return out;
+  }
+  if (headers === null || typeof headers !== 'object') return headers;
+  let out = headers;
+  for (const [name, value] of Object.entries(headers)) {
+    const next = headerTarget(name, value, base, isProtected).text;
+    if (next === value) continue;
+    if (out === headers) out = { ...headers };
+    out[name] = next;
+  }
+  return out;
+}
+
+function textOrEmpty(value) {
+  return typeof value === 'string' ? value : '';
+}
+
+function redactHeadersText(text, base, isProtected) {
+  const parts = text.split(/(\r?\n)/);
+  let changed = false;
+  const out = parts.map((part) => {
+    const found = /^([^:]+):(.*)$/s.exec(part);
+    if (!found) return part;
+    const next = headerTarget(found[1].trim(), found[2], base, isProtected).text;
+    if (next === found[2]) return part;
+    changed = true;
+    return `${found[1]}:${next}`;
+  });
+  return changed ? out.join('') : text;
 }
 
 function urlNamed(text, isProtected) {
   return typeof text === 'string' && text !== '' && isProtected(text);
+}
+
+function withHeaders(value, isProtected) {
+  let out = value;
+  if (Array.isArray(value.responseHeaders)) {
+    const base = typeof value.request?.url === 'string' ? value.request.url : '';
+    const next = redactHeaders(value.responseHeaders, base, isProtected);
+    if (next !== value.responseHeaders) out = { ...out, responseHeaders: next };
+  }
+  const base = typeof value.url === 'string' ? value.url : '';
+  if (value.headers && typeof value.headers === 'object') {
+    const next = redactHeaders(value.headers, base, isProtected);
+    if (next !== value.headers) out = { ...out, headers: next };
+  }
+  if (typeof value.headersText === 'string') {
+    const next = redactHeadersText(value.headersText, base, isProtected);
+    if (next !== value.headersText) out = { ...out, headersText: next };
+  }
+  return out;
 }
 
 export function redactProtected(value, isProtected) {
@@ -202,11 +335,12 @@ export function redactProtected(value, isProtected) {
     });
     return out;
   }
-  let out = value;
-  for (const [key, item] of Object.entries(value)) {
+  const source = withHeaders(value, isProtected);
+  let out = source;
+  for (const [key, item] of Object.entries(source)) {
     const next = redactProtected(item, isProtected);
     if (next === item) continue;
-    if (out === value) out = { ...value };
+    if (out === source) out = { ...source };
     out[key] = next;
   }
   if ('urlFragment' in value && URL_KEYS.some((k) => urlNamed(value[k], isProtected))) {
@@ -216,21 +350,27 @@ export function redactProtected(value, isProtected) {
   return out;
 }
 
-export function headersNameProtected(headers, isProtected) {
+export function headersNameProtected(headers, isProtected, base = '') {
   if (Array.isArray(headers)) {
-    return headers.some((header) => namesProtectedUrl(header?.value, isProtected));
+    return headers.some((header) => headerNamed(header?.name, header?.value, base, isProtected));
   }
   if (headers === null || typeof headers !== 'object') return false;
-  return Object.values(headers).some((value) => namesProtectedUrl(value, isProtected));
+  return Object.entries(headers).some(([name, value]) =>
+    headerNamed(name, value, base, isProtected)
+  );
 }
 
 export function responseNamesProtected(method, params, isProtected) {
-  if (headersNameProtected(params?.response?.headers, isProtected)) return true;
-  if (headersNameProtected(params?.redirectResponse?.headers, isProtected)) return true;
+  const response = params?.response;
+  const redirect = params?.redirectResponse;
+  if (headersNameProtected(response?.headers, isProtected, response?.url)) return true;
+  if (headersNameProtected(redirect?.headers, isProtected, redirect?.url)) return true;
   if (!method.endsWith('responseReceivedExtraInfo')) return false;
   return (
     headersNameProtected(params.headers, isProtected) ||
-    namesProtectedUrl(params.headersText, isProtected)
+    namesProtectedUrl(params.headersText, isProtected) ||
+    redactHeadersText(textOrEmpty(params.headersText), '', isProtected) !==
+      textOrEmpty(params.headersText)
   );
 }
 

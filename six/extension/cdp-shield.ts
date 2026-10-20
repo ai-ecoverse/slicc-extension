@@ -207,9 +207,12 @@ export function urlProtected(text: string, readOnly = false): boolean {
 }
 
 const SCHEME = /[a-z0-9+.-]/i;
-const URL_END = /[\s"'<>`\\\u0000-\u001f]/;
+const URL_END = /[\s"'<>`\u0000-\u001f]/;
+const BOUNDARY = /[\s<>"'`=,;([{]/;
+const SLASHES = /[\\/]{2}/g;
 const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
 const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
+const TARGETS = new Set(['location', 'content-location', 'refresh', 'link']);
 
 const AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i;
 
@@ -224,56 +227,191 @@ function originOf(text: string): string {
 interface Span {
   start: number;
   end: number;
+  url: string;
   hit: boolean;
 }
 
+function schemeStart(text: string, colon: number): number {
+  let start = colon;
+  while (start > 0 && colon - start < 32 && SCHEME.test(text[start - 1] ?? '')) start -= 1;
+  while (start < colon && !/[a-z]/i.test(text[start] ?? '')) start += 1;
+  return start;
+}
+
+function judged(text: string, start: number, end: number, prefix: string): Span {
+  const url = prefix + text.slice(start, end).replace(/\\/g, '/');
+  return { start, end, url, hit: urlProtected(url) };
+}
+
 function urlAt(text: string, at: number): Span {
-  let start = at;
-  while (start > 0 && at - start < 32 && SCHEME.test(text[start - 1] ?? '')) start -= 1;
-  while (start < at && !/[a-z]/i.test(text[start] ?? '')) start += 1;
-  let end = at + 3;
+  let end = at + 2;
   while (end < text.length && !URL_END.test(text[end] ?? '')) end += 1;
-  if (start === at) return { start, end, hit: false };
-  if (urlProtected(text.slice(start, end))) return { start, end, hit: true };
-  const scheme = text.slice(start, at).toLowerCase();
+  const miss = { start: at, end, url: '', hit: false };
+  if (end === at + 2 || /[\\/]/.test(text[at + 2] ?? '')) return miss;
+  if (text[at - 1] !== ':') {
+    if (at > 0 && !BOUNDARY.test(text[at - 1] ?? '')) return miss;
+    return judged(text, at, end, 'https:');
+  }
+  const start = schemeStart(text, at - 1);
+  if (start === at - 1) return miss;
+  const whole = judged(text, start, end, '');
+  if (whole.hit) return whole;
+  const scheme = text.slice(start, at - 1).toLowerCase();
   const inner = WEB_SCHEMES.find((s) => scheme.length > s.length && scheme.endsWith(s));
-  if (inner === undefined) return { start, end, hit: false };
-  const from = at - inner.length;
-  return { start: from, end, hit: urlProtected(text.slice(from, end)) };
+  if (inner === undefined) return miss;
+  return judged(text, at - 1 - inner.length, end, '');
+}
+
+function spans(text: unknown): Span[] {
+  const out: Span[] = [];
+  if (typeof text !== 'string' || !/[\\/]{2}/.test(text)) return out;
+  SLASHES.lastIndex = 0;
+  for (let found = SLASHES.exec(text); found; found = SLASHES.exec(text)) {
+    const span = urlAt(text, found.index);
+    if (span.hit) out.push(span);
+    SLASHES.lastIndex = Math.max(span.end, found.index + 2);
+  }
+  return out;
 }
 
 export function redactText(text: string): string {
-  if (!text.includes('://')) return text;
   let out = '';
   let last = 0;
-  let at = text.indexOf('://');
-  while (at >= 0) {
-    const span = urlAt(text, at);
-    if (span.hit) {
-      const match = text.slice(span.start, span.end);
-      const origin = originOf(match);
-      if (match !== origin && match !== `${origin}/`) {
-        out += text.slice(last, span.start) + origin;
-        last = span.end;
-      }
-    }
-    at = text.indexOf('://', Math.max(span.end, at + 3));
+  for (const span of spans(text)) {
+    const origin = originOf(span.url);
+    if (span.url === origin || span.url === `${origin}/`) continue;
+    out += text.slice(last, span.start) + origin;
+    last = span.end;
   }
   return last === 0 ? text : out + text.slice(last);
 }
 
 export function namesProtectedUrl(text: unknown): boolean {
-  if (typeof text !== 'string' || !text.includes('://')) return false;
-  for (let at = text.indexOf('://'); at >= 0; ) {
-    const span = urlAt(text, at);
-    if (span.hit) return true;
-    at = text.indexOf('://', Math.max(span.end, at + 3));
+  return spans(text).length > 0;
+}
+
+function cleaned(target: string): string {
+  return target
+    .replace(/[\t\n\r]/g, '')
+    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '')
+    .replace(/^(['"])(.*)\1$/s, '$2');
+}
+
+function resolved(target: string, base: string): string {
+  try {
+    return new URL(cleaned(target), base || 'https://slicc.invalid/').href;
+  } catch {
+    return '';
   }
-  return false;
+}
+
+function targetSpans(name: string, line: string): Array<[number, number]> {
+  const lower = name.toLowerCase();
+  if (lower === 'link') {
+    return [...line.matchAll(/<([^>]*)>/g)].map((m): [number, number] => [
+      m.index + 1,
+      m.index + 1 + (m[1] ?? '').length,
+    ]);
+  }
+  if (lower !== 'refresh') return [[line.length - line.trimStart().length, line.length]];
+  const named = /url\s*=\s*/i.exec(line);
+  if (named) return [[named.index + named[0].length, line.length]];
+  const bare = /^[\s\d.]*[;,]\s*/.exec(line);
+  return bare ? [[bare[0].length, line.length]] : [];
+}
+
+function redactLine(name: string, line: string, base: string): { text: string; hit: boolean } {
+  let out = '';
+  let last = 0;
+  let hit = false;
+  for (const [start, end] of targetSpans(name, line)) {
+    const url = resolved(line.slice(start, end), base);
+    if (!url || !urlProtected(url)) continue;
+    hit = true;
+    out += line.slice(last, start) + originOf(url);
+    last = end;
+  }
+  return { text: last === 0 ? line : out + line.slice(last), hit };
+}
+
+function headerTarget(
+  name: unknown,
+  value: unknown,
+  base: string
+): { text: unknown; hit: boolean } {
+  if (typeof name !== 'string' || typeof value !== 'string' || !TARGETS.has(name.toLowerCase())) {
+    return { text: value, hit: false };
+  }
+  const lines = value.split('\n').map((line) => redactLine(name, line, base));
+  return { text: lines.map((l) => l.text).join('\n'), hit: lines.some((l) => l.hit) };
+}
+
+function headerNamed(name: unknown, value: unknown, base: string): boolean {
+  return namesProtectedUrl(value) || headerTarget(name, value, base).hit;
+}
+
+export function redactHeaders(headers: unknown, base: string): unknown {
+  if (Array.isArray(headers)) {
+    let out: unknown[] = headers;
+    headers.forEach((header: unknown, index) => {
+      if (!isObj(header)) return;
+      const next = headerTarget(header['name'], header['value'], base).text;
+      if (next === header['value']) return;
+      if (out === headers) out = [...headers];
+      out[index] = { ...header, value: next };
+    });
+    return out;
+  }
+  if (!isObj(headers)) return headers;
+  let out = headers;
+  for (const [name, value] of Object.entries(headers)) {
+    const next = headerTarget(name, value, base).text;
+    if (next === value) continue;
+    if (out === headers) out = { ...headers };
+    out[name] = next;
+  }
+  return out;
+}
+
+function redactHeadersText(text: string, base: string): string {
+  const parts = text.split(/(\r?\n)/);
+  let changed = false;
+  const out = parts.map((part) => {
+    const found = /^([^:]+):(.*)$/s.exec(part);
+    if (!found) return part;
+    const name = found[1] ?? '';
+    const value = found[2] ?? '';
+    const next = headerTarget(name.trim(), value, base).text;
+    if (next === value) return part;
+    changed = true;
+    return `${name}:${String(next)}`;
+  });
+  return changed ? out.join('') : text;
 }
 
 function urlNamed(text: unknown): boolean {
   return typeof text === 'string' && text !== '' && urlProtected(text);
+}
+
+function withHeaders(value: Record<string, unknown>): Record<string, unknown> {
+  let out = value;
+  const request = value['request'];
+  if (Array.isArray(value['responseHeaders'])) {
+    const base = isObj(request) ? (str(request['url']) ?? '') : '';
+    const next = redactHeaders(value['responseHeaders'], base);
+    if (next !== value['responseHeaders']) out = { ...out, responseHeaders: next };
+  }
+  const url = str(value['url']) ?? '';
+  if (isObj(value['headers'])) {
+    const next = redactHeaders(value['headers'], url);
+    if (next !== value['headers']) out = { ...out, headers: next };
+  }
+  const text = str(value['headersText']);
+  if (text !== undefined) {
+    const next = redactHeadersText(text, url);
+    if (next !== text) out = { ...out, headersText: next };
+  }
+  return out;
 }
 
 export function redactProtected<T>(value: T): T {
@@ -289,7 +427,8 @@ export function redactProtected<T>(value: T): T {
     });
     return out as T;
   }
-  const source = value as Record<string, unknown>;
+  const original = value as Record<string, unknown>;
+  const source = withHeaders(original);
   let out = source;
   for (const [key, item] of Object.entries(source)) {
     const next = redactProtected(item);
@@ -297,28 +436,39 @@ export function redactProtected<T>(value: T): T {
     if (out === source) out = { ...source };
     out[key] = next;
   }
-  if ('urlFragment' in source && URL_KEYS.some((k) => urlNamed(source[k]))) {
-    if (out === source) out = { ...source };
+  if ('urlFragment' in original && URL_KEYS.some((k) => urlNamed(original[k]))) {
+    if (out === original) out = { ...original };
     delete out['urlFragment'];
   }
   return out as T;
 }
 
-export function headersNameProtected(headers: unknown): boolean {
+export function headersNameProtected(headers: unknown, base = ''): boolean {
   if (Array.isArray(headers)) {
-    return headers.some((header) => isObj(header) && namesProtectedUrl(header['value']));
+    return headers.some(
+      (header) => isObj(header) && headerNamed(header['name'], header['value'], base)
+    );
   }
   if (!isObj(headers)) return false;
-  return Object.values(headers).some(namesProtectedUrl);
+  return Object.entries(headers).some(([name, value]) => headerNamed(name, value, base));
 }
 
 function responseNamesProtected(method: string, params: CDPPayload): boolean {
   const response = params['response'];
   const redirect = params['redirectResponse'];
-  if (isObj(response) && headersNameProtected(response['headers'])) return true;
-  if (isObj(redirect) && headersNameProtected(redirect['headers'])) return true;
+  if (isObj(response) && headersNameProtected(response['headers'], str(response['url']))) {
+    return true;
+  }
+  if (isObj(redirect) && headersNameProtected(redirect['headers'], str(redirect['url']))) {
+    return true;
+  }
   if (!method.endsWith('responseReceivedExtraInfo')) return false;
-  return headersNameProtected(params['headers']) || namesProtectedUrl(params['headersText']);
+  const text = str(params['headersText']) ?? '';
+  return (
+    headersNameProtected(params['headers']) ||
+    namesProtectedUrl(text) ||
+    redactHeadersText(text, '') !== text
+  );
 }
 
 function binaryHeadersNameProtected(binary: unknown): boolean {
@@ -330,10 +480,10 @@ function binaryHeadersNameProtected(binary: unknown): boolean {
   }
 }
 
-function answerNamesProtected(params: CDPPayload): boolean {
+function answerNamesProtected(params: CDPPayload, base: string): boolean {
   return (
-    headersNameProtected(params['responseHeaders']) ||
-    headersNameProtected(params['headers']) ||
+    headersNameProtected(params['responseHeaders'], base) ||
+    headersNameProtected(params['headers'], base) ||
     binaryHeadersNameProtected(params['binaryResponseHeaders'])
   );
 }
@@ -556,6 +706,7 @@ export class TabShield {
   private readonly held = new Bounded<ShieldEvent[]>(500);
   private readonly frames = new Bounded<string[]>(1000);
   private readonly forwarded = new Bounded<true>(2000);
+  private readonly pausedUrls = new Bounded<string>(2000);
   private readonly bodyReads = new Bounded<string>(2000);
   private readonly streams = new Bounded<true>(500);
   private readonly failedDocuments = new Bounded<true>(200);
@@ -809,17 +960,22 @@ export class TabShield {
     if (reason) refuse(reason);
   }
 
+  private admitPaused(method: string, id: string, params: CDPPayload): void {
+    if (answerNamesProtected(params, this.pausedUrls.get(id) ?? '')) {
+      refuse(PROTECTED_RULES.refusal);
+    }
+    if (!FETCH_READS.has(method)) return;
+    if (this.namedBodies.has(id)) refuse(PROTECTED_RULES.refusal);
+    const read = this.bodyReads.get(id);
+    if (read !== undefined && read !== method) refuse(BODY_READ_REFUSAL);
+    this.bodyReads.set(id, method);
+  }
+
   private admitRequestIds(method: string, params: CDPPayload): void {
     if (FETCH_ANSWERS.has(method)) {
       const id = str(params['requestId']);
       if (!id || !this.forwarded.has(id)) refuse(PAUSE_REFUSAL);
-      if (answerNamesProtected(params)) refuse(PROTECTED_RULES.refusal);
-      if (FETCH_READS.has(method)) {
-        if (this.namedBodies.has(id)) refuse(PROTECTED_RULES.refusal);
-        const read = this.bodyReads.get(id);
-        if (read !== undefined && read !== method) refuse(BODY_READ_REFUSAL);
-        this.bodyReads.set(id, method);
-      }
+      this.admitPaused(method, id, params);
       return;
     }
     if (BODY_METHODS.has(method)) {
@@ -930,7 +1086,7 @@ export class TabShield {
       this.answer('Fetch.failRequest', { requestId: id, errorReason: 'BlockedByClient' });
       return [];
     }
-    if (headersNameProtected(paused['responseHeaders'])) {
+    if (headersNameProtected(paused['responseHeaders'], requestUrl(paused))) {
       this.namedBodies.set(id, true);
       if (networkId) this.requests.set(networkId, true);
     }
@@ -941,6 +1097,7 @@ export class TabShield {
       return [];
     }
     this.forwarded.set(id, true);
+    this.pausedUrls.set(id, requestUrl(paused) ?? '');
     return [{ method: 'Fetch.requestPaused', params: paused }];
   }
 
