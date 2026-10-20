@@ -38,5 +38,23 @@ if (newest.status !== 'completed')
     'skipped',
     `run ${newest.id} on ${head} is still ${newest.status}, and its post reads the live pull request`
   );
-await gh.call(`actions/runs/${newest.id}/rerun`, 'POST', {});
+let changed = 0;
+for (const path of ['.github/workflows/cert-review.yml', 'scripts/cert']) {
+  const [last] = await gh.call(`commits?sha=main&path=${encodeURIComponent(path)}&per_page=1`);
+  changed = Math.max(changed, Date.parse(last?.commit?.committer?.date ?? 0) || 0);
+}
+if (Date.parse(newest.created_at) < changed)
+  done(
+    'stale',
+    `run ${newest.id} on ${head} predates main's current cert-review code, so a re-run would replay old code: push a commit to re-certify`
+  );
+try {
+  await gh.call(`actions/runs/${newest.id}/rerun`, 'POST', {});
+} catch (err) {
+  done(
+    'failure',
+    `re-running run ${newest.id} failed (${err.message.slice(0, 200)}): push a commit to re-certify`,
+    1
+  );
+}
 done('rerun', `re-ran every job of run ${newest.id} on ${head}`);

@@ -145,6 +145,10 @@ function handle(req, res, body) {
     return reply(res, 200, { jobs: state.jobs[m[1]] ?? [] });
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/artifacts$/.exec(p)))
     return reply(res, 200, { artifacts: state.artifacts });
+  if (p === '/repos/o/r/commits')
+    return reply(res, 200, [
+      { commit: { committer: { date: state.certChanged ?? '2026-10-01T00:00:00Z' } } },
+    ]);
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/rerun$/.exec(p)) && req.method === 'POST') {
     state.reruns.push(Number(m[1]));
     return reply(res, 201, {});
@@ -1292,8 +1296,9 @@ test('post never sets success while the live pull request is a draft', async () 
   assert.equal(check.output.title, 'incomplete: not current; re-run');
 });
 
-async function rerunWith(runs, pullExtra = {}, eventExtra = {}) {
+async function rerunWith(runs, pullExtra = {}, eventExtra = {}, certChanged) {
   reset();
+  state.certChanged = certChanged;
   state.workflowRuns = runs;
   const file = event('rerun-helper', shas.code, eventExtra);
   state.pulls['7'] = { ...state.pulls['7'], ...pullExtra };
@@ -1339,4 +1344,11 @@ test('cert-rerun fails visibly when there is no cert-review run to re-run', asyn
   assert.equal(r.code, 1);
   assert.match(r.stdout, /cert-review rerun: failure/);
   assert.deepEqual(state.reruns, []);
+});
+
+test('cert-rerun refuses to replay a run older than the current cert-review code', async () => {
+  const r = await rerunWith([runOf(49, '2026-10-19T06:00:00Z')], {}, {}, '2026-10-19T07:00:00Z');
+  assert.equal(r.code, 0, r.stdout);
+  assert.deepEqual(state.reruns, []);
+  assert.match(r.stdout, /cert-review rerun: stale .*push a commit/);
 });
