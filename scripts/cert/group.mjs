@@ -28,18 +28,12 @@ async function runsOf(memberHead) {
     .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
 }
 
-async function settled(memberHead) {
-  for (let i = 0; ; i++) {
-    const runs = await runsOf(memberHead);
-    if (runs[0]?.status === 'completed' || !runs.length || i >= 48) return runs;
-    await new Promise((r) => setTimeout(r, WAIT));
-  }
-}
+const DEADLINE = Date.now() + Number(env.CERT_GROUP_DEADLINE_MS ?? 720000);
 
-async function verdictRun(memberHead, pr) {
-  for (const r of await settled(memberHead)) {
+async function once(memberHead, pr) {
+  for (const r of await runsOf(memberHead)) {
     const url = r.html_url ?? `run ${r.id}`;
-    if (r.status !== 'completed') return { problem: `${url} on this head is still ${r.status}` };
+    if (r.status !== 'completed') return { pending: `${url} on this head is still ${r.status}` };
     const jobs = (await gh.call(`actions/runs/${r.id}/attempts/${r.run_attempt}/jobs?per_page=100`))
       .jobs;
     const noop =
@@ -64,6 +58,15 @@ async function verdictRun(memberHead, pr) {
     return { run: r, post };
   }
   return { problem: `no cert-review run of ${WORKFLOW} on this head` };
+}
+
+async function verdictRun(memberHead, pr) {
+  for (;;) {
+    const r = await once(memberHead, pr);
+    if (!r.pending) return r;
+    if (Date.now() + WAIT > DEADLINE) return { problem: r.pending };
+    await new Promise((done) => setTimeout(done, WAIT));
+  }
 }
 
 async function member(m) {
@@ -93,7 +96,11 @@ try {
   if (env.GUARD !== 'PASS' && receipt.members.every((m) => m.status === 'PASS'))
     throw new Error(`cert-self-guard returned ${env.GUARD}`);
   prs = receipt.members.map((m) => `#${m.pr}`);
-  for (const m of receipt.members) rows.push(await member(m));
+  for (const m of receipt.members) {
+    const row = await member(m);
+    rows.push(row);
+    if (!row.ok) break;
+  }
 } catch (err) {
   problem = err.message;
   rows = [];

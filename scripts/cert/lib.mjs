@@ -531,6 +531,17 @@ export function api(repo, token = process.env.GH_TOKEN) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '')) throw new Error(`invalid repository ${repo}`);
   const origin = process.env.GITHUB_API_URL ?? 'https://api.github.com';
   const call = async (route, method = 'GET', body) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await once(route, method, body);
+      } catch (err) {
+        const transient = !err.status || err.status >= 500;
+        if (method !== 'GET' || !transient || attempt >= 2) throw err;
+        await new Promise((done) => setTimeout(done, 2000 * (attempt + 1)));
+      }
+    }
+  };
+  const once = async (route, method, body) => {
     const url = route.startsWith('/') ? `${origin}${route}` : `${origin}/repos/${repo}/${route}`;
     const r = await fetch(url, {
       method,
