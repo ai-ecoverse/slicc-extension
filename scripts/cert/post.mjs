@@ -89,8 +89,16 @@ async function tidy() {
 
 async function current() {
   const live = await gh.call(`pulls/${n}`);
-  if (live.state === 'open' && live.head.sha === head) return true;
-  console.log(`not posting: #${n} is ${live.state} at ${live.head.sha}, this run is for ${head}`);
+  if (
+    live.state === 'open' &&
+    live.head.sha === head &&
+    live.base?.ref === 'main' &&
+    live.draft !== true
+  )
+    return true;
+  console.log(
+    `not posting: #${n} is ${live.state}${live.draft ? ' draft' : ''} at ${live.head.sha} into ${live.base?.ref}, this run is for ${head}`
+  );
   return false;
 }
 
@@ -248,6 +256,22 @@ try {
     title: 'incomplete: writer check; re-run',
     text: `Listing the cert-review check runs on this head failed (${err.message.slice(0, 200)}).`,
   };
+}
+if (r.conclusion === 'success') {
+  try {
+    if (!(await current()))
+      r = {
+        conclusion: 'failure',
+        title: 'incomplete: not current; re-run',
+        text: 'The pull request is no longer open, ready, into main and at this head, so this run does not certify it.',
+      };
+  } catch (err) {
+    r = {
+      conclusion: 'failure',
+      title: 'incomplete: post; re-run',
+      text: `Reading the live pull request failed (${err.message.slice(0, 200)}).`,
+    };
+  }
 }
 await setCheck(gh, {
   pr: n,

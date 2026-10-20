@@ -98,6 +98,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       kind: ${{ steps.plan.outputs.kind }}
       conclusion: ${{ steps.plan.outputs.conclusion }}
@@ -123,6 +124,7 @@ jobs:
       - id: plan
         name: Fork, draft, cert path, not behaviour, or review
         env:
+          GH_TOKEN: ${{ github.token }}
           GUARD: ${{ needs.guard.outputs.status }}
           RECEIPT: ${{ needs.guard.outputs.receipt }}
         run: node scripts/cert/plan.mjs

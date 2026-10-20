@@ -111,7 +111,11 @@ function handle(req, res, body) {
     Object.assign(c, body);
     return reply(res, 200, c);
   }
-  if ((m = /^\/repos\/o\/r\/pulls\/(\d+)$/.exec(p))) return reply(res, 200, state.pulls[m[1]]);
+  if ((m = /^\/repos\/o\/r\/pulls\/(\d+)$/.exec(p)))
+    return reply(res, 200, {
+      ...state.pulls[m[1]],
+      ...(state.pullDraftAfterPlan ? { draft: true } : {}),
+    });
   if ((m = /^\/repos\/o\/r\/pulls\/(\d+)\/reviews$/.exec(p))) {
     if (req.method === 'GET') return reply(res, 200, []);
     state.reviews.push({ pr: Number(m[1]), ...body });
@@ -1240,4 +1244,45 @@ test('the merge group reads every page of runs on a member head', async () => {
     { pageSize: 100 }
   );
   assert.equal(r.check.conclusion, 'success', r.r.stdout);
+});
+
+test('the plan reads the live pull request, so a re-run after marking ready reviews it and a moved head fails that run', async () => {
+  reset();
+  const file = event('rerun', shas.code, { pull: { draft: true }, event: { action: 'opened' } });
+  state.pulls['7'] = { ...state.pulls['7'], draft: false };
+  const ready = await run('plan.mjs', {
+    GITHUB_EVENT_PATH: file,
+    GUARD: 'PASS',
+    RECEIPT: receipt(shas.code),
+  });
+  assert.equal(ready.outputs.kind, 'review', ready.stdout);
+  state.pulls['7'] = { ...state.pulls['7'], draft: true };
+  const again = await run('plan.mjs', {
+    GITHUB_EVENT_PATH: file,
+    GUARD: 'PASS',
+    RECEIPT: receipt(shas.code),
+  });
+  assert.equal(again.outputs.title, 'draft: not reviewed (mark ready)');
+  state.pulls['7'] = {
+    ...state.pulls['7'],
+    draft: false,
+    head: { sha: shas.docs, repo: { full_name: 'o/r' } },
+  };
+  const moved = await run('plan.mjs', {
+    GITHUB_EVENT_PATH: file,
+    GUARD: 'PASS',
+    RECEIPT: receipt(shas.code),
+  });
+  assert.equal(moved.outputs.conclusion, 'failure');
+  assert.match(moved.outputs.title, /head moved/);
+});
+
+test('post never sets success while the live pull request is a draft', async () => {
+  const { r, check } = await post(v2({ verdict: 'pass', summary: 'fine', comments: [] }), () => {
+    state.pullDraftAfterPlan = true;
+  });
+  state.pullDraftAfterPlan = false;
+  assert.equal(r.code, 1, r.stdout);
+  assert.equal(check.conclusion, 'failure');
+  assert.equal(check.output.title, 'incomplete: not current; re-run');
 });
