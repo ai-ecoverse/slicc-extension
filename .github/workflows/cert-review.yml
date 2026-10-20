@@ -260,7 +260,7 @@ jobs:
         run: node scripts/cert/post.mjs
 
       - name: A post that set no check still sets one, so cert-review never waits forever
-        if: failure() && steps.post.outputs.checked != 'true'
+        if: (failure() || cancelled()) && steps.post.outputs.checked != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}

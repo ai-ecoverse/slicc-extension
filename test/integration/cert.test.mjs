@@ -1190,3 +1190,34 @@ test('the verdict is a commit status bound to the run attempt, and an earlier ge
   assert.equal(check.target_url, 'https://github.example/o/r/actions/runs/4242/attempts/1');
   assert.equal(state.issues.length, 0);
 });
+
+for (const [name, setup] of [
+  [
+    'a status with a zero-padded run id copying a real run',
+    () => {
+      writer(570, '.github/workflows/cert-review.yml', 'pull_request_target', 'success');
+      state.statuses.push(
+        statusOf({ target_url: 'https://github.example/o/r/actions/runs/570/attempts/1' })
+      );
+      state.statuses.push(
+        statusOf({ target_url: 'https://github.example/o/r/actions/runs/0570/attempts/01' })
+      );
+    },
+  ],
+  [
+    'a status replaying a run that already wrote a check run',
+    () => {
+      writer(571, '.github/workflows/cert-review.yml', 'pull_request_target', 'success');
+      state.checks.push(spoofCheck({ external_id: `v2:7:${shas.code}:571:1` }));
+      state.statuses.push(
+        statusOf({ target_url: 'https://github.example/o/r/actions/runs/571/attempts/1' })
+      );
+    },
+  ],
+]) {
+  test(`post fails closed on ${name}`, async () => {
+    const { r } = await post(v2({ verdict: 'pass', summary: 'fine', comments: [] }), setup);
+    assert.equal(r.code, 1, r.stdout);
+    assert.equal(state.verdicts.at(-1).output.title, 'another workflow wrote cert-review');
+  });
+}
