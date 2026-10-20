@@ -466,7 +466,7 @@ export class TabShield {
   }
 
   failedBeforeCommit(url: string): boolean {
-    return this.failedDocuments.has(url);
+    return this.failedDocuments.has(url.split('#')[0] ?? url);
   }
 
   block(): void {
@@ -758,7 +758,7 @@ export class TabShield {
     const networkId = str(paused['networkId']);
     if (networkId) this.requests.set(networkId, tainted || this.requests.get(networkId) === true);
     if (protectedUrl && paused['resourceType'] === 'Document') {
-      this.failedDocuments.set(requestUrl(paused) ?? '', true);
+      this.failedDocuments.set((requestUrl(paused) ?? '').split('#')[0] ?? '', true);
       this.answer('Fetch.failRequest', { requestId: id, errorReason: 'BlockedByClient' });
       return [];
     }
