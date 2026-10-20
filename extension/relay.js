@@ -9,9 +9,9 @@
   if (typeof Uint8Array.fromBase64 !== 'function') {
     Uint8Array.fromBase64 = function (b64) {
       const bin = atob(b64);
-      const arr = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-      return arr;
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
     };
   }
   const _six = ['www.sliccy.ai'];
