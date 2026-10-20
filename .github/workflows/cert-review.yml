@@ -39,6 +39,5 @@ jobs:
       evidence-workflow: ci.yml
       evidence-artifacts: |
         guard-rows
-      evidence-wait-minutes: 60
     secrets:
       AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
