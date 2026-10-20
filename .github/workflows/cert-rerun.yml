@@ -3,37 +3,14 @@ name: cert-rerun
 on:
   pull_request_target:
     branches: [main]
-    types: [ready_for_review, labeled]
+    types: [ready_for_review, labeled, unlabeled, edited]
 
-permissions:
-  contents: read
-
-concurrency:
-  group: cert-rerun-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
   rerun:
-    name: re-run the newest cert-review run
-    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft && (github.event.action == 'ready_for_review' || github.event.label.name == 'cert-review-approved')
-    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 5
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/cert-rerun.yml@d6905ade35cae4418fde21cb7d947cad7ea96b1d
     permissions:
-      contents: read
-      pull-requests: read
       actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          sparse-checkout: scripts
-          persist-credentials: false
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: 24
-
-      - name: Re-run every job of the newest cert-review run on the live head
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/cert/rerun.mjs
+    with:
+      tools-ref: d6905ade35cae4418fde21cb7d947cad7ea96b1d
