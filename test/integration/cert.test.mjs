@@ -98,12 +98,16 @@ function handle(req, res, body) {
     state.issues.push({ ...body, number: state.nextId++ });
     return reply(res, 201, state.issues.at(-1));
   }
-  if (p === '/repos/o/r/actions/workflows/cert-review.yml/runs')
+  if (p === '/repos/o/r/actions/workflows/cert-review.yml/runs') {
+    state.polls = (state.polls ?? 0) + 1;
+    if (state.settleAfter && state.polls >= state.settleAfter)
+      for (const r of state.workflowRuns) r.status = 'completed';
     return reply(res, 200, {
       workflow_runs: state.workflowRuns.filter(
         (r) => r.head_sha === url.searchParams.get('head_sha')
       ),
     });
+  }
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/attempts\/(\d+)\/jobs$/.exec(p)))
     return reply(res, 200, { jobs: state.jobs[m[1]] ?? [] });
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/artifacts$/.exec(p)))
@@ -210,6 +214,8 @@ function reset() {
   state.workflowRuns = [];
   state.jobs = {};
   state.issues = [];
+  state.polls = 0;
+  state.settleAfter = 0;
 }
 
 async function plan(name, head, extra, guard = 'PASS', rec = receipt(head)) {
@@ -508,8 +514,9 @@ function runOf(id, created, extra = {}) {
   };
 }
 
-async function groupOf(runs, jobs) {
+async function groupOf(runs, jobs, extra = {}) {
   reset();
+  state.settleAfter = extra.settleAfter ?? 0;
   state.workflowRuns = runs;
   state.jobs = jobs;
   const groupHead = shas.docs;
@@ -519,6 +526,7 @@ async function groupOf(runs, jobs) {
     GITHUB_EVENT_PATH: file,
     GUARD: 'PASS',
     CERT_GROUP_WAIT_MS: '1',
+    CERT_GROUP_DEADLINE_MS: extra.deadline ?? '200',
     RECEIPT: JSON.stringify({
       status: 'PASS',
       head: groupHead,
@@ -1038,4 +1046,21 @@ test('the plan decides on the diff against the workflow commit: a PR that only c
   const missing = await run('plan.mjs', { ...env, GITHUB_ACTIONS: 'true' });
   assert.equal(missing.code, 1);
   assert.match(missing.stdout, /BASE_SHA/);
+});
+
+test('the merge group waits for a queued member run that then completes, under one shared deadline', async () => {
+  const queued = runOf(11, '2026-10-19T02:00:00Z', { status: 'queued' });
+  const settled = await groupOf(
+    [queued],
+    { 11: [{ name: 'cert / post', conclusion: 'success' }] },
+    { settleAfter: 3, deadline: '5000' }
+  );
+  assert.equal(settled.check.conclusion, 'success', settled.r.stdout);
+  const stuck = await groupOf(
+    [runOf(12, '2026-10-19T02:00:00Z', { status: 'queued' })],
+    {},
+    { deadline: '50' }
+  );
+  assert.equal(stuck.check.conclusion, 'failure');
+  assert.match(stuck.check.output.summary, /still queued/);
 });
