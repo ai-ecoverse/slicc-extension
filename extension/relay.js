@@ -1,9 +1,9 @@
 {
   if (typeof Uint8Array.prototype.toBase64 !== 'function') {
     Uint8Array.prototype.toBase64 = function () {
-      let s = '';
-      for (let i = 0; i < this.length; i++) s += String.fromCharCode(this[i]);
-      return btoa(s);
+      let out = '';
+      for (let i = 0; i < this.length; i++) out += String.fromCharCode(this[i]);
+      return btoa(out);
     };
   }
   if (typeof Uint8Array.fromBase64 !== 'function') {
