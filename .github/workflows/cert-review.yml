@@ -23,13 +23,15 @@ env:
   LOUD: |
     extension/**
     six/**
-  INJECTION_ALLOW: ""
+  INJECTION_ALLOW: |
+    test/integration/cert.test.mjs
   GUARD_PATHS: |
     .github/workflows/**
     .github/actions/**
     scripts/cert/**
     scripts/gate.mjs
     scripts/is-main.mjs
+    test/integration/cert.test.mjs
   FALLBACK: |
     const e = process.env;
     const run = `${e.GITHUB_SERVER_URL}/${e.GITHUB_REPOSITORY}/actions/runs/${e.GITHUB_RUN_ID}/attempts/${e.GITHUB_RUN_ATTEMPT}`;
@@ -260,7 +262,7 @@ jobs:
         run: node scripts/cert/post.mjs
 
       - name: A post that set no check still sets one, so cert-review never waits forever
-        if: failure() && steps.post.outputs.checked != 'true'
+        if: (failure() || cancelled()) && steps.post.outputs.checked != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}

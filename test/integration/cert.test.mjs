@@ -127,9 +127,14 @@ function handle(req, res, body) {
     if (state.settleAfter && state.polls >= state.settleAfter)
       for (const r of state.workflowRuns) r.status = 'completed';
     return reply(res, 200, {
-      workflow_runs: state.workflowRuns.filter(
-        (r) => r.head_sha === url.searchParams.get('head_sha')
-      ),
+      workflow_runs: state.workflowRuns
+        .filter((r) => r.head_sha === url.searchParams.get('head_sha'))
+        .slice(
+          (Number(url.searchParams.get('page') ?? 1) - 1) *
+            Number(url.searchParams.get('per_page') ?? 100),
+          Number(url.searchParams.get('page') ?? 1) *
+            Number(url.searchParams.get('per_page') ?? 100)
+        ),
     });
   }
   if ((m = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/attempts\/(\d+)\/jobs$/.exec(p)))
@@ -1189,4 +1194,50 @@ test('the verdict is a commit status bound to the run attempt, and an earlier ge
   assert.equal(check.conclusion, 'success');
   assert.equal(check.target_url, 'https://github.example/o/r/actions/runs/4242/attempts/1');
   assert.equal(state.issues.length, 0);
+});
+
+for (const [name, setup] of [
+  [
+    'a status with a zero-padded run id copying a real run',
+    () => {
+      writer(570, '.github/workflows/cert-review.yml', 'pull_request_target', 'success');
+      state.statuses.push(
+        statusOf({ target_url: 'https://github.example/o/r/actions/runs/570/attempts/1' })
+      );
+      state.statuses.push(
+        statusOf({ target_url: 'https://github.example/o/r/actions/runs/0570/attempts/01' })
+      );
+    },
+  ],
+  [
+    'a status replaying a run that already wrote a check run',
+    () => {
+      writer(571, '.github/workflows/cert-review.yml', 'pull_request_target', 'success');
+      state.checks.push(spoofCheck({ external_id: `v2:7:${shas.code}:571:1` }));
+      state.statuses.push(
+        statusOf({ target_url: 'https://github.example/o/r/actions/runs/571/attempts/1' })
+      );
+    },
+  ],
+]) {
+  test(`post fails closed on ${name}`, async () => {
+    const { r } = await post(v2({ verdict: 'pass', summary: 'fine', comments: [] }), setup);
+    assert.equal(r.code, 1, r.stdout);
+    assert.equal(state.verdicts.at(-1).output.title, 'another workflow wrote cert-review');
+  });
+}
+
+test('the merge group reads every page of runs on a member head', async () => {
+  const filler = Array.from({ length: 100 }, (_, i) =>
+    runOf(5000 + i, `2026-10-19T00:${String(i % 60).padStart(2, '0')}:00Z`, {
+      path: '.github/workflows/other.yml',
+    })
+  );
+  const ours = runOf(4999, '2026-10-18T00:00:00Z');
+  const r = await groupOf(
+    [...filler, ours],
+    { 4999: [{ name: 'cert / post', conclusion: 'success' }] },
+    { pageSize: 100 }
+  );
+  assert.equal(r.check.conclusion, 'success', r.r.stdout);
 });

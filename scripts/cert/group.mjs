@@ -23,10 +23,16 @@ const NOOP = ['cert / self-guard', 'cert / plan'];
 const WAIT = Number(env.CERT_GROUP_WAIT_MS ?? 15000);
 
 async function runsOf(memberHead) {
-  const data = await gh.call(
-    `actions/runs?event=pull_request_target&head_sha=${memberHead}&per_page=100`
-  );
-  return data.workflow_runs
+  const all = [];
+  for (let page = 1; ; page++) {
+    if (page > 10) throw new Error(`more than 1000 pull_request_target runs on ${memberHead}`);
+    const data = await gh.call(
+      `actions/runs?event=pull_request_target&head_sha=${memberHead}&per_page=100&page=${page}`
+    );
+    all.push(...data.workflow_runs);
+    if (data.workflow_runs.length < 100) break;
+  }
+  return all
     .filter(
       (r) =>
         ourRun(r, env.GITHUB_REPOSITORY) &&

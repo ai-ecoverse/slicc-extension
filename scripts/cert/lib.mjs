@@ -587,7 +587,7 @@ export function api(repo, token = process.env.GH_TOKEN) {
   return { call, graphql };
 }
 
-const EXTERNAL = /^v2:[^:]+:([0-9a-f]{40}):(\d+):(\d+)$/;
+const EXTERNAL = /^v2:[^:]+:([0-9a-f]{40}):([1-9]\d*):([1-9]\d*)$/;
 
 async function checkWrites(gh, ref) {
   const out = [];
@@ -608,9 +608,9 @@ async function checkWrites(gh, ref) {
         kind: 'check run',
       });
     }
-    if (data.check_runs.length < 100) break;
+    if (data.check_runs.length < 100) return out;
   }
-  return out;
+  throw new Error('more than 1000 cert-review check runs on this head');
 }
 
 const escape = (text) => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
@@ -619,7 +619,7 @@ const STATE = { success: 'success', pending: 'pending' };
 async function statusWrites(gh, ref, repo) {
   const server = process.env.GITHUB_SERVER_URL ?? 'https://github.com';
   const target = new RegExp(
-    `^${escape(server)}/${escape(repo)}/actions/runs/(\\d+)/attempts/(\\d+)$`
+    `^${escape(server)}/${escape(repo)}/actions/runs/([1-9]\\d*)/attempts/([1-9]\\d*)$`
   );
   const out = [];
   for (let page = 1; page <= 10; page++) {
@@ -637,9 +637,9 @@ async function statusWrites(gh, ref, repo) {
         kind: 'status',
       });
     }
-    if (data.length < 100) break;
+    if (data.length < 100) return out;
   }
-  return out;
+  throw new Error('more than 1000 statuses on this head');
 }
 
 async function judge(gh, w, ref, { event, job, repo }) {
@@ -669,12 +669,11 @@ export async function foreignWriters(gh, ref, how) {
   const all = [...(await checkWrites(gh, ref)), ...(await statusWrites(gh, ref, how.repo))];
   for (const w of all) {
     const why = (reason) => foreign.push({ url: w.url, app: w.who, reason });
-    const key = `${w.kind}:${w.run}:${w.attempt}`;
+    const key = `${w.run}:${w.attempt}`;
     if (!w.ours) why(`written by ${w.who}`);
     else if (!w.run || w.head !== ref) why('names no run of this workflow for this head');
     else if (w.said === 'pending') continue;
-    else if (seen.has(key))
-      why(`a second cert-review ${w.kind} for run ${w.run} attempt ${w.attempt}`);
+    else if (seen.has(key)) why(`a second cert-review write for run ${w.run} attempt ${w.attempt}`);
     else {
       seen.add(key);
       const reason = await judge(gh, w, ref, how);
