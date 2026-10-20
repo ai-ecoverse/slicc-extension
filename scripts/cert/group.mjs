@@ -31,7 +31,7 @@ async function runsOf(memberHead) {
 async function settled(memberHead) {
   for (let i = 0; ; i++) {
     const runs = await runsOf(memberHead);
-    if (runs[0]?.status === 'completed' || !runs.length || i >= 6) return runs;
+    if (runs[0]?.status === 'completed' || !runs.length || i >= 48) return runs;
     await new Promise((r) => setTimeout(r, WAIT));
   }
 }

@@ -272,7 +272,7 @@ jobs:
     needs: guard
     if: ${{ !cancelled() && github.event_name == 'merge_group' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
