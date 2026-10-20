@@ -337,6 +337,7 @@ class Connection {
       seen: new Set(),
       failed: new Map(),
       streams: new Set(),
+      cut: new Set(),
       discover: false,
       counter: 0,
     };
@@ -452,6 +453,8 @@ class Connection {
     const sessions = this.sessionsOf(tabId);
     const owned = this.state.ownedTabs.has(tabId);
     if (sessions.length === 0 && !owned) return;
+    for (const sessionId of sessions) this.state.cut.add(sessionId);
+    while (this.state.cut.size > 1000) this.state.cut.delete(this.state.cut.values().next().value);
     this.forget(tabId);
     for (const sessionId of sessions) {
       this.post({
@@ -742,9 +745,21 @@ class Connection {
     const sessionId = this.state.sessions.has(targetId)
       ? `${targetId}.${++this.state.counter}`
       : targetId;
+    this.state.cut.delete(sessionId);
     this.state.sessions.set(sessionId, { tabId, patterns: null, auth: false });
     tab.sessions.add(sessionId);
     this.state.seen.add(tabId);
+    const current = await readTab(this.api, tabId).catch(() => undefined);
+    if (current) {
+      this.post({
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId,
+          targetInfo: { ...this.info(current), attached: true },
+          waitingForDebugger: false,
+        },
+      });
+    }
     return { sessionId };
   }
 
@@ -978,14 +993,18 @@ class Connection {
     }
   }
 
+  sessionOf(sessionId) {
+    const session = typeof sessionId === 'string' ? this.state.sessions.get(sessionId) : undefined;
+    if (session) return session;
+    if (this.state.cut.has(sessionId)) refusal();
+    throw new Error(
+      `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
+    );
+  }
+
   async sessionCommand(message, params) {
     const { method, sessionId } = message;
-    const session = typeof sessionId === 'string' ? this.state.sessions.get(sessionId) : undefined;
-    if (!session) {
-      throw new Error(
-        `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
-      );
-    }
+    const session = this.sessionOf(sessionId);
     const { tabId } = session;
     const tab = this.tabState(tabId);
     const seen = await this.admit(tabId, tab, method, params, sessionId);

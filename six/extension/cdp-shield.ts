@@ -503,6 +503,13 @@ export function treeNamesProtected(tree: unknown): boolean {
   return false;
 }
 
+const DISCOVERY_EVENTS = new Set([
+  'Target.targetCreated',
+  'Target.targetInfoChanged',
+  'Target.targetDestroyed',
+  'Target.targetCrashed',
+]);
+
 const ERROR_PAGE_READS = new Set([
   'Page.captureSnapshot',
   'Page.getResourceContent',
@@ -1053,6 +1060,7 @@ export class TabShield {
     if (profiled(method) && this.worlds.foreign) return [];
     if (this.worlds.hides(p)) return [];
     if (this.frameProtected(str(p['frameId']) ?? '')) return [];
+    if (DISCOVERY_EVENTS.has(method)) return [];
     if (method.startsWith('Target.')) {
       if (isObj(p['targetInfo']) && isProtectedTargetType(p['targetInfo']['type'])) return [];
       return [this.redactTarget(method, p)];

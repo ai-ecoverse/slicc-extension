@@ -111,11 +111,24 @@ function exactTabId(targetId: string): number {
   return tabId;
 }
 
+const ERROR_PAGE = 'chrome-error://chromewebdata/';
+const DISCOVERY_REFUSAL =
+  'slicc: refused: the extension bridge does not report target discovery events';
+
+function failedView(tabId: number, tab: ChromeTab | undefined): ChromeTab | undefined {
+  const shield = tabShields.get(tabId);
+  if (!tab || !shield || !tab.url || !shield.failedBeforeCommit(tab.url)) return tab;
+  const pending = tab.pendingUrl && shield.failedBeforeCommit(tab.pendingUrl) ? '' : tab.pendingUrl;
+  return { ...tab, url: ERROR_PAGE, pendingUrl: pending };
+}
+
+async function protectedNow(tabId: number, deps: BridgeSwDeps): Promise<boolean> {
+  return isProtectedTab(failedView(tabId, await deps.getTab(tabId)), deps.getTab);
+}
+
 async function guardedTab(params: CDPPayload, deps: BridgeSwDeps): Promise<number> {
   const tabId = exactTabId(readTargetIdParam(params));
-  if (await isProtectedTab(await deps.getTab(tabId), deps.getTab)) {
-    throw new Error(PROTECTED_REFUSAL);
-  }
+  if (await protectedNow(tabId, deps)) throw new Error(PROTECTED_REFUSAL);
   return tabId;
 }
 
@@ -218,6 +231,8 @@ interface PortState {
   runtimeTabs: Set<number>;
   unsubscribeEvents: (() => void) | null;
   emit: (tabId: number, method: string, params?: CDPPayload) => void;
+  announce: (method: string, params: CDPPayload) => void;
+  cut: Set<string>;
 }
 
 const welcomedLeaderPorts = new Map<ChromeRuntimePort, string>();
@@ -268,6 +283,11 @@ function cutProtectedTab(tabId: number): Set<number> {
       .filter(([, tid]) => tid === tabId)
       .map(([sid]) => sid);
     if (detachedSessionIds.length === 0) continue;
+    for (const sid of detachedSessionIds) state.cut.add(sid);
+    while (state.cut.size > 1000) {
+      const oldest = state.cut.values().next().value;
+      if (oldest !== undefined) state.cut.delete(oldest);
+    }
     invalidatePortDebuggerAttachment(state, tabId);
     detached.add(tabId);
     if (state.channelId === null) continue;
@@ -582,6 +602,8 @@ export async function handleBridgePortConnect(
     runtimeTabs: new Set(),
     unsubscribeEvents: null,
     emit: () => {},
+    announce: () => {},
+    cut: new Set(),
   };
 
   let pinned = false;
@@ -706,6 +728,19 @@ async function handleBridgeMessage(
         } satisfies ExtensionBridgeEnvelope);
       } catch {}
     };
+    state.announce = (method, params) => {
+      const channelId = state.channelId;
+      if (channelId === null) return;
+      try {
+        port.postMessage({
+          bridge: EXTENSION_BRIDGE_PROTOCOL_VERSION,
+          channelId,
+          kind: 'cdp.event',
+          method,
+          params: redactProtected(params),
+        } satisfies ExtensionBridgeEnvelope);
+      } catch {}
+    };
     state.unsubscribeEvents = subscribeShieldedEvents(deps, (tabId, method, params) => {
       if (method.startsWith('Runtime.') && !state.runtimeTabs.has(tabId)) return;
       state.emit(tabId, method, params);
@@ -749,6 +784,18 @@ async function handleBridgeMessage(
   }
 }
 
+function attachedTab(method: string, sessionId: string | undefined, state: PortState): number {
+  if (sessionId === undefined && method === 'Target.setDiscoverTargets') {
+    throw new Error(DISCOVERY_REFUSAL);
+  }
+  const tabId = sessionId !== undefined ? state.sessionToTab.get(sessionId) : undefined;
+  if (tabId !== undefined) return tabId;
+  if (sessionId !== undefined && state.cut.has(sessionId)) throw new Error(PROTECTED_REFUSAL);
+  throw new Error(
+    `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
+  );
+}
+
 async function dispatchCdpCommand(
   req: Pick<ExtensionBridgeCdpRequest, 'method' | 'params' | 'sessionId'>,
   state: PortState,
@@ -774,12 +821,7 @@ async function dispatchCdpCommand(
   if (method === 'Browser.getWindowBounds') return cdpGetWindowBounds(params ?? {}, deps);
   if (method === 'Browser.setWindowBounds') return cdpSetWindowBounds(params ?? {}, deps);
 
-  const tabId = sessionId !== undefined ? state.sessionToTab.get(sessionId) : undefined;
-  if (tabId === undefined) {
-    throw new Error(
-      `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
-    );
-  }
+  const tabId = attachedTab(method, sessionId, state);
 
   if (method === 'Page.bringToFront') {
     await deps.activateTab(tabId);
@@ -837,7 +879,7 @@ async function cdpAttachToTarget(
     });
     if (attachedByThisPort) state.ownedTabs.add(tabId);
   }
-  if (await isProtectedTab(await deps.getTab(tabId), deps.getTab)) {
+  if (await protectedNow(tabId, deps)) {
     if (state.ownedTabs.has(tabId)) {
       state.ownedTabs.delete(tabId);
       await deps.detachDebugger(tabId);
@@ -858,8 +900,24 @@ async function cdpAttachToTarget(
     throw err;
   }
   const sessionId = targetId;
+  state.cut.delete(sessionId);
   state.sessionToTab.set(sessionId, tabId);
   state.attachRefCounts.set(tabId, (state.attachRefCounts.get(tabId) ?? 0) + 1);
+  const tab = await deps.getTab(tabId);
+  const url = tab?.url || tab?.pendingUrl || '';
+  const info = {
+    targetId,
+    type: 'page',
+    title: tab?.title ?? '',
+    url,
+    attached: true,
+    canAccessOpener: false,
+  };
+  state.announce('Target.attachedToTarget', {
+    sessionId,
+    targetInfo: url && isProtectedUrl(url) ? redacted(info) : info,
+    waitingForDebugger: false,
+  });
   return { sessionId };
 }
 
