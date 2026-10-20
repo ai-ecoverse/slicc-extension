@@ -69,6 +69,10 @@ const OUTRIGHT = new Map([
   ['Target.setAutoAttach', 'Target.setAutoAttach is not supported: attach to each target'],
   ['Target.autoAttachRelated', 'Target.autoAttachRelated is not supported: attach to each target'],
   ['Tracing.start', "Tracing.start records every target, seven's included"],
+  [
+    'Network.loadNetworkResource',
+    "Network.loadNetworkResource follows redirects the guard cannot see, into seven's pages too",
+  ],
   ['Extensions.loadUnpacked', "Extensions.loadUnpacked can reach seven's origin"],
   ['Network.clearBrowserCookies', "Network.clearBrowserCookies would clear seven's cookies"],
   ['Storage.clearCookies', "Storage.clearCookies would clear seven's cookies"],
@@ -227,6 +231,28 @@ export function responseNamesProtected(method, params, isProtected) {
     headersNameProtected(params.headers, isProtected) ||
     namesProtectedUrl(params.headersText, isProtected)
   );
+}
+
+export function binaryHeadersNameProtected(binary, isProtected) {
+  if (typeof binary !== 'string' || binary === '') return false;
+  try {
+    return namesProtectedUrl(atob(binary), isProtected);
+  } catch {
+    return true;
+  }
+}
+
+export function treeNamesProtected(tree, isProtected) {
+  const pending = [tree];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    const frame = node?.frame;
+    for (const key of ['url', 'unreachableUrl']) {
+      if (typeof frame?.[key] === 'string' && isProtected(frame[key])) return true;
+    }
+    if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
+  }
+  return false;
 }
 
 function storageNamed(guard, key, item) {

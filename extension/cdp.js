@@ -19,6 +19,7 @@ import {
   ABOUT_WRAPPED,
   aboutUrl,
   assignExpression,
+  binaryHeadersNameProtected,
   bodyMethod,
   COOKIES,
   cookieReader,
@@ -39,6 +40,7 @@ import {
   profiled,
   RESERVED_WORLD,
   redactProtected,
+  redactText,
   refusedOutright,
   requestKey,
   requestUrl,
@@ -47,6 +49,7 @@ import {
   scopedBinding,
   strictGuard,
   stripProtectedCookies,
+  treeNamesProtected,
   UNSEEN,
   UNWATCHED,
   urlProtected,
@@ -69,6 +72,11 @@ const FETCH_ANSWERS = new Set([
 ]);
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
 const BODY_READ = 'slicc: refused: this paused response body was already read the other way';
+const ERROR_PAGE_READS = new Set([
+  'Page.captureSnapshot',
+  'Page.getResourceContent',
+  'Page.searchInResource',
+]);
 
 function anyProtected(text) {
   return urlProtected(guard, text);
@@ -76,6 +84,23 @@ function anyProtected(text) {
 
 function redacted(value) {
   return redactProtected(value, anyProtected);
+}
+
+function unfolded(text) {
+  return textOf(text).replace(/=\r?\n/g, '');
+}
+
+function snapshotChecked(result) {
+  const data = unfolded(result.data);
+  if (redactText(data, anyProtected) !== data) refusal();
+}
+
+function headersProtected(params) {
+  return (
+    headersNameProtected(params.responseHeaders, anyProtected) ||
+    headersNameProtected(params.headers, anyProtected) ||
+    binaryHeadersNameProtected(params.binaryResponseHeaders, anyProtected)
+  );
 }
 
 function textOf(value) {
@@ -901,6 +926,7 @@ class Connection {
       if (known === true) refusal();
       if (known !== false) throw new Error(UNSEEN);
     }
+    if (ERROR_PAGE_READS.has(method)) await this.checkErrorPage(tabId);
     if (
       (method === 'IO.read' || method === 'IO.close') &&
       !this.state.streams.has(textOf(params.handle))
@@ -912,12 +938,18 @@ class Connection {
   checkPaused(tab, method, params, sessionId) {
     const entry = tab.paused.get(textOf(params.requestId));
     if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
+    if (FETCH_ANSWERS.has(method) && headersProtected(params)) refusal();
     if (FETCH_READS.has(method)) {
       if (entry.named) refusal();
       if (entry.read !== undefined && entry.read !== method) throw new Error(BODY_READ);
       entry.read = method;
     }
     if (FETCH_ANSWERS.has(method)) entry.claimed = true;
+  }
+
+  async checkErrorPage(tabId) {
+    const tree = await this.send(tabId, 'Page.getFrameTree', {});
+    if (treeNamesProtected(tree?.frameTree, anyProtected)) refusal();
   }
 
   async admit(tabId, tab, method, params, sessionId) {
@@ -993,6 +1025,7 @@ class Connection {
     if (about) return this.openBlank(tabId, params, about);
     if (method === 'Page.bringToFront') await activate(this.api, tabId);
     let result = (await this.send(tabId, method, forwarded)) ?? {};
+    if (method === 'Page.captureSnapshot') snapshotChecked(result);
     this.learn(tab, method, result);
     if (cookieReader(method)) result = dropProtectedCookies(guard, result);
     if (typeof result.stream === 'string') this.state.streams.add(result.stream);

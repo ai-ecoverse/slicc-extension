@@ -107,6 +107,10 @@ const REFUSED_METHODS = new Map<string, string>([
     'Target.attachToBrowserTarget would give a page the whole browser',
   ],
   ['Tracing.start', "Tracing.start records every target, seven's included"],
+  [
+    'Network.loadNetworkResource',
+    "Network.loadNetworkResource follows redirects the guard cannot see, into seven's pages too",
+  ],
   ['Extensions.loadUnpacked', "Extensions.loadUnpacked can reach seven's origin"],
   ['Network.clearBrowserCookies', "Network.clearBrowserCookies would clear seven's cookies"],
   ['Storage.clearCookies', "Storage.clearCookies would clear seven's cookies"],
@@ -315,6 +319,44 @@ function responseNamesProtected(method: string, params: CDPPayload): boolean {
   if (!method.endsWith('responseReceivedExtraInfo')) return false;
   return headersNameProtected(params['headers']) || namesProtectedUrl(params['headersText']);
 }
+
+function binaryHeadersNameProtected(binary: unknown): boolean {
+  if (typeof binary !== 'string' || binary === '') return false;
+  try {
+    return namesProtectedUrl(atob(binary));
+  } catch {
+    return true;
+  }
+}
+
+function answerNamesProtected(params: CDPPayload): boolean {
+  return (
+    headersNameProtected(params['responseHeaders']) ||
+    headersNameProtected(params['headers']) ||
+    binaryHeadersNameProtected(params['binaryResponseHeaders'])
+  );
+}
+
+export function treeNamesProtected(tree: unknown): boolean {
+  const pending: unknown[] = [tree];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!isObj(node)) continue;
+    const frame = isObj(node['frame']) ? node['frame'] : {};
+    for (const key of ['url', 'unreachableUrl']) {
+      const url = str(frame[key]);
+      if (url && urlProtected(url)) return true;
+    }
+    if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
+  }
+  return false;
+}
+
+const ERROR_PAGE_READS = new Set([
+  'Page.captureSnapshot',
+  'Page.getResourceContent',
+  'Page.searchInResource',
+]);
 
 export function mentions(value: unknown): boolean {
   if (typeof value === 'string') return value.includes('://') && urlProtected(value, true);
@@ -711,6 +753,10 @@ export class TabShield {
     this.admitWorlds(method, params);
     this.admitRequestIds(method, params);
     if (method === 'Page.navigateToHistoryEntry') await this.admitHistory(params);
+    if (ERROR_PAGE_READS.has(method)) {
+      const tree = await this.send('Page.getFrameTree', {});
+      if (treeNamesProtected(tree['frameTree'])) refuse(PROTECTED_RULES.refusal);
+    }
   }
 
   private admitBrowserWide(method: string, params: CDPPayload): void {
@@ -766,6 +812,7 @@ export class TabShield {
     if (FETCH_ANSWERS.has(method)) {
       const id = str(params['requestId']);
       if (!id || !this.forwarded.has(id)) refuse(PAUSE_REFUSAL);
+      if (answerNamesProtected(params)) refuse(PROTECTED_RULES.refusal);
       if (FETCH_READS.has(method)) {
         if (this.namedBodies.has(id)) refuse(PROTECTED_RULES.refusal);
         const read = this.bodyReads.get(id);
@@ -816,6 +863,10 @@ export class TabShield {
   }
 
   private after(method: string, result: CDPPayload): CDPPayload {
+    if (method === 'Page.captureSnapshot') {
+      const data = (str(result['data']) ?? '').replace(/=\r?\n/g, '');
+      if (redactText(data) !== data) refuse(PROTECTED_RULES.refusal);
+    }
     this.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') this.worlds.seen(result['executionContextId']);
     const stream = str(result['stream']);
