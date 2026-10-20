@@ -3,7 +3,7 @@ import {
   alert,
   api,
   foreignWriters,
-  ourPath,
+  ourRun,
   output,
   setCheck,
   sha,
@@ -29,7 +29,7 @@ async function runsOf(memberHead) {
   return data.workflow_runs
     .filter(
       (r) =>
-        ourPath(r.path) &&
+        ourRun(r, env.GITHUB_REPOSITORY) &&
         r.event === 'pull_request_target' &&
         r.head_sha === memberHead &&
         r.repository?.full_name === env.GITHUB_REPOSITORY

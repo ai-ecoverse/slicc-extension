@@ -12,6 +12,18 @@ export function ourPath(path) {
   return path === WORKFLOW || path === `${WORKFLOW}@refs/heads/main`;
 }
 
+export function ourRun(run, repo) {
+  const origin = process.env.GITHUB_API_URL ?? 'https://api.github.com';
+  const url = String(run?.workflow_url ?? '');
+  const here = [
+    `${origin}/repos/${repo}/actions/workflows/`,
+    `${origin}/repos/${repo}/actions/required_workflows/`,
+  ];
+  return (
+    ourPath(run?.path) && run?.repository?.full_name === repo && here.some((p) => url.startsWith(p))
+  );
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 export const SCHEMA = JSON.parse(readFileSync(join(here, 'verdict.schema.json'), 'utf8'));
 
@@ -619,7 +631,7 @@ export async function foreignWriters(gh, ref, { event, job, repo }) {
       continue;
     }
     if (
-      !ourPath(run.path) ||
+      !ourRun(run, repo) ||
       run.event !== event ||
       run.head_sha !== ref ||
       run.repository?.full_name !== repo

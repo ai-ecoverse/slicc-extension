@@ -456,6 +456,7 @@ async function group(
         status: 'completed',
         created_at: '2026-10-19T00:00:00Z',
         repository: { full_name: 'o/r' },
+        workflow_url: `${origin}/repos/o/r/actions/workflows/1`,
         pull_requests: [{ number: 7, base: { ref: 'main' } }],
         ...extra,
       },
@@ -501,6 +502,7 @@ test('the merge group passes only on a member cert-review that main’s pull_req
 function runOf(id, created, extra = {}) {
   return {
     id,
+    workflow_url: `${origin}/repos/o/r/actions/workflows/1`,
     run_attempt: 1,
     path: '.github/workflows/cert-review.yml',
     event: 'pull_request_target',
@@ -828,6 +830,7 @@ function writer(id, path, eventName, postConclusion, headSha = shas.code) {
     event: eventName,
     head_sha: headSha,
     repository: { full_name: 'o/r' },
+    workflow_url: `${origin}/repos/o/r/actions/required_workflows/9`,
   };
   state.jobs[String(id)] = [
     { name: 'cert / post', status: 'completed', conclusion: postConclusion },
@@ -1069,6 +1072,7 @@ test('runs are found by path, not by workflow name: a required-workflow run with
   const req = runOf(21, '2026-10-19T03:00:00Z', {
     name: '',
     path: '.github/workflows/cert-review.yml@refs/heads/main',
+    workflow_url: `${origin}/repos/o/r/actions/required_workflows/390076284`,
   });
   const ok = await groupOf([req], { 21: [{ name: 'cert / post', conclusion: 'success' }] });
   assert.equal(ok.check.conclusion, 'success', ok.r.stdout);
@@ -1084,4 +1088,26 @@ test('runs are found by path, not by workflow name: a required-workflow run with
     }
   );
   assert.equal(other.check.conclusion, 'failure');
+});
+
+test('a run whose workflow lives in another repository never counts, even with the same path', async () => {
+  const foreign = await groupOf(
+    [
+      runOf(31, '2026-10-19T04:00:00Z', {
+        workflow_url: `${origin}/repos/x/other/actions/workflows/1`,
+      }),
+    ],
+    { 31: [{ name: 'cert / post', conclusion: 'success' }] }
+  );
+  assert.equal(foreign.check.conclusion, 'failure');
+  assert.match(foreign.check.output.summary, /no cert-review run of/);
+  const staging = await groupOf(
+    [
+      runOf(32, '2026-10-19T04:00:00Z', {
+        path: '.github/workflows/cert-review.yml@refs/heads/staging',
+      }),
+    ],
+    { 32: [{ name: 'cert / post', conclusion: 'success' }] }
+  );
+  assert.match(staging.check.output.summary, /no cert-review run of/);
 });
