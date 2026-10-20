@@ -1,40 +1,14 @@
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { summary } from '@ai-ecoverse/slicc-browsers/guard-runner';
 
-const require = createRequire(import.meta.url);
-
-export const DISCOVERY_SKIP = 'not-supported:targetDiscovery (awaiting slicc-browsers 1.13.1)';
-export const DISCOVERY_IDS = [
-  'C8.protected-error-page',
-  'C8.protected-error-page.query',
-  'C8.protected-error-page.fragment',
-  'C8.protected-document-restore',
-  'C8.protected-error-page-sticky',
-  'C8.protected-error-page-sticky.query',
-  'C8.protected-error-page-sticky.fragment',
-];
-
-export function installedVectors() {
-  const path = require.resolve('@ai-ecoverse/slicc-browsers/package.json');
-  return JSON.parse(readFileSync(path, 'utf8')).version;
+export function capabilities(transport) {
+  return {
+    autoAttach: false,
+    browserSession: false,
+    browserContexts: false,
+    extensionWorld: true,
+    discovery: transport === 'seven',
+  };
 }
-
-export function deferred(results, transport, version) {
-  if (transport !== 'six-bridge' || version !== '1.13.0') return results;
-  return results.map((row) =>
-    DISCOVERY_IDS.includes(row.id)
-      ? { ...row, control: 'skip', guarded: 'skip', live: 'skip', reason: DISCOVERY_SKIP }
-      : row
-  );
-}
-
-export const capabilities = {
-  autoAttach: false,
-  browserSession: false,
-  browserContexts: false,
-  extensionWorld: true,
-};
 
 export const entries = {
   seven: { origin: 'https://seven.sliccy.ai', path: '/doc?n=guard-client' },
@@ -58,8 +32,7 @@ export function targets(transport) {
 
 const verdict = (row) => `${row.control}/${row.guarded}/${row.live}`;
 
-export function report(set, raw, sha, transport, version = installedVectors()) {
-  const results = deferred(raw, transport, version);
+export function report(set, results, sha, transport) {
   const value = summary({
     set,
     results,

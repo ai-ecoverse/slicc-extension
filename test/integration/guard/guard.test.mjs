@@ -159,10 +159,7 @@ async function browser() {
     messages: heard,
     async send(method, params = {}, sessionId) {
       const tab = typeof params.targetId === 'string' && /^\d+$/.test(params.targetId);
-      const ids = tab ? { ...params, targetId: await realTarget(params.targetId) } : params;
-      const apart =
-        method === 'Target.createTarget' && !ids.browserContextId && ids.newWindow === undefined;
-      const mapped = apart ? { ...ids, newWindow: true } : ids;
+      const mapped = tab ? { ...params, targetId: await realTarget(params.targetId) } : params;
       if (method === 'Runtime.enable') await cdp.send('Runtime.disable', {}, sessionId);
       try {
         const result = await cdp.send(method, mapped, sessionId);
@@ -302,7 +299,7 @@ for (const transport of transports) {
     const execution = await run(vectors, {
       clientFactory: (metadata) => clients(transport, metadata),
       targets: targets(transport),
-      capabilities,
+      capabilities: capabilities(transport),
       variant: variants,
       parallel,
       fixture,
