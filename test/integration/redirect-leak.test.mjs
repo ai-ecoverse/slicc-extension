@@ -379,6 +379,70 @@ for (const transport of transports) {
     }
   }
 
+  for (const how of ['scheme', 'backslash', 'tab']) {
+    for (const form of ['fragment', 'query']) {
+      for (const to of how === 'tab' ? ['vault'] : ['seven', 'vault']) {
+        test(`${transport}: a ${how}-relative Location naming ${to}'s callback with the token in its ${form} reaches the client as the origin only, its body refused`, async (t) => {
+          const page = await client(t, transport);
+          const n = unique(`${transport}${how}${to}${form}`);
+          const run = await hop(page, n, to, how, 'Fetch.getResponseBody', form);
+          const found = leaks(run, n);
+          const origin = new URL(callbacks[to]).origin;
+          t.diagnostic(`LEAK ${transport} ${how} ${to} ${form}: ${found.join(' ') || 'none'}`);
+          assert.equal(run.paused, true, 'the response paused toward the client');
+          assert.deepEqual(found, [], `the token leaks through ${found.join(' ')}`);
+          const beyond = onlyOrigins([run.events, run.replies], origin);
+          assert.deepEqual(beyond, [], `more than the origin reaches the client: ${beyond}`);
+          const separate = fragments([run.events, run.replies], n);
+          assert.deepEqual(separate, [], `a urlFragment carries the token: ${separate}`);
+          const read = reply(run, 'Fetch.getResponseBody');
+          assert.ok(refused(read), `Fetch.getResponseBody: ${JSON.stringify(read)}`);
+          const body = reply(run, 'Network.getResponseBody');
+          assert.ok(
+            refused(body),
+            `Network.getResponseBody: ${JSON.stringify(body)?.slice(0, 300)}`
+          );
+          const paused = run.events.find((e) => e.method === 'Fetch.requestPaused');
+          const location = (paused?.params.responseHeaders ?? []).find(
+            (x) => x.name.toLowerCase() === 'location'
+          );
+          assert.equal(location?.value, origin, JSON.stringify(location));
+        });
+      }
+    }
+  }
+
+  for (const how of ['scheme', 'backslash', 'path']) {
+    for (const form of ['fragment', 'query']) {
+      test(`${transport} control: a ${how}-relative Location naming an ordinary callback with the token in its ${form} keeps its value`, async (t) => {
+        const page = await client(t, transport);
+        const n = unique(`${transport}${how}ordinary${form}`);
+        const run = await hop(page, n, 'ordinary', how, 'Fetch.getResponseBody', form);
+        const url = target('ordinary', n, form);
+        const raw = {
+          scheme: url.replace(/^https:/, ''),
+          backslash: `/\\${url.slice('https://'.length)}`,
+          path: url.slice(new URL(url).origin.length),
+        }[how];
+        assert.equal(run.paused, true);
+        const paused = run.events.find((e) => e.method === 'Fetch.requestPaused');
+        const location = (paused?.params.responseHeaders ?? []).find(
+          (x) => x.name.toLowerCase() === 'location'
+        );
+        assert.equal(location?.value, raw, JSON.stringify(location));
+        assert.ok(
+          !refused(reply(run, 'Fetch.getResponseBody')),
+          JSON.stringify(reply(run, 'Fetch.getResponseBody'))
+        );
+        const history = reply(run, 'Page.getNavigationHistory')?.result?.entries ?? [];
+        assert.ok(
+          history.some((e) => e.url === url),
+          JSON.stringify(history)
+        );
+      });
+    }
+  }
+
   for (const to of ['seven', 'vault']) {
     for (const form of forms) {
       test(`${transport}: Network.loadNetworkResource through a redirect to ${to}'s callback with the token in its ${form} returns nothing beyond the origin`, async (t) => {

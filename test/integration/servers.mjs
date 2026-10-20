@@ -95,6 +95,15 @@ export async function pages(tls) {
       const body = `<!doctype html><title>hop</title><p>${to}</p>`;
       const how = searchParams.get('how') ?? 'location';
       const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
+      const relative = {
+        scheme: to.replace(/^https:/, ''),
+        backslash: `/\\${to.slice('https://'.length)}`,
+        tab: `//${to.slice(8, 11)}\t${to.slice(11)}`,
+        path: to.slice(new URL(to).origin.length),
+      }[how];
+      if (relative !== undefined) {
+        return response.writeHead(302, { ...headers, location: relative }).end(body);
+      }
       if (how === 'location')
         return response.writeHead(302, { ...headers, location: to }).end(body);
       if (how === 'link')
