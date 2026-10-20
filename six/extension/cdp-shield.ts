@@ -15,7 +15,9 @@ import {
   isProtectedTarget,
   isProtectedTargetType,
   isProtectedUrl,
+  isUnparseableUrl,
   PROTECTED_RULES,
+  refuseUnparseableDestination,
 } from './protected-origins.js';
 
 const ORIGIN_KEYS = new Set([
@@ -196,12 +198,12 @@ export function webSocketAsHttp(url: string): string {
   return url;
 }
 
-export function urlProtected(text: string): boolean {
-  return isProtectedUrl(text) || isProtectedUrl(webSocketAsHttp(text));
+export function urlProtected(text: string, readOnly = false): boolean {
+  return isProtectedUrl(text, readOnly) || isProtectedUrl(webSocketAsHttp(text), readOnly);
 }
 
 export function mentions(value: unknown): boolean {
-  if (typeof value === 'string') return value.includes('://') && urlProtected(value);
+  if (typeof value === 'string') return value.includes('://') && urlProtected(value, true);
   if (Array.isArray(value)) return value.some(mentions);
   if (isObj(value)) return Object.values(value).some(mentions);
   return false;
@@ -210,7 +212,7 @@ export function mentions(value: unknown): boolean {
 function storageEntryProtected(key: string, item: unknown): boolean {
   if (FREE_FORM.has(key)) return false;
   if (typeof item !== 'string') return namesProtectedStorage(item);
-  if (ORIGIN_KEYS.has(key) && urlProtected(item)) return true;
+  if (ORIGIN_KEYS.has(key) && urlProtected(item, true)) return true;
   if (key === 'storageKey') return isProtectedStorageKey(item);
   if (key === 'cacheId') return isProtectedStorageKey(item.split('|')[0] ?? '');
   return false;
@@ -252,6 +254,16 @@ export function cookieRefused(params: CDPPayload): boolean {
   const cookies = params['cookies'];
   if (Array.isArray(cookies)) return cookies.some(cookieProtected);
   return cookieProtected(params);
+}
+
+export function cookieUrlUnparseable(params: CDPPayload): boolean {
+  const urls = params['urls'];
+  const cookies = params['cookies'];
+  return [
+    ...(Array.isArray(urls) ? urls : []),
+    params['url'],
+    ...(Array.isArray(cookies) ? cookies.map((c) => (isObj(c) ? c['url'] : undefined)) : []),
+  ].some((url) => typeof url === 'string' && isUnparseableUrl(url));
 }
 
 export function dropProtectedCookies(result: CDPPayload): void {
@@ -605,18 +617,21 @@ export class TabShield {
   }
 
   private admitUrls(method: string, params: CDPPayload): void {
+    if ((COOKIE_SETTERS.has(method) || COOKIE_READERS.has(method)) && cookieUrlUnparseable(params))
+      refuse(PROTECTED_RULES.unparseableRefusal);
     if (COOKIE_SETTERS.has(method)) {
       if (cookieRefused(params)) refuse(COOKIES_REFUSAL);
       return;
     }
     const url = str(params['url']);
-    if (url && urlProtected(url)) refuse(PROTECTED_RULES.refusal);
+    refuseUnparseableDestination(url);
     if (NAVIGATES.has(method) && url !== undefined && url !== '' && !URL.canParse(url)) {
       refuse("a relative url would open one of the extension's own pages");
     }
     if (NAVIGATES.has(method) && wrapsAbout(url, PROTECTED_RULES.innerSchemes)) {
       refuse(ABOUT_WRAPPED);
     }
+    if (url && urlProtected(url, method.startsWith('Debugger.'))) refuse(PROTECTED_RULES.refusal);
   }
 
   private admitFrame(params: CDPPayload): void {
@@ -791,7 +806,7 @@ export class TabShield {
   private frameProtected(frameId: string): boolean {
     if (!frameId) return false;
     if (this.hiddenFrames.has(frameId)) return true;
-    return (this.frames.get(frameId) ?? []).some(urlProtected);
+    return (this.frames.get(frameId) ?? []).some((url) => urlProtected(url));
   }
 
   private watchCommit(method: string, params: CDPPayload): boolean {

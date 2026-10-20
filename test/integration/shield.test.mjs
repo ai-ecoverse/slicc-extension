@@ -992,3 +992,125 @@ test('C5 an answered pause cannot be answered again, and a pause Chrome dropped 
   );
   assert.equal(answer.alive, 2, 'the session still answers');
 });
+
+const unparseable = "slicc: refused: slicc can't parse this URL, so it could be a protected page";
+
+for (const transport of transports) {
+  test(`${transport} C8.unparseable: cookie commands naming a URL that does not parse are refused; the same commands work on an ordinary URL`, async (t) => {
+    const raw = await chrome.visit(t, `${targets.seven}/cookie?name=c8unparse`);
+    assert.ok(
+      await raw.evaluate(() => document.cookie.includes('c8unparse')),
+      'protected cookie planted'
+    );
+    const page = await client(t, transport);
+    const answer = await page.evaluate(
+      async ({ ordinary, seven }) => {
+        const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+        const bad = [
+          'https://exa%20mple.sliccy.ai/',
+          'https://exa mple.sliccy.ai/',
+          'http://[::1/',
+        ];
+        const refused = {};
+        for (const url of bad) {
+          for (const [method, params] of [
+            ['Network.getCookies', { urls: [url] }],
+            ['Network.getCookies', { urls: [`${ordinary}/`, url] }],
+            ['Network.setCookie', { name: 'c8bad', value: 'x', url }],
+            ['Network.setCookies', { cookies: [{ name: 'c8bad', value: 'x', url }] }],
+            ['Network.deleteCookies', { name: 'c8unparse', url }],
+            ['Storage.setCookies', { cookies: [{ name: 'c8bad', value: 'x', url }] }],
+          ]) {
+            refused[`${method} ${JSON.stringify(params)}`] = await h.attempt(
+              method,
+              params,
+              sessionId
+            );
+          }
+        }
+        const control = {
+          set: await h.attempt(
+            'Network.setCookie',
+            { name: 'c8plain', value: 'ok', url: `${ordinary}/` },
+            sessionId
+          ),
+          read: await h.attempt('Network.getCookies', { urls: [`${ordinary}/`] }, sessionId),
+          seven: await h.attempt('Network.getCookies', { urls: [`${seven}/`] }, sessionId),
+          empty: await h.attempt('Network.getCookies', { urls: [''] }, sessionId),
+          remove: await h.attempt(
+            'Network.deleteCookies',
+            { name: 'c8plain', url: `${ordinary}/` },
+            sessionId
+          ),
+          after: await h.attempt('Network.getCookies', { urls: [`${ordinary}/`] }, sessionId),
+        };
+        await h.close(targetId);
+        return { refused, control };
+      },
+      { ordinary, seven: targets.seven }
+    );
+    for (const [key, value] of Object.entries(answer.refused)) {
+      assert.equal(value.error, unparseable, key);
+    }
+    assert.equal(answer.control.set.error, undefined, 'control setCookie');
+    assert.ok(
+      answer.control.read.result.cookies.some((c) => c.name === 'c8plain'),
+      'control getCookies reads the ordinary cookie'
+    );
+    assert.equal(answer.control.seven.error, undefined, 'a protected URL that parses is answered');
+    assert.equal(
+      answer.control.seven.result.cookies.some((c) => c.name === 'c8unparse'),
+      false,
+      'the protected cookie is dropped from a parsed protected URL'
+    );
+    assert.equal(answer.control.empty.error, undefined, 'the empty URL stays exempt');
+    assert.equal(answer.control.remove.error, undefined, 'control deleteCookies');
+    assert.equal(
+      answer.control.after.result.cookies.some((c) => c.name === 'c8plain'),
+      false,
+      'control deleteCookies removed the ordinary cookie'
+    );
+    assert.ok(
+      await raw.evaluate(() => document.cookie.includes('c8unparse')),
+      'protected cookie untouched'
+    );
+  });
+}
+
+for (const transport of transports) {
+  test(`${transport} C8.unparseable: creating or navigating to a URL that does not parse cleanly is refused; an ordinary URL opens`, async (t) => {
+    const page = await client(t, transport);
+    const answer = await page.evaluate(async (ordinary) => {
+      const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+      const bad = [
+        'https://exa%20mple.other.test/',
+        'https://exa mple.other.test/',
+        'https://exa%20mple.sliccy.ai/',
+        'http://\u200d.other.test/',
+        'view-source:https://exa%20mple.other.test/',
+      ];
+      const refused = {};
+      for (const url of bad) {
+        refused[`create ${url}`] = await h.attempt('Target.createTarget', { url });
+        refused[`navigate ${url}`] = await h.attempt('Page.navigate', { url }, sessionId);
+      }
+      const created = await h.attempt('Target.createTarget', { url: `${ordinary}/start?c8` });
+      const navigated = await h.attempt(
+        'Page.navigate',
+        { url: `${ordinary}/start?c8n` },
+        sessionId
+      );
+      const blank = await h.attempt('Target.createTarget', { url: '' });
+      for (const id of [created.result?.targetId, blank.result?.targetId, targetId]) {
+        if (id) await h.close(id);
+      }
+      return { refused, created, navigated, blank };
+    }, ordinary);
+    for (const [key, value] of Object.entries(answer.refused)) {
+      assert.equal(value.error, unparseable, key);
+    }
+    assert.match(String(answer.created.result?.targetId), /./, 'control: an ordinary target opens');
+    assert.equal(answer.navigated.error, undefined, 'control: an ordinary navigation runs');
+    assert.match(String(answer.blank.result?.targetId), /./, 'the empty URL stays exempt');
+  });
+}

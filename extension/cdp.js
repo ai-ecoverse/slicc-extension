@@ -24,6 +24,7 @@ import {
   cookieReader,
   cookieRefused,
   cookieSetter,
+  cookieUrlUnparseable,
   dropProtectedCookies,
   EXTENSION_FRAME,
   extensionOrigin,
@@ -41,6 +42,7 @@ import {
   requestUrl,
   sameDocument,
   scopedBinding,
+  strictGuard,
   stripProtectedCookies,
   UNSEEN,
   UNWATCHED,
@@ -50,7 +52,7 @@ import {
   wrapsAbout,
 } from './shield.js';
 
-const guard = protectedOrigins(protectedRules);
+const guard = strictGuard(protectedOrigins(protectedRules), protectedRules);
 const prefix = initScriptPrefix(protectedRules);
 const ERROR_PAGE = 'chrome-error://chromewebdata/';
 
@@ -75,6 +77,12 @@ function refusal() {
 
 const RELATIVE = "slicc: refused: a relative url would open one of the extension's own pages";
 const NAVIGATES = new Set(['Page.navigate', 'Network.loadNetworkResource']);
+
+function unparseableDestination(url) {
+  if (typeof url === 'string' && /^\s*[a-z][a-z0-9+.-]*:/i.test(url) && guard.unparseable(url)) {
+    throw new Error(protectedRules.unparseableRefusal);
+  }
+}
 
 function relative(url) {
   return typeof url === 'string' && url !== '' && !URL.canParse(url);
@@ -473,6 +481,7 @@ class Connection {
 
   async create(params) {
     const url = typeof params.url === 'string' ? params.url : '';
+    unparseableDestination(url);
     if (relative(url)) throw new Error(RELATIVE);
     if (wrapsAbout(url, protectedRules.innerSchemes)) throw new Error(ABOUT_WRAPPED);
     if (guard.target({ url })) refusal();
@@ -825,14 +834,20 @@ class Connection {
   }
 
   checkParams(method, params, tab) {
-    if (cookieSetter(method)) {
-      if (cookieRefused(guard, params)) throw new Error(COOKIES);
-    } else if (urlProtected(guard, textOf(params.url))) {
-      refusal();
+    if ((cookieSetter(method) || cookieReader(method)) && cookieUrlUnparseable(guard, params)) {
+      throw new Error(protectedRules.unparseableRefusal);
     }
+    unparseableDestination(params.url);
     if (NAVIGATES.has(method) && relative(params.url)) throw new Error(RELATIVE);
     if (NAVIGATES.has(method) && wrapsAbout(params.url, protectedRules.innerSchemes)) {
       throw new Error(ABOUT_WRAPPED);
+    }
+    if (cookieSetter(method)) {
+      if (cookieRefused(guard, params)) throw new Error(COOKIES);
+    } else if (
+      urlProtected(guard, textOf(params.url), { readOnly: method.startsWith('Debugger.') })
+    ) {
+      refusal();
     }
     if (namesProtectedStorage(guard, params)) refusal();
     if (this.frameProtected(tab, params.frameId)) refusal();
@@ -1028,7 +1043,9 @@ class Connection {
 
   mentions(value, depth = 0) {
     if (depth > 12) return false;
-    if (typeof value === 'string') return value.includes('://') && urlProtected(guard, value);
+    if (typeof value === 'string') {
+      return value.includes('://') && urlProtected(guard, value, { readOnly: true });
+    }
     if (Array.isArray(value)) return value.some((item) => this.mentions(item, depth + 1));
     if (value !== null && typeof value === 'object') {
       return Object.values(value).some((item) => this.mentions(item, depth + 1));
