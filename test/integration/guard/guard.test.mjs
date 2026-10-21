@@ -10,6 +10,7 @@ import { waitFor } from '@ai-ecoverse/slicc-browsers/guard-driver.mjs';
 import { run } from '@ai-ecoverse/slicc-browsers/guard-runner';
 import { launch } from '@ai-ecoverse/slicc-shared-web/harness';
 import { install } from '../client.mjs';
+import { copies } from '../copies.mjs';
 import { extId } from '../extension-page.mjs';
 import { certificate } from '../servers.mjs';
 import {
@@ -55,10 +56,6 @@ let spki;
 const pool = [];
 
 before(async () => {
-  await rm(new URL('../../../extension/_metadata', import.meta.url), {
-    recursive: true,
-    force: true,
-  });
   dir = await mkdtemp(join(tmpdir(), 'slicc-extension-guard-'));
   const tls = await certificate(dir);
   spki = createHash('sha256')
@@ -87,11 +84,15 @@ async function evaluate(cdp, sessionId, expression) {
 
 async function browser() {
   const rules = hosts.map((host) => `MAP ${host} 127.0.0.1:${fixture.port}`).join(', ');
+  const copy = await copies(['extension/']);
   const chrome = await launch({
     roots: [['/', 'test/integration/page/']],
     coverage: [],
-    extensions: ['extension/'],
+    extensions: copy.paths,
     args: [`--ignore-certificate-errors-spki-list=${spki}`, `--host-resolver-rules=${rules}`],
+  }).catch(async (error) => {
+    await copy.remove();
+    throw error;
   });
   const cdp = chrome.cdp;
   const tapped = cdp.events;
@@ -255,7 +256,14 @@ async function browser() {
     return { client, close };
   }
 
-  return { observer, guarded, close: () => chrome.close() };
+  return {
+    observer,
+    guarded,
+    async close() {
+      await chrome.close();
+      await copy.remove();
+    },
+  };
 }
 
 async function pooled(slot, fresh = false) {

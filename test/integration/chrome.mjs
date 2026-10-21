@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch as start } from '@ai-ecoverse/slicc-shared-web/harness';
 import { seven } from '../../extension/seven.js';
+import { copies } from './copies.mjs';
 import { certificate, ims, pages, upstream } from './servers.mjs';
 
 function spki(cert) {
@@ -13,7 +14,6 @@ function spki(cert) {
 }
 
 export async function launch({ pinned = false } = {}) {
-  await rm(new URL('../../extension/_metadata', import.meta.url), { recursive: true, force: true });
   const dir = await mkdtemp(join(tmpdir(), 'slicc-extension-'));
   const tls = await certificate(dir);
   const site = await pages(tls);
@@ -34,10 +34,11 @@ export async function launch({ pinned = false } = {}) {
     `MAP upstream.test 127.0.0.1:${remote.port}`,
     `MAP ims-na1.adobelogin.com 127.0.0.1:${adobe.port}`,
   ].join(', ');
+  const copy = await copies(['extension/', 'test/integration/fixture-extension/']);
   const chrome = await start({
     roots: [['/', 'test/integration/page/']],
     coverage: process.env.SLICC_COVERAGE ? undefined : [],
-    extensions: ['extension/', 'test/integration/fixture-extension/'],
+    extensions: copy.paths,
     args: [
       pinned
         ? `--ignore-certificate-errors-spki-list=${spki(tls.cert)}`
@@ -46,6 +47,9 @@ export async function launch({ pinned = false } = {}) {
       '--use-fake-device-for-media-stream',
       '--use-fake-ui-for-media-stream',
     ],
+  }).catch(async (error) => {
+    await copy.remove();
+    throw error;
   });
   const opened = new WeakMap();
 
@@ -86,9 +90,11 @@ export async function launch({ pinned = false } = {}) {
     cdp: chrome.cdp,
     upstream: remote,
     ims: adobe,
+    extensions: copy.paths,
     visit,
     async close() {
       await chrome.close();
+      await copy.remove();
       await Promise.all([site.close(), remote.close(), adobe.close()]);
       await rm(dir, { recursive: true, force: true });
     },
