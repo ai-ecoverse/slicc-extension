@@ -224,6 +224,8 @@ const IGNORED = /[\t\n\r]+/g;
 const HAS_IGNORED = /[\t\n\r]/;
 const JOINS = new Set([',', ';', '(', ')']);
 const URL_CAP = 4096;
+const HOST_CAP = 300;
+const AUTHORITY_END = /[\\/?#]/g;
 const TAIL = URL_CAP + 64;
 const PIECE = 65536;
 const NEXT_URL = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]{2,}[^\\/]/i;
@@ -329,25 +331,52 @@ function openings(
   return [[at, 'https:']];
 }
 
-function urlEnd(
-  text: string,
-  from: number,
-  breaks: Set<number> | undefined,
-  limit = text.length
-): number {
-  const stop = Math.min(text.length, from + limit);
+interface Stop {
+  at: number;
+  join: boolean;
+}
+
+interface Memo {
+  from: number;
+  stop: Stop;
+  authority: number;
+  work: number;
+  budget: number;
+}
+
+function stopFrom(text: string, from: number, breaks: Set<number> | undefined): Stop {
   let end = from;
-  while (end < stop && !URL_END.test(text[end] ?? '')) {
-    if (end > from && breaks?.has(end) && NEXT_URL.test(text.slice(end, end + 40))) return end;
+  while (end < text.length && !URL_END.test(text[end] ?? '')) {
+    if (end > from && breaks?.has(end) && NEXT_URL.test(text.slice(end, end + 40))) {
+      return { at: end, join: false };
+    }
     if (JOINS.has(text[end] ?? '') && NEXT_URL.test(text.slice(end + 1, end + 40))) {
-      return text[end - 1] === ')' && end - 1 > from ? end - 1 : end;
+      return { at: end, join: true };
     }
     end += 1;
   }
-  return end;
+  return { at: end, join: false };
+}
+
+function urlEnd(memo: Memo, text: string, from: number, breaks: Set<number> | undefined): number {
+  if (!(memo.from <= from && from < memo.stop.at)) {
+    memo.from = from;
+    memo.stop = stopFrom(text, from, breaks);
+  }
+  const { at, join } = memo.stop;
+  return join && text[at - 1] === ')' && at - 1 > from ? at - 1 : at;
+}
+
+function authorityEnd(memo: Memo, text: string, from: number): number {
+  if (memo.authority < from) {
+    AUTHORITY_END.lastIndex = from;
+    memo.authority = AUTHORITY_END.exec(text)?.index ?? text.length;
+  }
+  return memo.authority;
 }
 
 function urlAt(
+  memo: Memo,
   text: string,
   found: RegExpExecArray,
   breaks: Set<number> | undefined,
@@ -359,12 +388,13 @@ function urlAt(
   if (next === undefined || URL_END.test(next)) return undefined;
   const starts = openings(text, at, found[0], breaks);
   if (starts.length === 0) return undefined;
-  const capped = urlEnd(text, run, breaks, URL_CAP);
+  const end = urlEnd(memo, text, run, breaks);
+  const cap = memo.work > memo.budget ? HOST_CAP : URL_CAP;
+  const judged = Math.min(end, authorityEnd(memo, text, run), run + cap);
   for (const [start, prefix] of starts) {
-    const url = prefix + text.slice(start, capped).replace(/\\/g, '/');
-    if (!isProtected(url)) continue;
-    if (capped - run < URL_CAP) return { start, end: capped, url };
-    return { start, end: urlEnd(text, capped, breaks), url };
+    memo.work += judged - start;
+    if (!isProtected(prefix + text.slice(start, judged).replace(/\\/g, '/'))) continue;
+    return { start, end, url: prefix + text.slice(start, end).replace(/\\/g, '/') };
   }
   return undefined;
 }
@@ -373,9 +403,16 @@ function scan(n: Normalized, isProtected: Judge): Span[] {
   const out: Span[] = [];
   const { text, breaks } = n;
   if (!ANCHOR.test(text)) return out;
+  const memo: Memo = {
+    from: -1,
+    stop: { at: -1, join: false },
+    authority: -1,
+    work: 0,
+    budget: 4 * text.length + 65536,
+  };
   ANCHORS.lastIndex = 0;
   for (let found = ANCHORS.exec(text); found; found = ANCHORS.exec(text)) {
-    const span = urlAt(text, found, breaks, isProtected);
+    const span = urlAt(memo, text, found, breaks, isProtected);
     if (!span) continue;
     out.push(span);
     ANCHORS.lastIndex = Math.max(span.end, ANCHORS.lastIndex);
