@@ -16,7 +16,7 @@ const EXTENSION_SCHEMES = [
   'safari-web-extension:',
   'ms-browser-extension:',
 ];
-const PROFILED_DOMAINS = ['Debugger.', 'Profiler.', 'HeapProfiler.'];
+const PROFILED_DOMAINS = ['Debugger.', 'DOMDebugger.', 'Profiler.', 'HeapProfiler.'];
 const OBJECT_KEY = /^(objectId|\w+ObjectId)$/;
 const OPAQUE_KEYS = new Set(['value', 'unserializableValue', 'expression', 'functionDeclaration']);
 const FOREIGN_FRAME = /chrome-extension:\/\/ URL of different extension/i;

@@ -72,6 +72,7 @@ export function capabilities(transport) {
     browserContexts: false,
     extensionWorld: true,
     discovery: transport === 'seven',
+    clientExit: true,
   };
 }
 
