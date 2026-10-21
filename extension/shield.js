@@ -126,14 +126,22 @@ export function urlProtected(guard, text, options = {}) {
 }
 
 const SCHEME = /[a-z0-9+.-]/i;
+const LETTER = /[a-z]/i;
 const URL_END = /[\s"'<>`\u0000-\u001f]/;
 const BOUNDARY = /[\s<>"'`=,;([{]/;
-const SLASHES = /[\\/]{2}/g;
+const ANCHORS = /(?:https?|wss?):[\\/]*|[\\/]{2,}/gi;
+const ANCHOR = /(?:https?|wss?):|[\\/]{2}/i;
+const IGNORED = /[\t\n\r]+/g;
+const HAS_IGNORED = /[\t\n\r]/;
 const JOINS = new Set([',', ';', '(', ')']);
 const URL_CAP = 4096;
-const NEXT_URL = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]{2}[^\\/]/i;
+const TAIL = URL_CAP + 64;
+const PIECE = 65536;
+const NEXT_URL = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]{2,}[^\\/]/i;
+const ENCODED_KEYS = ['body', 'data', 'content', 'postData'];
 export const KEY_COLLISION =
   'slicc: refused: two keys of this payload reduce to the same protected origin';
+export const ENCODED = 'slicc: refused: an encoded payload names a protected url';
 const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
 const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
 const TARGETS = new Set(['location', 'content-location', 'refresh', 'link']);
@@ -152,11 +160,65 @@ function slashed(text) {
   return text.replace(/\\/g, '/');
 }
 
-function schemeStart(text, colon) {
+function normalized(text) {
+  if (!HAS_IGNORED.test(text)) return { text, cuts: [], breaks: undefined };
+  const parts = [];
+  const cuts = [];
+  let length = 0;
+  let last = 0;
+  IGNORED.lastIndex = 0;
+  for (let found = IGNORED.exec(text); found; found = IGNORED.exec(text)) {
+    parts.push(text.slice(last, found.index));
+    length += found.index - last;
+    last = found.index + found[0].length;
+    cuts.push([length, last]);
+  }
+  parts.push(text.slice(last));
+  return { text: parts.join(''), cuts, breaks: new Set(cuts.map(([at]) => at)) };
+}
+
+function original(n, at) {
+  let low = 0;
+  let high = n.cuts.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (n.cuts[mid][0] <= at) {
+      found = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return found < 0 ? at : n.cuts[found][1] + at - n.cuts[found][0];
+}
+
+function originalEnd(n, end) {
+  return end === 0 ? 0 : original(n, end - 1) + 1;
+}
+
+function schemeStarts(text, colon, breaks) {
   let start = colon;
   while (start > 0 && colon - start < 32 && SCHEME.test(text[start - 1])) start -= 1;
-  while (start < colon && !/[a-z]/i.test(text[start])) start += 1;
-  return start;
+  while (start < colon && !LETTER.test(text[start])) start += 1;
+  if (start === colon) return [];
+  const out = [start];
+  for (let at = start + 1; at < colon; at += 1) {
+    if (breaks?.has(at) && LETTER.test(text[at])) out.push(at);
+  }
+  const scheme = text.slice(start, colon).toLowerCase();
+  const inner = WEB_SCHEMES.find((w) => scheme.length > w.length && scheme.endsWith(w));
+  if (inner !== undefined) out.push(colon - inner.length);
+  return out;
+}
+
+function openings(text, at, anchor, breaks) {
+  if (anchor[0] !== '/' && anchor[0] !== '\\') {
+    return schemeStarts(text, at + anchor.indexOf(':'), breaks).map((start) => [start, '']);
+  }
+  if (text[at - 1] === ':') return schemeStarts(text, at - 1, breaks).map((start) => [start, '']);
+  if (at > 0 && !BOUNDARY.test(text[at - 1]) && !breaks?.has(at)) return [];
+  return [[at, 'https:']];
 }
 
 function judged(text, start, end, prefix, isProtected) {
@@ -164,10 +226,11 @@ function judged(text, start, end, prefix, isProtected) {
   return { start, end, url, hit: isProtected(url) };
 }
 
-function urlEnd(text, from, limit = text.length) {
+function urlEnd(text, from, breaks, limit = text.length) {
   const stop = Math.min(text.length, from + limit);
   let end = from;
   while (end < stop && !URL_END.test(text[end])) {
+    if (end > from && breaks?.has(end) && NEXT_URL.test(text.slice(end, end + 40))) return end;
     if (JOINS.has(text[end]) && NEXT_URL.test(text.slice(end + 1, end + 40))) {
       return text[end - 1] === ')' && end - 1 > from ? end - 1 : end;
     }
@@ -176,59 +239,136 @@ function urlEnd(text, from, limit = text.length) {
   return end;
 }
 
-function opening(text, at) {
-  const next = text[at + 2];
-  if (next === undefined || next === '/' || next === '\\' || URL_END.test(next)) return undefined;
-  if (text[at - 1] !== ':') {
-    if (at > 0 && !BOUNDARY.test(text[at - 1])) return undefined;
-    return { start: at, prefix: 'https:' };
+function urlAt(text, found, breaks, isProtected) {
+  const at = found.index;
+  const run = at + found[0].length;
+  const next = text[run];
+  if (next === undefined || URL_END.test(next)) return undefined;
+  const starts = openings(text, at, found[0], breaks);
+  if (starts.length === 0) return undefined;
+  const capped = urlEnd(text, run, breaks, URL_CAP);
+  for (const [start, prefix] of starts) {
+    const span = judged(text, start, capped, prefix, isProtected);
+    if (!span.hit) continue;
+    if (capped - run < URL_CAP) return span;
+    return { ...span, end: urlEnd(text, capped, breaks) };
   }
-  const start = schemeStart(text, at - 1);
-  return start === at - 1 ? undefined : { start, prefix: '' };
+  return undefined;
 }
 
-function urlAt(text, at, isProtected) {
-  const miss = { start: at, end: at + 2, url: '', hit: false };
-  const open = opening(text, at);
-  if (!open) return miss;
-  const capped = urlEnd(text, at + 2, URL_CAP);
-  let span = judged(text, open.start, capped, open.prefix, isProtected);
-  if (!span.hit && open.prefix === '') {
-    const scheme = text.slice(open.start, at - 1).toLowerCase();
-    const inner = WEB_SCHEMES.find((w) => scheme.length > w.length && scheme.endsWith(w));
-    if (inner !== undefined) span = judged(text, at - 1 - inner.length, capped, '', isProtected);
-  }
-  if (!span.hit) return miss;
-  if (capped - at - 2 < URL_CAP) return span;
-  return { ...span, end: urlEnd(text, capped) };
-}
-
-function spans(text, isProtected) {
+function scan(n, isProtected) {
   const out = [];
-  if (typeof text !== 'string' || !/[\\/]{2}/.test(text)) return out;
-  SLASHES.lastIndex = 0;
-  for (let found = SLASHES.exec(text); found; found = SLASHES.exec(text)) {
-    const span = urlAt(text, found.index, isProtected);
-    if (span.hit) out.push(span);
-    SLASHES.lastIndex = span.hit ? Math.max(span.end, found.index + 2) : found.index + 2;
+  const { text, breaks } = n;
+  if (!ANCHOR.test(text)) return out;
+  ANCHORS.lastIndex = 0;
+  for (let found = ANCHORS.exec(text); found; found = ANCHORS.exec(text)) {
+    const span = urlAt(text, found, breaks, isProtected);
+    if (!span) continue;
+    out.push(span);
+    ANCHORS.lastIndex = Math.max(span.end, ANCHORS.lastIndex);
   }
   return out;
 }
 
+function bare(span) {
+  const origin = originOf(span.url);
+  return span.url === origin || span.url === `${origin}/` ? undefined : origin;
+}
+
 export function redactText(text, isProtected) {
+  if (typeof text !== 'string') return text;
+  const n = normalized(text);
   let out = '';
   let last = 0;
-  for (const span of spans(text, isProtected)) {
-    const origin = originOf(span.url);
-    if (span.url === origin || span.url === `${origin}/`) continue;
-    out += text.slice(last, span.start) + origin;
-    last = span.end;
+  for (const span of scan(n, isProtected)) {
+    const origin = bare(span);
+    if (origin === undefined) continue;
+    out += text.slice(last, original(n, span.start)) + origin;
+    last = originalEnd(n, span.end);
   }
   return last === 0 ? text : out + text.slice(last);
 }
 
 export function namesProtectedUrl(text, isProtected) {
-  return spans(text, isProtected).length > 0;
+  return typeof text === 'string' && scan(normalized(text), isProtected).length > 0;
+}
+
+function tailOf(text) {
+  return text
+    .replace(IGNORED, '\n')
+    .replace(/[\\/]{3,}/g, '//')
+    .slice(-TAIL);
+}
+
+export class UrlStream {
+  constructor(isProtected) {
+    this.isProtected = isProtected;
+    this.head = '';
+    this.named = false;
+    this.refused = false;
+  }
+
+  push(chunk, isProtected = this.isProtected) {
+    const head = this.head;
+    const joined = head + chunk;
+    const n = normalized(joined);
+    let out = '';
+    let last = head.length;
+    let open = '';
+    for (const span of scan(n, isProtected)) {
+      const start = original(n, span.start);
+      const end = originalEnd(n, span.end);
+      if (end === joined.length && joined.length - start > URL_CAP) open = originOf(span.url);
+      const origin = bare(span);
+      if (end <= head.length || origin === undefined) continue;
+      this.named = true;
+      out += joined.slice(last, Math.max(start, last)) + (start >= head.length ? origin : '');
+      last = end;
+    }
+    this.head = open ? `${open}/` : tailOf(joined);
+    return last === head.length ? chunk : out + joined.slice(last);
+  }
+
+  pushEncoded(encoded) {
+    const readOnly = (url) => this.isProtected(url, { readOnly: true });
+    const clean = /[^A-Za-z0-9+/=]/.test(encoded) ? encoded.replace(/[\t\n\f\r ]+/g, '') : encoded;
+    for (let at = 0; at < clean.length && !this.named; at += PIECE) {
+      let piece;
+      try {
+        piece = atob(clean.slice(at, at + PIECE));
+      } catch {
+        this.named = true;
+        return;
+      }
+      this.push(piece, readOnly);
+    }
+  }
+}
+
+export function encodedNamesProtected(encoded, isProtected) {
+  const stream = new UrlStream(isProtected);
+  stream.pushEncoded(encoded);
+  return stream.named;
+}
+
+export function streamRead(stream, result) {
+  if (stream.refused) throw new Error(ENCODED);
+  if (typeof result?.data !== 'string') return result;
+  if (result.base64Encoded !== true) {
+    const data = stream.push(result.data);
+    return data === result.data ? result : { ...result, data };
+  }
+  stream.pushEncoded(result.data);
+  if (!stream.named) return result;
+  stream.refused = true;
+  throw new Error(ENCODED);
+}
+
+function encodedNamed(value, isProtected) {
+  if (value.base64Encoded !== true) return false;
+  return ENCODED_KEYS.some(
+    (key) => typeof value[key] === 'string' && encodedNamesProtected(value[key], isProtected)
+  );
 }
 
 function cleaned(target) {
@@ -368,6 +508,7 @@ export function redactProtected(value, isProtected) {
     });
     return out;
   }
+  if (encodedNamed(value, isProtected)) throw new Error(ENCODED);
   const source = withHeaders(value, isProtected);
   let out = redactKeys(source, isProtected);
   const keyed = out;

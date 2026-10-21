@@ -49,11 +49,13 @@ import {
   responseNamesProtected,
   sameDocument,
   scopedBinding,
+  streamRead,
   strictGuard,
   stripProtectedCookies,
   treeNamesProtected,
   UNSEEN,
   UNWATCHED,
+  UrlStream,
   urlProtected,
   WORLD,
   Worlds,
@@ -90,8 +92,8 @@ const ERROR_PAGE_READS = new Set([
   'Page.searchInResource',
 ]);
 
-function anyProtected(text) {
-  return urlProtected(guard, text);
+function anyProtected(text, options) {
+  return urlProtected(guard, text, options);
 }
 
 function redacted(value) {
@@ -348,7 +350,7 @@ class Connection {
       inflight: new Map(),
       seen: new Set(),
       failed: new Map(),
-      streams: new Set(),
+      streams: new Map(),
       cut: new Set(),
       discover: false,
       counter: 0,
@@ -440,6 +442,16 @@ class Connection {
     return this.view(await readTab(this.api, tabId));
   }
 
+  async reattachable(tabId) {
+    const tab = await readTab(this.api, tabId);
+    if (this.tabState(tabId) || !this.failedAt(tabId, tab.url)) return this.view(tab);
+    const frame = await this.api.webNavigation
+      ?.getFrame?.({ tabId, frameId: 0 })
+      .catch(() => undefined);
+    if (frame?.errorOccurred !== true) this.state.failed.delete(tabId);
+    return this.view(tab);
+  }
+
   info(tab) {
     const url = textOf(tab.url);
     const pending = textOf(tab.pendingUrl);
@@ -461,7 +473,6 @@ class Connection {
 
   forget(tabId) {
     this.drop(tabId);
-    this.state.failed.delete(tabId);
     const tab = this.tabState(tabId);
     if (tab) for (const sessionId of tab.sessions) this.state.sessions.delete(sessionId);
     this.state.tabs.delete(tabId);
@@ -709,7 +720,7 @@ class Connection {
     if (params.flatten !== true) throw new Error('only flatten: true is supported');
     const targetId = readTargetId(params);
     const tabId = tabFrom(targetId);
-    const seen = await demandTab(this.api, await this.read(tabId));
+    const seen = await demandTab(this.api, await this.reattachable(tabId));
     let tab = this.tabState(tabId);
     if (!tab) {
       if (!this.state.ownedTabs.has(tabId)) {
@@ -1104,12 +1115,17 @@ class Connection {
     if (method === 'Page.captureSnapshot') snapshotChecked(result);
     this.learn(tab, method, result);
     if (cookieReader(method)) result = dropProtectedCookies(guard, result);
-    if (typeof result.stream === 'string') this.state.streams.add(result.stream);
+    if (typeof result.stream === 'string') this.openStream(result.stream);
     if (method === 'IO.resolveBlob' && typeof result.uuid === 'string') {
-      this.state.streams.add(`blob:${result.uuid}`);
+      this.openStream(`blob:${result.uuid}`);
     }
     if (method === 'IO.close') this.state.streams.delete(textOf(params.handle));
+    if (method === 'IO.read') return streamRead(this.state.streams.get(params.handle), result);
     return result;
+  }
+
+  openStream(handle) {
+    this.state.streams.set(handle, new UrlStream(anyProtected));
   }
 
   learn(tab, method, result) {
@@ -1466,10 +1482,10 @@ class Connection {
     const change = changeInfo ?? {};
     const current = { id: tabId, ...(tab ?? {}) };
     const t = this.tabState(tabId);
+    const same = change.url !== undefined && this.failedAt(tabId, change.url);
+    if (change.url !== undefined && !same) this.state.failed.delete(tabId);
     if (t || this.state.ownedTabs.has(tabId)) {
       const probe = t ?? { pageUrl: '' };
-      const same = change.url !== undefined && this.failedAt(tabId, change.url);
-      if (change.url !== undefined && !same) this.state.failed.delete(tabId);
       if (!same && this.leaves(probe, textOf(change.url))) {
         this.release(tabId);
       } else {

@@ -14,6 +14,7 @@ import {
 } from '@slicc/shared-ts';
 import {
   ABOUT_WRAPPED,
+  Bounded,
   redacted,
   redactProtected,
   redactText,
@@ -115,10 +116,24 @@ const ERROR_PAGE = 'chrome-error://chromewebdata/';
 const DISCOVERY_REFUSAL =
   'slicc: refused: the extension bridge does not report target discovery events';
 
+const failedTabs = new Bounded<Bounded<true>>(500);
+
+function failedBefore(tabId: number, url: string | undefined): boolean {
+  if (!url) return false;
+  return failedTabs.get(String(tabId))?.has(url.split('#')[0] ?? url) === true;
+}
+
+function failuresOf(tabId: number): Bounded<true> {
+  const known = failedTabs.get(String(tabId));
+  if (known) return known;
+  const fresh = new Bounded<true>(200);
+  failedTabs.set(String(tabId), fresh);
+  return fresh;
+}
+
 function failedView(tabId: number, tab: ChromeTab | undefined): ChromeTab | undefined {
-  const shield = tabShields.get(tabId);
-  if (!tab || !shield || !tab.url || !shield.failedBeforeCommit(tab.url)) return tab;
-  const pending = tab.pendingUrl && shield.failedBeforeCommit(tab.pendingUrl) ? '' : tab.pendingUrl;
+  if (!tab || !failedBefore(tabId, tab.url)) return tab;
+  const pending = failedBefore(tabId, tab.pendingUrl) ? '' : tab.pendingUrl;
   return { ...tab, url: ERROR_PAGE, pendingUrl: pending };
 }
 
@@ -271,7 +286,7 @@ export function notifyBridgeDebuggerDetached(tabId: number): void {
 
 export function checkBridgeTabProtection(tabId: number, url: string | undefined): Set<number> {
   if (!url || !isProtectedUrl(url)) return new Set<number>();
-  if (tabShields.get(tabId)?.failedBeforeCommit(url)) return new Set<number>();
+  if (failedBefore(tabId, url)) return new Set<number>();
   return cutProtectedTab(tabId);
 }
 
@@ -310,6 +325,7 @@ const tabShields = new Map<number, TabShield>();
 
 export function __clearTabShieldsForTest(): void {
   tabShields.clear();
+  failedTabs.clear();
   shieldFanouts.clear();
 }
 
@@ -361,7 +377,8 @@ async function ensureTabShield(tabId: number, deps: BridgeSwDeps): Promise<void>
     () => {
       cutProtectedTab(tabId);
       deps.detachDebugger(tabId).catch(() => {});
-    }
+    },
+    failuresOf(tabId)
   );
   tabShields.set(tabId, shield);
   try {
