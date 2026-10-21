@@ -57,6 +57,7 @@ import {
   urlProtected,
   WORLD,
   Worlds,
+  withoutCookieHeaders,
   withoutSetCookie,
   wrapsAbout,
 } from './shield.js';
@@ -1228,7 +1229,16 @@ class Connection {
     if (this.frameProtected(tab, p.frameId) || tab.worlds.hides(p)) return true;
     if (tab.hops.get(p.requestId) !== 'done') tab.hops.set(p.requestId, hopOf(p.redirectResponse));
     if (tab.hops.size > 500) tab.hops.delete(tab.hops.keys().next().value);
-    this.broadcast(tabId, method, stripProtectedCookies(guard, p));
+    const out = stripProtectedCookies(guard, p);
+    const redirect = withoutSetCookie(out.redirectResponse);
+    this.broadcast(tabId, method, {
+      ...out,
+      request: { ...out.request, headers: withoutCookieHeaders(out.request?.headers) },
+      redirectResponse: {
+        ...redirect,
+        requestHeaders: withoutCookieHeaders(redirect.requestHeaders),
+      },
+    });
     return true;
   }
 
@@ -1270,11 +1280,12 @@ class Connection {
       return;
     }
     this.broadcast(tabId, method, out);
-    if (id !== undefined && known === false && SETTLES.has(method)) {
-      tab.settled.add(id);
-      if (tab.settled.size > 5000) tab.settled.delete(tab.settled.values().next().value);
+    if (id !== undefined && SETTLES.has(method)) {
       const held = tab.held.get(id) ?? [];
       tab.held.delete(id);
+      if (known !== false) return;
+      tab.settled.add(id);
+      if (tab.settled.size > 5000) tab.settled.delete(tab.settled.values().next().value);
       for (const [m, p] of held) this.broadcast(tabId, m, p);
     }
   }

@@ -1959,7 +1959,8 @@ const plainOrders = {
   'ExtraInfo after the chain settles': ['ordinary', 'finished', 'extra'],
 };
 
-function hopEvent(step, requestId) {
+function hopEvent(named, requestId) {
+  const [step, n] = named.split(':');
   const moved = 'https://other.test/moved';
   return {
     ordinary: ['Network.requestWillBeSent', { requestId, type: 'Fetch', request: { url: moved } }],
@@ -1972,16 +1973,27 @@ function hopEvent(step, requestId) {
       {
         requestId,
         type: 'Fetch',
-        request: { url: 'https://vault.sliccy.ai/bounce' },
+        request: {
+          url: `https://vault.sliccy.ai/bounce?code=S3CR3T${requestId}`,
+          headers: { cookie: `hop=S3CR3T${requestId}` },
+        },
         redirectResponse: {
           url: moved,
           status: 301,
           fromDiskCache: true,
-          headers: { location: 'https://vault.sliccy.ai/bounce' },
+          headers: {
+            location: `https://vault.sliccy.ai/bounce?code=S3CR3T${requestId}`,
+            'set-cookie': `moved=S3CR3T${requestId}`,
+          },
         },
       },
     ],
     finished: ['Network.loadingFinished', { requestId }],
+    stray: [
+      'Network.requestWillBeSentExtraInfo',
+      { requestId: `${requestId}stray${n}`, headers: {} },
+    ],
+    strayFinished: ['Network.loadingFinished', { requestId: `${requestId}stray${n}` }],
   }[step];
 }
 
@@ -2009,12 +2021,14 @@ async function sixOrder(steps, requestId) {
     define: { __SLICC_EXT_DEV__: 'false', __DEV__: 'false' },
   });
   const source = Buffer.from(built.outputFiles[0].text).toString('base64');
-  const { TabShield } = await import(`data:text/javascript;base64,${source}`);
+  const { TabShield, redactProtected } = await import(`data:text/javascript;base64,${source}`);
   const shield = new TabShield(
     () => Promise.resolve({}),
     () => {}
   );
-  return steps.flatMap((step) => shield.onEvent(...hopEvent(step, requestId)));
+  return steps
+    .flatMap((step) => shield.onEvent(...hopEvent(step, requestId)))
+    .map((event) => ({ ...event, params: redactProtected(event.params) }));
 }
 
 const orderTransports = { seven: sevenOrder, six: sixOrder };
@@ -2039,4 +2053,29 @@ for (const [transport, run] of Object.entries(orderTransports)) {
       );
     });
   }
+}
+
+for (const [transport, run] of Object.entries(orderTransports)) {
+  test(`${transport}: the hop into the vault reaches the client with only the vault's origin, and no cookie or code`, async () => {
+    const posted = await run(['ordinary', 'hop', 'finished'], `${transport}hopurl`);
+    const hop = posted.find(
+      (m) => m.method === 'Network.requestWillBeSent' && m.params.redirectResponse
+    );
+    assert.ok(hop, 'the hop is forwarded');
+    assert.equal(JSON.stringify(hop).includes('S3CR3T'), false, JSON.stringify(hop));
+    assert.equal(JSON.stringify(hop).includes('/bounce'), false, JSON.stringify(hop));
+  });
+
+  test(`${transport}: ExtraInfo whose request settles before it is classified does not crowd out an ordinary request's held ExtraInfo`, async () => {
+    const stray = Array.from({ length: 501 }, (_, i) => [
+      `stray:${i}`,
+      `strayFinished:${i}`,
+    ]).flat();
+    const posted = await run(['ordinary', 'extra', ...stray, 'finished'], `${transport}crowd`);
+    const extras = posted.filter((m) => m.method === 'Network.requestWillBeSentExtraInfo');
+    assert.deepEqual(
+      extras.map((m) => m.params.requestId),
+      [`${transport}crowd`]
+    );
+  });
 }
