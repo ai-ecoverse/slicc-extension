@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:https';
 import { join } from 'node:path';
@@ -79,6 +80,16 @@ export async function pages(tls) {
       return response
         .writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
         .end(`<!doctype html><title>callback</title><p>signed in at ${request.url}</p>`);
+    }
+    if (pathname === '/noise') {
+      const size = Math.min(Number(searchParams.get('size') ?? '0'), 8 * 1024 * 1024);
+      return response
+        .writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'cache-control': 'no-store',
+          'access-control-allow-origin': '*',
+        })
+        .end(randomBytes(size));
     }
     if (pathname === '/hop') {
       const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;

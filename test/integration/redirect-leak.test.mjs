@@ -264,7 +264,11 @@ async function override(page, n, to, stage) {
     await h.close(targetId);
     return { outcome };
   `,
-    { n, to: target(to, n), stage }
+    {
+      n,
+      to: to === 'unreachable' ? `https://unreachable.invalid/data?n=${n}` : target(to, n),
+      stage,
+    }
   );
 }
 
@@ -497,6 +501,14 @@ for (const transport of transports) {
     const run = await replay(page, n, 'ordinary');
     assert.ok(!refused(reply(run, 'Network.replayXHR')), JSON.stringify(run.replies));
     assert.ok(leaks(run, n).length > 0);
+  });
+
+  test(`${transport}: a Fetch.continueRequest url override whose rewritten request fails at the network answers promptly`, async (t) => {
+    const page = await client(t, transport);
+    const n = unique(`${transport}overridefail`);
+    const run = await override(page, n, 'unreachable', 'Request');
+    const answer = replies(run, 'Fetch.continueRequest')[0];
+    assert.ok(answer && !answer.error, `Fetch.continueRequest: ${JSON.stringify(answer)}`);
   });
 
   for (const stage of ['Request', 'Response']) {
