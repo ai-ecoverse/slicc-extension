@@ -13,7 +13,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "prepare": "lefthook install",
+    "prepare": "slicc-install-hooks",
     "lint": "slicc-lint",
     "typecheck": "tsc -p tsconfig.json",
     "format": "biome check --write .",
