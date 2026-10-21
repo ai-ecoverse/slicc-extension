@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "@ai-ecoverse/slicc-browsers": "1.13.5",
-    "@ai-ecoverse/slicc-shared-web": "1.30.1",
+    "@ai-ecoverse/slicc-shared-web": "1.30.2",
     "@biomejs/biome": "2.5.15",
     "@semantic-release/exec": "7.1.0",
     "esbuild": "0.28.2",
