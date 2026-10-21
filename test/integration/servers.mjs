@@ -121,6 +121,27 @@ export async function pages(tls) {
         return response.writeHead(200, { ...headers, link: `<${to}>; rel="next"` }).end(body);
       return response.writeHead(200, { ...headers, refresh: `0; url=${to}` }).end(body);
     }
+    if (pathname === '/moved') {
+      const n = searchParams.get('n') ?? '';
+      const host = searchParams.get('to') === 'vault' ? 'vault.sliccy.ai' : 'other.test';
+      return response
+        .writeHead(301, {
+          location: `https://${host}/bounce?n=${n}`,
+          'set-cookie': `moved=S3CR3T${[...n].reverse().join('')}; Secure; SameSite=None; Path=/`,
+          'cache-control': 'max-age=3600',
+        })
+        .end();
+    }
+    if (pathname === '/bounce') {
+      const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
+      return response
+        .writeHead(302, {
+          location: `https://ordinary.test/landing?code=${mark}`,
+          'set-cookie': `bounce=${mark}; Secure; SameSite=None; Path=/`,
+          'cache-control': 'no-store',
+        })
+        .end();
+    }
     if (pathname === '/signin') {
       const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
       const base = {
