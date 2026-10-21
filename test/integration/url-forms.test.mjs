@@ -55,7 +55,9 @@ const forms = {
     `${s.scheme}://${s.host.slice(0, 3)}\r\n${s.host.slice(3)}${s.rest}`,
   'a tab in the scheme': (s) =>
     `${s.scheme.slice(0, 2)}\t${s.scheme.slice(2)}://${s.host}${s.rest}`,
+  'a long userinfo': (s) => `${s.scheme}://${'a'.repeat(4081)}@${s.host}${s.rest}`,
 };
+const USER = 4081;
 const snapshotForms = ['json-escaped slashes', 'one slash', 'no slash'];
 
 function written(to, form, n) {
@@ -125,13 +127,13 @@ async function snapshot(page, n, text) {
   );
 }
 
-async function networkBody(page, n, to) {
+async function networkBody(page, n, to, user = '') {
   return page.evaluate(
-    async ({ n, to }) => {
+    async ({ n, to, user }) => {
       const { targetId, sessionId } = await h.open(`https://ordinary.test/doc?n=body-${n}`);
       await h.attempt('Network.enable', {}, sessionId);
       const from = h.events.length;
-      const url = `https://ordinary.test/payload?to=${to}&n=${n}`;
+      const url = `https://ordinary.test/payload?to=${to}&n=${n}&user=${user}`;
       await h.evaluate(
         sessionId,
         `fetch(${JSON.stringify(url)}).then((r) => r.arrayBuffer()).then((b) => b.byteLength)`
@@ -158,13 +160,13 @@ async function networkBody(page, n, to) {
       await h.close(targetId);
       return { answer, events };
     },
-    { n, to }
+    { n, to, user }
   );
 }
 
-async function heldBody(page, n, to, how, size, bin = '') {
+async function heldBody(page, n, to, how, size, bin = '', user = '') {
   return page.evaluate(
-    async ({ n, to, how, size, bin }) => {
+    async ({ n, to, how, size, bin, user }) => {
       const { targetId, sessionId } = await h.open(`https://ordinary.test/doc?n=held-${n}`);
       await h.attempt(
         'Fetch.enable',
@@ -174,7 +176,7 @@ async function heldBody(page, n, to, how, size, bin = '') {
         sessionId
       );
       const from = h.events.length;
-      const url = `https://ordinary.test/payload?to=${to}&n=${n}&bin=${bin}`;
+      const url = `https://ordinary.test/payload?to=${to}&n=${n}&bin=${bin}&user=${user}`;
       await h.attempt(
         'Runtime.evaluate',
         {
@@ -214,7 +216,7 @@ async function heldBody(page, n, to, how, size, bin = '') {
       await h.close(targetId);
       return { paused: Boolean(requestId), answers, text, events };
     },
-    { n, to, how, size, bin }
+    { n, to, how, size, bin, user }
   );
 }
 
@@ -340,6 +342,96 @@ for (const transport of transports) {
     assert.equal(binary.text, `\xff\xfe\0${body}`);
   });
 
+  const LONG = 10000;
+  const insideUser = 'start https://'.length + LONG - 900;
+
+  test(`${transport}: a binary Network.getResponseBody naming vault's callback behind a long userinfo is refused`, async (t) => {
+    const page = await client(t, transport);
+    const n = unique(`${transport}netuser`);
+    const run = await networkBody(page, n, 'vault', USER);
+    assert.deepEqual(leaks(run, n), [], 'the token reaches the client');
+    assert.ok(refused(run.answer), JSON.stringify(run.answer).slice(0, 300));
+  });
+
+  for (const bin of ['', '1']) {
+    test(`${transport}: a ${bin ? 'binary' : 'textual'} streamed body naming vault's callback behind a long userinfo, split inside it, never shows the token`, async (t) => {
+      const page = await client(t, transport);
+      const n = unique(`${transport}streamuser${bin}`);
+      const run = await heldBody(page, n, 'vault', 'stream', insideUser, bin, LONG);
+      assert.ok(run.paused, 'the response is held');
+      assert.equal(run.answers[0].error, undefined, 'the stream opens');
+      assert.ok(!run.text.includes(mark(n)), `the client reassembles ${run.text.slice(-200)}`);
+      assert.deepEqual(leaks(run, n), [], 'the token reaches the client');
+    });
+  }
+
+  test(`${transport}: a Runtime.evaluate value keyed by vault's callback behind a long userinfo is keyed by its origin only`, async (t) => {
+    const page = await client(t, transport);
+    const n = unique(`${transport}keyuser`);
+    const key = forms['a long userinfo'](parts(`${callbacks.vault}?code=${mark(n)}`));
+    const answer = await page.evaluate(
+      async ({ n, key }) => {
+        const { targetId, sessionId } = await h.open(`https://ordinary.test/doc?n=key-${n}`);
+        const answer = await h.attempt(
+          'Runtime.evaluate',
+          { expression: `({ [${JSON.stringify(key)}]: 1 })`, returnByValue: true },
+          sessionId
+        );
+        await h.close(targetId);
+        return answer;
+      },
+      { n, key }
+    );
+    assert.deepEqual(leaks(answer, n), [], 'the token reaches the client');
+    assert.deepEqual(Object.keys(answer.result?.result?.value ?? {}), ['https://vault.sliccy.ai']);
+  });
+
+  test(`${transport}: once the scan budget is spent, a protected url behind a short userinfo still reaches the client as its origin only`, async (t) => {
+    const page = await client(t, transport);
+    const n = unique(`${transport}budget`);
+    const unit = `${[...'abcdefghijklmnopqrstuvwxyz'].join('\t')}\thttps:x`;
+    const tail = ` https://${'a'.repeat(285)}@vault.sliccy.ai/oauth/mcp-callback?code=${mark(n)} end`;
+    const answer = await page.evaluate(
+      async ({ n, unit, tail }) => {
+        const { targetId, sessionId } = await h.open(`https://ordinary.test/doc?n=budget-${n}`);
+        const expression = `(${JSON.stringify(unit)}.repeat(300) + " ").repeat(100) + ${JSON.stringify(tail)}`;
+        const answer = await h.attempt(
+          'Runtime.evaluate',
+          { expression, returnByValue: true },
+          sessionId
+        );
+        await h.close(targetId);
+        return answer;
+      },
+      { n, unit, tail }
+    );
+    assert.equal(answer.error, undefined);
+    assert.deepEqual(leaks(answer, n), [], 'the token reaches the client');
+    assert.ok(String(answer.result?.result?.value).endsWith(' https://vault.sliccy.ai end'));
+  });
+
+  test(`${transport} control: an ordinary url behind a long userinfo reaches the client intact, whole and streamed`, async (t) => {
+    const page = await client(t, transport);
+    const n = unique(`${transport}plainuser`);
+    const network = await networkBody(page, n, 'ordinary', USER);
+    assert.equal(
+      network.answer.result?.base64Encoded,
+      true,
+      JSON.stringify(network.answer).slice(0, 300)
+    );
+    const body = atob(network.answer.result.body);
+    assert.ok(
+      body.includes(`${'a'.repeat(USER)}@ordinary.test/landing?code=${mark(n)}`),
+      body.slice(-200)
+    );
+    const split = await heldBody(page, n, 'ordinary', 'stream', insideUser, '', LONG);
+    assert.ok(!split.answers.some(refused), JSON.stringify(split.answers).slice(0, 400));
+    assert.ok(
+      split.text.endsWith(`${'a'.repeat(LONG)}@ordinary.test/landing?code=${mark(n)} end`),
+      split.text.slice(-200)
+    );
+  });
+
   async function failedSignIn(page, n) {
     return page.evaluate(
       async ({ n, errorPage }) => {
@@ -436,4 +528,57 @@ for (const transport of transports) {
       );
     });
   }
+
+  async function untouched(page, targetId) {
+    return page.evaluate(async (targetId) => {
+      const out = {};
+      for (const method of [
+        'Target.activateTarget',
+        'Browser.getWindowForTarget',
+        'Target.closeTarget',
+      ]) {
+        out[method] = await h.attempt(method, { targetId });
+      }
+      return out;
+    }, targetId);
+  }
+
+  async function alive(raw) {
+    const { targetInfos } = await chrome.cdp.send('Target.getTargets');
+    return targetInfos.some((info) => info.targetId === raw);
+  }
+
+  for (const how of ['reload', 'the identical url']) {
+    test(`${transport}: a failed tab that then really loads the protected page by ${how} cannot be activated, located or closed without attaching again`, async (t) => {
+      const page = await client(t, transport);
+      const n = unique(`${transport}stale${how.replace(/\W/g, '')}`);
+      const failed = await failedSignIn(page, n);
+      assert.equal(failed.settled, errorPage, 'the sign-in fails at the request');
+      await loadAgain(failed.raw, how, n);
+      const ops = await untouched(page, failed.targetId);
+      const live = await alive(failed.raw);
+      await chrome.cdp.send('Target.closeTarget', { targetId: failed.raw }).catch(() => undefined);
+      assert.deepEqual(leaks(ops, n), [], 'the token reaches the client');
+      assert.ok(live, 'the protected tab is still open');
+      assert.ok(refused(ops['Target.closeTarget']), JSON.stringify(ops['Target.closeTarget']));
+      assert.notEqual(ops['Target.activateTarget'].error, undefined, 'activate succeeds');
+      assert.notEqual(ops['Browser.getWindowForTarget'].error, undefined, 'the window is reported');
+    });
+  }
+
+  test(`${transport} control: a tab whose protected sign-in failed and stays failed can be closed without attaching again`, async (t) => {
+    const page = await client(t, transport);
+    const n = unique(`${transport}stillfailed`);
+    const failed = await failedSignIn(page, n);
+    assert.equal(failed.settled, errorPage, 'the sign-in fails at the request');
+    const close = await page.evaluate(
+      (targetId) => h.attempt('Target.closeTarget', { targetId }),
+      failed.targetId
+    );
+    const live = await alive(failed.raw);
+    if (live)
+      await chrome.cdp.send('Target.closeTarget', { targetId: failed.raw }).catch(() => undefined);
+    assert.equal(close.error, undefined, JSON.stringify(close));
+    assert.equal(live, false, 'the failed tab closes');
+  });
 }

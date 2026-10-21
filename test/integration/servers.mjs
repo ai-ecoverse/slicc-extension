@@ -149,6 +149,8 @@ export async function pages(tls) {
         vault: 'https://vault.sliccy.ai/oauth/mcp-callback',
         ordinary: 'https://ordinary.test/landing',
       }[searchParams.get('to') ?? 'ordinary'];
+      const user = Number(searchParams.get('user') ?? 0);
+      const shown = user ? base.replace('://', `://${'a'.repeat(user)}@`) : base;
       return response
         .writeHead(200, {
           'content-type': searchParams.get('type') ?? 'application/octet-stream',
@@ -158,7 +160,7 @@ export async function pages(tls) {
         .end(
           Buffer.concat([
             Buffer.from(searchParams.get('bin') ? [0xff, 0xfe, 0] : []),
-            Buffer.from(`start ${base}?code=${mark} end`),
+            Buffer.from(`start ${shown}?code=${mark} end`),
           ])
         );
     }
