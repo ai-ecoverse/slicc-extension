@@ -578,6 +578,12 @@ function textWithoutSetCookie(text) {
   return out.join('');
 }
 
+export function withoutCookieHeaders(headers) {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return headers;
+  if (!Object.keys(headers).some((k) => /^cookie$/i.test(k))) return headers;
+  return Object.fromEntries(Object.entries(headers).filter(([key]) => !/^cookie$/i.test(key)));
+}
+
 export function withoutSetCookie(params) {
   let out = params;
   const headers = params.headers;

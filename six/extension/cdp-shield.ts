@@ -658,6 +658,11 @@ function hopMatches(hop: Hop | undefined, params: CDPPayload): boolean {
   );
 }
 
+function stripCookie(headers: unknown): void {
+  if (!isObj(headers)) return;
+  for (const key of Object.keys(headers)) if (/^cookie$/i.test(key)) delete headers[key];
+}
+
 function stripSetCookie(params: CDPPayload): void {
   const headers = params['headers'];
   if (isObj(headers)) {
@@ -1358,6 +1363,10 @@ export class TabShield {
     this.requests.set(id, true);
     this.held.delete(id);
     if (this.hops.get(id) !== 'done') this.hops.set(id, hopOf(redirect as CDPPayload));
+    stripSetCookie(redirect as CDPPayload);
+    stripCookie((redirect as CDPPayload)['requestHeaders']);
+    const request = params['request'];
+    if (isObj(request)) stripCookie(request['headers']);
     return true;
   }
 
@@ -1383,8 +1392,10 @@ export class TabShield {
   }
 
   private settle(id: string): ShieldEvent[] {
+    const held = this.held.delete(id) ?? [];
+    if (this.requests.get(id) !== false) return [];
     this.settled.set(id, true);
-    return this.held.delete(id) ?? [];
+    return held;
   }
 
   private deliver(event: ShieldEvent): ShieldEvent[] {
@@ -1409,8 +1420,7 @@ export class TabShield {
         return [];
       }
     }
-    const released =
-      id && this.requests.get(id) === false && SETTLES.has(event.method) ? this.settle(id) : [];
+    const released = id && SETTLES.has(event.method) ? this.settle(id) : [];
     this.worlds.learn(params);
     return [event, ...released];
   }
