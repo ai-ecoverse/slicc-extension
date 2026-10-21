@@ -32,6 +32,8 @@ import {
   foreignFrame,
   frameIn,
   headersNameProtected,
+  hopMatches,
+  hopOf,
   initScriptPrefix,
   namesProtectedStorage,
   PROFILED,
@@ -55,6 +57,7 @@ import {
   urlProtected,
   WORLD,
   Worlds,
+  withoutSetCookie,
   wrapsAbout,
 } from './shield.js';
 
@@ -1217,7 +1220,7 @@ class Connection {
     if (this.frameProtected(tab, p.frameId) || tab.worlds.hides(p)) return true;
     tab.requests.set(p.requestId, true);
     tab.held.delete(p.requestId);
-    if (tab.hops.get(p.requestId) !== 'done') tab.hops.set(p.requestId, 'await');
+    if (tab.hops.get(p.requestId) !== 'done') tab.hops.set(p.requestId, hopOf(p.redirectResponse));
     if (tab.hops.size > 500) tab.hops.delete(tab.hops.keys().next().value);
     this.broadcast(tabId, method, stripProtectedCookies(guard, p));
     return true;
@@ -1227,12 +1230,12 @@ class Connection {
     if (method !== 'Network.responseReceivedExtraInfo') return false;
     if (!REDIRECTS.has(params.statusCode) || typeof params.requestId !== 'string') return false;
     const id = params.requestId;
-    const awaited = tab.hops.get(id) === 'await';
+    const awaited = hopMatches(tab.hops.get(id), params);
     const named = responseNamesProtected(method, params, anyProtected);
     if (known === true ? !awaited : !named) return false;
     tab.hops.set(id, 'done');
     tab.requests.set(id, true);
-    this.broadcast(tabId, method, stripProtectedCookies(guard, params));
+    this.broadcast(tabId, method, withoutSetCookie(stripProtectedCookies(guard, params)));
     return true;
   }
 

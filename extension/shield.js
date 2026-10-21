@@ -546,6 +546,56 @@ export function stripProtectedCookies(guard, params) {
   return out;
 }
 
+const SET_COOKIE = /^set-cookie$/i;
+const CACHED = ['fromDiskCache', 'fromServiceWorker', 'fromPrefetchCache', 'fromEarlyHints'];
+
+function headerValue(headers, name) {
+  if (!headers || typeof headers !== 'object') return undefined;
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === name);
+  return key === undefined ? undefined : String(headers[key]);
+}
+
+export function hopOf(redirect) {
+  if (CACHED.some((key) => redirect?.[key] === true)) return 'done';
+  return { status: redirect?.status, location: headerValue(redirect?.headers, 'location') };
+}
+
+export function hopMatches(hop, params) {
+  if (hop === null || typeof hop !== 'object') return false;
+  return (
+    params.statusCode === hop.status && headerValue(params.headers, 'location') === hop.location
+  );
+}
+
+function textWithoutSetCookie(text) {
+  const out = [];
+  let dropping = false;
+  for (const line of text.split(/(?<=\n)/)) {
+    if (/^set-cookie\s*:/i.test(line)) dropping = true;
+    else if (!/^[ \t]/.test(line)) dropping = false;
+    if (!dropping) out.push(line);
+  }
+  return out.join('');
+}
+
+export function withoutSetCookie(params) {
+  let out = params;
+  const headers = params.headers;
+  if (
+    headers &&
+    typeof headers === 'object' &&
+    Object.keys(headers).some((k) => SET_COOKIE.test(k))
+  ) {
+    const kept = Object.entries(headers).filter(([key]) => !SET_COOKIE.test(key));
+    out = { ...out, headers: Object.fromEntries(kept) };
+  }
+  if (typeof params.headersText === 'string') {
+    const text = textWithoutSetCookie(params.headersText);
+    if (text !== params.headersText) out = { ...out, headersText: text };
+  }
+  return out;
+}
+
 export function requestKey(params) {
   if (typeof params?.requestId === 'string') return params.requestId;
   if (typeof params?.interceptionId === 'string') return params.interceptionId;

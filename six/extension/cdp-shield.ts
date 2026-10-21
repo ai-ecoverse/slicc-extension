@@ -629,6 +629,47 @@ function stripProtectedAssociated(params: CDPPayload): void {
   );
 }
 
+const SET_COOKIE = /^set-cookie$/i;
+const CACHED = ['fromDiskCache', 'fromServiceWorker', 'fromPrefetchCache', 'fromEarlyHints'];
+
+type Hop = { status: unknown; location: string | undefined } | 'done';
+
+function headerValue(headers: unknown, name: string): string | undefined {
+  if (!isObj(headers)) return undefined;
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === name);
+  return key === undefined ? undefined : String(headers[key]);
+}
+
+function hopOf(redirect: CDPPayload): Hop {
+  if (CACHED.some((key) => redirect[key] === true)) return 'done';
+  return { status: redirect['status'], location: headerValue(redirect['headers'], 'location') };
+}
+
+function hopMatches(hop: Hop | undefined, params: CDPPayload): boolean {
+  if (hop === undefined || hop === 'done') return false;
+  return (
+    params['statusCode'] === hop.status &&
+    headerValue(params['headers'], 'location') === hop.location
+  );
+}
+
+function stripSetCookie(params: CDPPayload): void {
+  const headers = params['headers'];
+  if (isObj(headers)) {
+    for (const key of Object.keys(headers)) if (SET_COOKIE.test(key)) delete headers[key];
+  }
+  const text = params['headersText'];
+  if (typeof text !== 'string') return;
+  const out: string[] = [];
+  let dropping = false;
+  for (const line of text.split(/(?<=\n)/)) {
+    if (/^set-cookie\s*:/i.test(line)) dropping = true;
+    else if (!/^[ \t]/.test(line)) dropping = false;
+    if (!dropping) out.push(line);
+  }
+  params['headersText'] = out.join('');
+}
+
 export function redacted(info: CDPPayload): CDPPayload {
   let origin = 'about:blank';
   try {
@@ -755,7 +796,7 @@ export class TabShield {
   private readonly failedDocuments = new Bounded<true>(200);
   private readonly hiddenFrames = new Bounded<true>(1000);
   private readonly namedBodies = new Bounded<true>(2000);
-  private readonly hops = new Bounded<string>(500);
+  private readonly hops = new Bounded<Hop>(500);
   private readonly reroutes = new Map<string, (allowed: boolean) => void>();
   private readonly worlds = new Worlds();
   private clientFetch: ClientFetch | null = null;
@@ -1310,19 +1351,20 @@ export class TabShield {
     if (!from || urlProtected(from) || !urlProtected(requestUrl(params) ?? '')) return false;
     this.requests.set(id, true);
     this.held.delete(id);
-    if (this.hops.get(id) !== 'done') this.hops.set(id, 'await');
+    if (this.hops.get(id) !== 'done') this.hops.set(id, hopOf(redirect as CDPPayload));
     return true;
   }
 
   private redirectExtra(params: CDPPayload, id: string): boolean {
     const status = params['statusCode'];
     if (typeof status !== 'number' || !REDIRECTS.has(status)) return false;
-    const awaited = this.hops.get(id) === 'await';
+    const awaited = hopMatches(this.hops.get(id), params);
     const named = responseNamesProtected('Network.responseReceivedExtraInfo', params);
     if (this.requests.get(id) === true ? !awaited : !named) return false;
     this.hops.set(id, 'done');
     this.requests.set(id, true);
     stripProtectedAssociated(params);
+    stripSetCookie(params);
     return true;
   }
 
