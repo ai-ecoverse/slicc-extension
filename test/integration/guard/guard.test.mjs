@@ -54,6 +54,11 @@ let dir;
 let fixture;
 let spki;
 const pool = [];
+const unisolated = [];
+const sharing = [
+  '--disable-site-isolation-trials',
+  '--disable-features=IsolateOrigins,site-per-process',
+];
 
 before(async () => {
   dir = await mkdtemp(join(tmpdir(), 'slicc-extension-guard-'));
@@ -65,7 +70,9 @@ before(async () => {
 });
 
 after(async () => {
-  await Promise.allSettled(pool.map(async (browser) => (await browser)?.close()));
+  await Promise.allSettled(
+    [...pool, ...unisolated].map(async (browser) => (await browser)?.close())
+  );
   await fixture?.close();
   if (dir) await rm(dir, { recursive: true, force: true });
 });
@@ -82,14 +89,18 @@ async function evaluate(cdp, sessionId, expression) {
   return answer.result.value;
 }
 
-async function browser() {
+async function browser(extra = []) {
   const rules = hosts.map((host) => `MAP ${host} 127.0.0.1:${fixture.port}`).join(', ');
   const copy = await copies(['extension/']);
   const chrome = await launch({
     roots: [['/', 'test/integration/page/']],
     coverage: [],
     extensions: copy.paths,
-    args: [`--ignore-certificate-errors-spki-list=${spki}`, `--host-resolver-rules=${rules}`],
+    args: [
+      `--ignore-certificate-errors-spki-list=${spki}`,
+      `--host-resolver-rules=${rules}`,
+      ...extra,
+    ],
   }).catch(async (error) => {
     await copy.remove();
     throw error;
@@ -271,19 +282,22 @@ async function browser() {
   };
 }
 
-async function pooled(slot, fresh = false) {
-  if (fresh && pool[slot]) {
-    const old = pool[slot];
-    pool[slot] = undefined;
+async function pooled(slot, fresh = false, shared = false) {
+  const list = shared ? unisolated : pool;
+  if (fresh && list[slot]) {
+    const old = list[slot];
+    list[slot] = undefined;
     await (await old).close();
   }
-  pool[slot] ??= browser();
-  return pool[slot];
+  list[slot] ??= browser(shared ? sharing : []);
+  return list[slot];
 }
 
 async function clients(transport, metadata) {
   const { slot } = metadata;
-  const own = await pooled(slot, metadata.leg !== 'guarded' && cachesAuth(metadata.vector));
+  const shared = (metadata.vector.requires ?? []).includes('siteIsolationOff');
+  const fresh = metadata.leg !== 'guarded' && cachesAuth(metadata.vector);
+  const own = await pooled(slot, fresh, shared);
   const made = await own.guarded(transport);
   return { client: made.client, unguarded: own.observer, close: made.close };
 }

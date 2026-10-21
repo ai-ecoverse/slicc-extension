@@ -73,6 +73,7 @@ export function capabilities(transport) {
     extensionWorld: true,
     discovery: transport === 'seven',
     clientExit: true,
+    siteIsolationOff: true,
   };
 }
 

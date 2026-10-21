@@ -1,5 +1,17 @@
 import type { CDPPayload } from '@slicc/shared-ts';
 import {
+  boundIds,
+  frameSets,
+  nodeSelectors,
+  pruneSealed,
+  pruneSnapshot,
+  type Seal,
+  sealedEvent,
+  sealedNodes,
+  sealedRead,
+  wholePage,
+} from './cdp-frames.js';
+import {
   ABOUT_WORLD,
   extensionOrigin,
   PROFILED,
@@ -1085,6 +1097,8 @@ interface ClientFetch {
   handleAuthRequests: boolean;
 }
 
+type Sealed = { visible: Set<string>; sealed: Set<string>; nodes: Set<unknown> };
+
 export class TabShield {
   private readonly requests = new Bounded<boolean>(5000);
   private readonly held = new Bounded<ShieldEvent[]>(500);
@@ -1101,6 +1115,8 @@ export class TabShield {
   private readonly reroutes = new Map<string, (allowed: boolean) => void>();
   private readonly worlds = new Worlds();
   private clientFetch: ClientFetch | null = null;
+  private seal: Sealed | undefined;
+  private readonly cut = new Set<unknown>();
   private mainFrameId = '';
   private blockedFlag = false;
 
@@ -1190,6 +1206,7 @@ export class TabShield {
       read = this.bodyReads.delete(pauseId);
     }
     const reroute = this.pendingReroute(method, input, pauseId);
+    const seal = await this.sealFor(method, input);
     let result: CDPPayload;
     try {
       result = await forward(
@@ -1206,7 +1223,123 @@ export class TabShield {
     }
     if (reroute !== undefined) await this.settleReroute(pauseId, reroute);
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
-    return this.after(method, result ?? {}, input);
+    return this.after(method, await this.unseal(seal, method, result ?? {}), input);
+  }
+
+  private frameHidden(frame: CDPPayload): boolean {
+    const origin = frame['securityOrigin'];
+    if (this.frameProtected(str(frame['id']) ?? '') || typeof origin !== 'string') return true;
+    if (extensionOrigin(frame['url']) || extensionOrigin(origin)) return true;
+    return [origin, frame['url'], frame['unreachableUrl']].some(
+      (url) =>
+        typeof url === 'string' &&
+        url !== '' &&
+        url !== '://' &&
+        url !== 'null' &&
+        urlProtected(url)
+    );
+  }
+
+  private async sealFor(method: string, params: CDPPayload): Promise<Sealed | undefined> {
+    if (!sealedRead(method)) return undefined;
+    const tree = await this.send('Page.getFrameTree', {}).catch(() =>
+      refuse(PROTECTED_RULES.refusal)
+    );
+    const frames = frameSets(tree['frameTree'], (frame) => this.frameHidden(frame));
+    if (frames.visible.size === 0) refuse(PROTECTED_RULES.refusal);
+    const seal: Sealed = { ...frames, nodes: new Set<unknown>() };
+    this.seal = seal;
+    if (frames.sealed.size === 0) return seal;
+    const frameId = params['frameId'];
+    if (typeof frameId === 'string' && !frames.visible.has(frameId)) {
+      refuse(PROTECTED_RULES.refusal);
+    }
+    if (method === 'DOMSnapshot.captureSnapshot') return seal;
+    const snapshot = await this.send('DOMSnapshot.captureSnapshot', { computedStyles: [] }).catch(
+      () => refuse(PROTECTED_RULES.refusal)
+    );
+    seal.nodes = sealedNodes(snapshot, frames.visible);
+    if (seal.nodes.size === 0) return seal;
+    if (wholePage(method)) refuse(PROTECTED_RULES.refusal);
+    const { backend, dom, objects } = nodeSelectors(params);
+    const ids: unknown[] = [...backend];
+    for (const nodeId of dom) ids.push(await this.backendOf({ nodeId }, true));
+    for (const objectId of objects) ids.push(await this.backendOf({ objectId }, false));
+    if (ids.some((id) => seal.nodes.has(id))) refuse(PROTECTED_RULES.refusal);
+    return seal;
+  }
+
+  private async backendOf(params: CDPPayload, strict: boolean): Promise<unknown> {
+    try {
+      const answer = await this.send('DOM.describeNode', params);
+      return isObj(answer['node']) ? answer['node']['backendNodeId'] : undefined;
+    } catch (error) {
+      if (strict) throw error;
+      return undefined;
+    }
+  }
+
+  private async unseal(
+    seal: Sealed | undefined,
+    method: string,
+    result: CDPPayload
+  ): Promise<CDPPayload> {
+    if (!seal) return result;
+    if (method === 'DOMSnapshot.captureSnapshot') return pruneSnapshot(result, seal.visible);
+    if (seal.sealed.size === 0) return result;
+    this.cutNodes(pruneSealed(result, seal));
+    if (seal.nodes.size === 0) return result;
+    if (seal.nodes.has(result['backendNodeId']) || seal.sealed.has(str(result['frameId']) ?? '')) {
+      refuse(PROTECTED_RULES.refusal);
+    }
+    const nodeId = result['nodeId'];
+    if (typeof nodeId === 'number' && seal.nodes.has(await this.backendOf({ nodeId }, false))) {
+      refuse(PROTECTED_RULES.refusal);
+    }
+    if (Array.isArray(result['nodeIds'])) {
+      const kept: unknown[] = [];
+      for (const id of result['nodeIds']) {
+        if (!seal.nodes.has(await this.backendOf({ nodeId: id }, false))) kept.push(id);
+      }
+      result['nodeIds'] = kept;
+    }
+    return result;
+  }
+
+  private cutNodes(ids: number[]): void {
+    for (const id of ids) this.cut.add(id);
+    while (this.cut.size > 100000) this.cut.delete(this.cut.values().next().value);
+  }
+
+  private sealEvent(method: string, params: CDPPayload): boolean {
+    if (method === 'DOM.documentUpdated') {
+      this.cut.clear();
+      return true;
+    }
+    if (sealedEvent(params, this.cut)) {
+      this.cutNodes(boundIds(params));
+      return false;
+    }
+    const last = this.seal;
+    const seal: Seal = {
+      nodes: last?.nodes ?? new Set(),
+      sealed: {
+        has: (id) => this.frameProtected(str(id) ?? '') || last?.sealed.has(str(id) ?? '') === true,
+      },
+      visible: {
+        has: (id) => {
+          const frame = str(id) ?? '';
+          if (!frame || this.frameProtected(frame)) return false;
+          return this.frames.has(frame) || last?.visible.has(frame) === true;
+        },
+      },
+    };
+    try {
+      this.cutNodes(pruneSealed(params, seal));
+    } catch {
+      return false;
+    }
+    return true;
   }
 
   private pendingReroute(
@@ -1491,6 +1624,7 @@ export class TabShield {
     if (this.worlds.hides(p)) return [];
     if (this.frameProtected(str(p['frameId']) ?? '')) return [];
     if (DISCOVERY_EVENTS.has(method)) return [];
+    if (sealedRead(method) && !this.sealEvent(method, p)) return [];
     if (method.startsWith('Target.')) {
       if (isObj(p['targetInfo']) && isProtectedTargetType(p['targetInfo']['type'])) return [];
       return [this.redactTarget(method, p)];
