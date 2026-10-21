@@ -212,6 +212,15 @@ export async function pages(tls) {
     if (pathname === '/redirect') {
       return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();
     }
+    if (pathname === '/meta') {
+      const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
+      const scheme = searchParams.get('scheme') === 'http' ? 'http' : 'https';
+      const to = `${scheme}://vault.sliccy.ai/oauth/mcp-callback?code=${mark}`;
+      const page = `<!doctype html><title>meta</title><meta http-equiv="refresh" content="0; url=${to}">`;
+      return response
+        .writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        .end(page);
+    }
     if (pathname === '/frame') {
       const src = JSON.stringify(searchParams.get('src') ?? '/');
       const page = `<!doctype html><title>frame</title><iframe src=${src}></iframe>`;

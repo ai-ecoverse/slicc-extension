@@ -134,7 +134,7 @@ function failuresOf(tabId: number): Bounded<true> {
 function failedView(tabId: number, tab: ChromeTab | undefined): ChromeTab | undefined {
   if (!tab || !failedBefore(tabId, tab.url)) return tab;
   const pending = failedBefore(tabId, tab.pendingUrl) ? '' : tab.pendingUrl;
-  return { ...tab, url: ERROR_PAGE, pendingUrl: pending };
+  return { ...tab, url: ERROR_PAGE, title: '', pendingUrl: pending };
 }
 
 async function confirmFailure(tabId: number, deps: BridgeSwDeps): Promise<void> {
@@ -890,6 +890,7 @@ async function cdpGetTargets(
   const [tabs, activeId] = await Promise.all([deps.queryTabs(), deps.queryActiveTabId()]);
   const targetInfos = tabs
     .filter((t): t is ChromeTab & { id: number } => typeof t.id === 'number')
+    .map((raw) => ({ ...raw, ...failedView(raw.id, raw) }))
     .map((t) => {
       const info = {
         targetId: String(t.id),
@@ -943,7 +944,7 @@ async function cdpAttachToTarget(
   state.cut.delete(sessionId);
   state.sessionToTab.set(sessionId, tabId);
   state.attachRefCounts.set(tabId, (state.attachRefCounts.get(tabId) ?? 0) + 1);
-  const tab = await deps.getTab(tabId);
+  const tab = failedView(tabId, await deps.getTab(tabId));
   const url = tab?.url || tab?.pendingUrl || '';
   const info = {
     targetId,
@@ -1034,7 +1035,7 @@ async function openedTarget(tabId: number, deps: BridgeSwDeps): Promise<BridgeTa
 async function cdpGetTargetInfo(params: CDPPayload, deps: BridgeSwDeps): Promise<CDPPayload> {
   const targetId = readTargetIdParam(params);
   const tabId = exactTabId(targetId);
-  const tab = await deps.getTab(tabId);
+  const tab = failedView(tabId, await deps.getTab(tabId));
   if (!tab) throw new Error(`No target with given id found: ${targetId}`);
   const info = {
     targetId,

@@ -444,8 +444,12 @@ class Connection {
   }
 
   async confirmed(tabId) {
-    const tab = await readTab(this.api, tabId);
-    if (this.tabState(tabId) || !this.failedAt(tabId, tab.url)) return this.view(tab);
+    return this.checked(await readTab(this.api, tabId));
+  }
+
+  async checked(tab) {
+    const tabId = tab?.id;
+    if (this.tabState(tabId) || !this.failedAt(tabId, tab?.url)) return this.view(tab);
     const frame = await this.api.webNavigation
       ?.getFrame?.({ tabId, frameId: 0 })
       .catch(() => undefined);
@@ -453,7 +457,8 @@ class Connection {
     return this.view(tab);
   }
 
-  info(tab) {
+  info(raw) {
+    const tab = this.view(raw);
     const url = textOf(tab.url);
     const pending = textOf(tab.pendingUrl);
     const shown = urlProtected(guard, url) ? redactedUrl(url) : url;
@@ -518,9 +523,10 @@ class Connection {
       .then((found) => (typeof found[0]?.id === 'number' ? found[0].id : undefined))
       .catch(() => undefined);
     const [tabs, activeId] = await Promise.all([listed, active]);
+    const numbered = tabs.filter((tab) => typeof tab.id === 'number');
+    const shown = await Promise.all(numbered.map((tab) => this.checked(tab)));
     const targetInfos = [];
-    for (const tab of tabs) {
-      if (typeof tab.id !== 'number') continue;
+    for (const tab of shown) {
       this.state.seen.add(tab.id);
       targetInfos.push({ ...this.info(tab), active: tab.id === activeId });
     }
@@ -541,7 +547,7 @@ class Connection {
       };
     }
     const tabId = tabFrom(params.targetId);
-    const tab = await readTab(this.api, tabId);
+    const tab = await this.confirmed(tabId);
     this.state.seen.add(tabId);
     return { targetInfo: this.info(tab) };
   }
@@ -552,8 +558,8 @@ class Connection {
     this.state.discover = on;
     if (!on || was) return {};
     const tabs = await this.api.tabs.query({});
-    for (const tab of tabs) {
-      if (typeof tab.id !== 'number') continue;
+    const numbered = tabs.filter((tab) => typeof tab.id === 'number');
+    for (const tab of await Promise.all(numbered.map((each) => this.checked(each)))) {
       this.state.seen.add(tab.id);
       this.post({ method: 'Target.targetCreated', params: { targetInfo: this.info(tab) } });
     }
@@ -1476,12 +1482,13 @@ class Connection {
 
   async announce(tab, created) {
     if (!this.state.discover || typeof tab?.id !== 'number') return;
-    if (await tabBlocked(this.api, this.view(tab))) this.release(tab.id);
+    const shown = await this.checked(tab);
+    if (await tabBlocked(this.api, shown)) this.release(tab.id);
     const known = this.state.seen.has(tab.id);
     this.state.seen.add(tab.id);
     this.post({
       method: known && !created ? 'Target.targetInfoChanged' : 'Target.targetCreated',
-      params: { targetInfo: this.info(tab) },
+      params: { targetInfo: this.info(shown) },
     });
   }
 
