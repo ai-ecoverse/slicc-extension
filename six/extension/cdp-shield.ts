@@ -211,7 +211,9 @@ export function webSocketAsHttp(url: string): string {
 }
 
 export function urlProtected(text: string, readOnly = false): boolean {
-  return isProtectedUrl(text, readOnly) || isProtectedUrl(webSocketAsHttp(text), readOnly);
+  if (isProtectedUrl(text, readOnly)) return true;
+  const web = webSocketAsHttp(text);
+  return web !== text && isProtectedUrl(web, readOnly);
 }
 
 const SCHEME = /[a-z0-9+.-]/i;
@@ -225,6 +227,7 @@ const HAS_IGNORED = /[\t\n\r]/;
 const JOINS = new Set([',', ';', '(', ')']);
 const URL_CAP = 4096;
 const HOST_CAP = 300;
+const SEEN_CAP = 4096;
 const AUTHORITY_END = /[\\/?#]/g;
 const TAIL = URL_CAP + 64;
 const PIECE = 65536;
@@ -342,6 +345,7 @@ interface Memo {
   authority: number;
   work: number;
   budget: number;
+  seen: Map<string, boolean>;
 }
 
 function stopFrom(text: string, from: number, breaks: Set<number> | undefined): Stop {
@@ -375,6 +379,14 @@ function authorityEnd(memo: Memo, text: string, from: number): number {
   return memo.authority;
 }
 
+function judgeOnce(memo: Memo, url: string, isProtected: Judge): boolean {
+  const known = memo.seen.get(url);
+  if (known !== undefined) return known;
+  const hit = isProtected(url);
+  if (memo.seen.size < SEEN_CAP) memo.seen.set(url, hit);
+  return hit;
+}
+
 function urlAt(
   memo: Memo,
   text: string,
@@ -393,7 +405,9 @@ function urlAt(
   const judged = Math.min(end, authorityEnd(memo, text, run), run + cap);
   for (const [start, prefix] of starts) {
     memo.work += judged - start;
-    if (!isProtected(prefix + text.slice(start, judged).replace(/\\/g, '/'))) continue;
+    if (!judgeOnce(memo, prefix + text.slice(start, judged).replace(/\\/g, '/'), isProtected)) {
+      continue;
+    }
     return { start, end, url: prefix + text.slice(start, end).replace(/\\/g, '/') };
   }
   return undefined;
@@ -409,6 +423,7 @@ function scan(n: Normalized, isProtected: Judge): Span[] {
     authority: -1,
     work: 0,
     budget: 4 * text.length + 65536,
+    seen: new Map(),
   };
   ANCHORS.lastIndex = 0;
   for (let found = ANCHORS.exec(text); found; found = ANCHORS.exec(text)) {

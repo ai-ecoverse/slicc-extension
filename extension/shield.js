@@ -122,7 +122,9 @@ export function webSocketAsHttp(url) {
 
 export function urlProtected(guard, text, options = {}) {
   if (typeof text !== 'string' || text === '') return false;
-  return guard.url(text, options) || guard.url(webSocketAsHttp(text), options);
+  if (guard.url(text, options)) return true;
+  const web = webSocketAsHttp(text);
+  return web !== text && guard.url(web, options);
 }
 
 const SCHEME = /[a-z0-9+.-]/i;
@@ -136,6 +138,7 @@ const HAS_IGNORED = /[\t\n\r]/;
 const JOINS = new Set([',', ';', '(', ')']);
 const URL_CAP = 4096;
 const HOST_CAP = 300;
+const SEEN_CAP = 4096;
 const AUTHORITY_END = /[\\/?#]/g;
 const TAIL = URL_CAP + 64;
 const PIECE = 65536;
@@ -254,6 +257,14 @@ function authorityEnd(memo, text, from) {
   return memo.authority;
 }
 
+function judge(memo, url, isProtected) {
+  const known = memo.seen.get(url);
+  if (known !== undefined) return known;
+  const hit = isProtected(url);
+  if (memo.seen.size < SEEN_CAP) memo.seen.set(url, hit);
+  return hit;
+}
+
 function urlAt(memo, text, found, breaks, isProtected) {
   const at = found.index;
   const run = at + found[0].length;
@@ -266,7 +277,7 @@ function urlAt(memo, text, found, breaks, isProtected) {
   const judged = Math.min(end, authorityEnd(memo, text, run), run + cap);
   for (const [start, prefix] of starts) {
     memo.work += judged - start;
-    if (!isProtected(prefix + slashed(text.slice(start, judged)))) continue;
+    if (!judge(memo, prefix + slashed(text.slice(start, judged)), isProtected)) continue;
     return { start, end, url: prefix + slashed(text.slice(start, end)) };
   }
   return undefined;
@@ -282,6 +293,7 @@ function scan(n, isProtected) {
     authority: -1,
     work: 0,
     budget: 4 * text.length + 65536,
+    seen: new Map(),
   };
   ANCHORS.lastIndex = 0;
   for (let found = ANCHORS.exec(text); found; found = ANCHORS.exec(text)) {

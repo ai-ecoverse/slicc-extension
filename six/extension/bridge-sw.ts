@@ -285,6 +285,7 @@ export function notifyBridgeDebuggerDetached(tabId: number): void {
 }
 
 export function checkBridgeTabProtection(tabId: number, url: string | undefined): Set<number> {
+  if (url && !failedBefore(tabId, url)) failedTabs.get(String(tabId))?.clear();
   if (!url || !isProtectedUrl(url)) return new Set<number>();
   if (failedBefore(tabId, url)) return new Set<number>();
   return cutProtectedTab(tabId);
@@ -293,6 +294,7 @@ export function checkBridgeTabProtection(tabId: number, url: string | undefined)
 function cutProtectedTab(tabId: number): Set<number> {
   const detached = new Set<number>();
   tabShields.delete(tabId);
+  failedTabs.get(String(tabId))?.clear();
   for (const [port, state] of liveBridgePortStates) {
     const detachedSessionIds = [...state.sessionToTab]
       .filter(([, tid]) => tid === tabId)
