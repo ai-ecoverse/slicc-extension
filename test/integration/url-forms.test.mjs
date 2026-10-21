@@ -370,8 +370,8 @@ for (const transport of transports) {
       const href = sessionId ? await h.evaluate(sessionId, 'location.href') : undefined;
       const info = await h.attempt('Target.getTargetInfo', { targetId });
       const events = h.events.slice(start);
-      await h.close(targetId);
-      return { attach, href, info, events };
+      const close = await h.attempt('Target.closeTarget', { targetId });
+      return { attach, href, info, events, close };
     }, targetId);
   }
 
@@ -387,18 +387,24 @@ for (const transport of transports) {
     assert.equal(again.href, errorPage);
   });
 
-  test(`${transport} control: a failed tab that then really loads the protected page is refused after a detach`, async (t) => {
-    const page = await client(t, transport);
-    const n = unique(`${transport}reloaded`);
-    const failed = await failedSignIn(page, n);
-    assert.equal(failed.settled, errorPage, 'the sign-in fails at the request');
-    const callback = `${callbacks.vault}?code=${mark(n)}`;
+  async function loadAgain(raw, how, n) {
     const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
-      targetId: failed.raw,
+      targetId: raw,
       flatten: true,
     });
     try {
-      await chrome.cdp.send('Page.navigate', { url: callback }, sessionId);
+      const tree = await chrome.cdp.send('Page.getFrameTree', {}, sessionId);
+      const failed = tree.frameTree.frame.unreachableUrl;
+      assert.ok(failed?.startsWith(callbacks.vault), `the error page is for ${failed}`);
+      if (how === 'reload') await chrome.cdp.send('Page.reload', {}, sessionId);
+      else {
+        const url = {
+          'a different url': `${callbacks.vault}?code=${mark(n)}`,
+          'the identical url': failed,
+          'a #fragment variant': `${failed}#again`,
+        }[how];
+        await chrome.cdp.send('Page.navigate', { url }, sessionId);
+      }
       let href = '';
       for (let i = 0; i < 50 && !href.startsWith(callbacks.vault); i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
@@ -411,9 +417,23 @@ for (const transport of transports) {
     } finally {
       await chrome.cdp.send('Target.detachFromTarget', { sessionId }).catch(() => undefined);
     }
-    const again = await reattach(page, failed.targetId);
-    await chrome.cdp.send('Target.closeTarget', { targetId: failed.raw }).catch(() => undefined);
-    assert.deepEqual(leaks(again, n), [], 'the token reaches the client');
-    assert.ok(refused(again.attach), JSON.stringify(again.attach));
-  });
+  }
+
+  for (const how of ['a different url', 'reload', 'the identical url', 'a #fragment variant']) {
+    test(`${transport} control: a failed tab that then really loads the protected page by ${how} is refused after a detach`, async (t) => {
+      const page = await client(t, transport);
+      const n = unique(`${transport}reloaded${how.replace(/\W/g, '')}`);
+      const failed = await failedSignIn(page, n);
+      assert.equal(failed.settled, errorPage, 'the sign-in fails at the request');
+      await loadAgain(failed.raw, how, n);
+      const again = await reattach(page, failed.targetId);
+      await chrome.cdp.send('Target.closeTarget', { targetId: failed.raw }).catch(() => undefined);
+      assert.deepEqual(leaks(again, n), [], 'the token reaches the client');
+      assert.ok(refused(again.attach), JSON.stringify(again.attach));
+      assert.ok(
+        refused(again.close),
+        `the stale failure still vouches: ${JSON.stringify(again.close)}`
+      );
+    });
+  }
 }

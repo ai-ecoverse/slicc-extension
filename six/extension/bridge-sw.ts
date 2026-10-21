@@ -137,6 +137,17 @@ function failedView(tabId: number, tab: ChromeTab | undefined): ChromeTab | unde
   return { ...tab, url: ERROR_PAGE, pendingUrl: pending };
 }
 
+async function confirmFailure(tabId: number, deps: BridgeSwDeps): Promise<void> {
+  const tab = await deps.getTab(tabId);
+  if (!failedBefore(tabId, tab?.url) && !failedBefore(tabId, tab?.pendingUrl)) return;
+  const tree = await deps.sendDebuggerCommand(tabId, 'Page.getFrameTree').catch(() => undefined);
+  const frameTree = tree?.['frameTree'] as CDPPayload | undefined;
+  const frame = frameTree?.['frame'] as CDPPayload | undefined;
+  const unreachable = frame?.['unreachableUrl'];
+  if (typeof unreachable === 'string' && failedBefore(tabId, unreachable)) return;
+  failedTabs.get(String(tabId))?.clear();
+}
+
 async function protectedNow(tabId: number, deps: BridgeSwDeps): Promise<boolean> {
   return isProtectedTab(failedView(tabId, await deps.getTab(tabId)), deps.getTab);
 }
@@ -898,6 +909,7 @@ async function cdpAttachToTarget(
     });
     if (attachedByThisPort) state.ownedTabs.add(tabId);
   }
+  await confirmFailure(tabId, deps);
   if (await protectedNow(tabId, deps)) {
     if (state.ownedTabs.has(tabId)) {
       state.ownedTabs.delete(tabId);
