@@ -570,9 +570,40 @@ export function streamRead(stream: UrlStream, result: CDPPayload): CDPPayload {
   refuse(ENCODED);
 }
 
-function encodedNamed(value: Record<string, unknown>): boolean {
-  if (value['base64Encoded'] !== true) return false;
-  return ENCODED_KEYS.some((key) => {
+export class NetworkStreams {
+  private readonly streams = new Map<string, UrlStream>();
+
+  buffer(id: string, result: CDPPayload): CDPPayload {
+    if (!this.streams.has(id)) {
+      if (!id || this.streams.size >= 500) refuse(ENCODED);
+      this.streams.set(id, new UrlStream());
+    }
+    this.read(id, result['bufferedData']);
+    return result;
+  }
+
+  read(id: string, data: unknown): void {
+    const stream = this.streams.get(id);
+    if (!stream) refuse(ENCODED);
+    streamRead(stream, { data, base64Encoded: true });
+  }
+
+  end(id: string): void {
+    this.streams.delete(id);
+  }
+}
+
+function encodedNamed(value: Record<string, unknown>, method?: string): boolean {
+  const keys = value['base64Encoded'] === true ? [...ENCODED_KEYS] : [];
+  if (method === 'Network.dataReceived') keys.push('data');
+  if (method === 'Network.streamResourceContent') keys.push('bufferedData');
+  if (method === 'Audits.getEncodedResponse') keys.push('body');
+  if (
+    (method === 'Network.webSocketFrameReceived' || method === 'Network.webSocketFrameSent') &&
+    value['opcode'] === 2
+  )
+    keys.push('payloadData');
+  return keys.some((key) => {
     const item = value[key];
     return typeof item === 'string' && encodedNamesProtected(item);
   });
@@ -710,13 +741,13 @@ function redactKeys(source: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(keys.map((key, index) => [renamed[index], source[key]]));
 }
 
-export function redactProtected<T>(value: T): T {
+export function redactProtected<T>(value: T, method?: string): T {
   if (typeof value === 'string') return redactText(value) as T;
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     let out: unknown[] = value;
     value.forEach((item: unknown, index) => {
-      const next = redactProtected(item);
+      const next = redactProtected(item, method);
       if (next === item) return;
       if (out === value) out = [...value];
       out[index] = next;
@@ -724,11 +755,11 @@ export function redactProtected<T>(value: T): T {
     return out as T;
   }
   const original = value as Record<string, unknown>;
-  if (encodedNamed(original)) refuse(ENCODED);
+  if (encodedNamed(original, method)) refuse(ENCODED);
   const source = redactKeys(withHeaders(original));
   let out = source;
   for (const [key, item] of Object.entries(source)) {
-    const next = redactProtected(item);
+    const next = redactProtected(item, method);
     if (next === item) continue;
     if (out === source) out = { ...source };
     out[key] = next;
@@ -1063,6 +1094,7 @@ export class TabShield {
   private readonly pausedUrls = new Bounded<string>(2000);
   private readonly bodyReads = new Bounded<string>(2000);
   private readonly streams = new Bounded<UrlStream>(500);
+  private readonly networkStreams = new NetworkStreams();
   private readonly hiddenFrames = new Bounded<true>(1000);
   private readonly namedBodies = new Bounded<true>(2000);
   private readonly hops = new Bounded<Hop>(500);
@@ -1431,12 +1463,26 @@ export class TabShield {
       if (isProtectedTarget(str(info['url']) ?? '', false, 'unknown'))
         result['targetInfo'] = redacted(info);
     }
+    if (method === 'Network.streamResourceContent') {
+      return this.networkStreams.buffer(str(params['requestId']) ?? '', result);
+    }
     const read = method === 'IO.read' ? this.streams.get(str(params['handle']) ?? '') : undefined;
     return read ? streamRead(read, result) : result;
   }
 
   onEvent(method: string, params: CDPPayload | undefined): ShieldEvent[] {
     const p = params ?? {};
+    const id = str(p['requestId']) ?? '';
+    if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
+      this.networkStreams.end(id);
+    }
+    if (method === 'Network.dataReceived' && typeof p['data'] === 'string') {
+      try {
+        this.networkStreams.read(id, p['data']);
+      } catch {
+        return [];
+      }
+    }
     if (method === 'Fetch.requestPaused') return this.onPaused(p);
     if (method === 'Fetch.authRequired') return this.onAuth(p);
     this.track(p);

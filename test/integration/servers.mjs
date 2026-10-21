@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:https';
 import { join } from 'node:path';
@@ -29,12 +29,21 @@ export function certificate(dir) {
 
 function listen(tls, handler) {
   const server = createServer(tls, handler);
+  const sockets = new Set();
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       resolve({
         port: server.address().port,
+        upgrade(handler) {
+          server.on('upgrade', (request, socket) => {
+            sockets.add(socket);
+            socket.on('close', () => sockets.delete(socket));
+            handler(request, socket);
+          });
+        },
         close: () =>
           new Promise((done) => {
+            for (const socket of sockets) socket.destroy();
             server.closeAllConnections();
             server.close(done);
           }),
@@ -142,6 +151,28 @@ export async function pages(tls) {
         })
         .end();
     }
+    if (pathname === '/binary-stream') {
+      const marker = binaryMarker(searchParams);
+      response.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'cache-control': 'no-store',
+      });
+      response.write(Buffer.from([0xff, 0xfe, 0]));
+      const buffered = searchParams.get('buffered') === '1';
+      const split = searchParams.get('split');
+      if (split) {
+        const at = marker.indexOf('://') + 5;
+        const first = marker.subarray(0, at);
+        const last = marker.subarray(at);
+        if (split === 'buffered') response.write(first);
+        else setTimeout(() => response.write(first), 500);
+        setTimeout(() => response.end(last), 1000);
+        return;
+      }
+      if (buffered) response.write(marker);
+      setTimeout(() => response.end(buffered ? undefined : marker), 500);
+      return;
+    }
     if (pathname === '/payload') {
       const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
       const base = {
@@ -222,7 +253,49 @@ export async function pages(tls) {
     const body = named[pathname] ?? html;
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
   });
+  server.upgrade(binaryEcho);
   return { ...server, seen };
+}
+
+function binaryMarker(params) {
+  const host = params.get('to') === 'protected' ? 'vault.sliccy.ai' : 'ordinary.test';
+  return Buffer.from(`start https://${host}/landing?code=BINARY${params.get('n')} end`);
+}
+
+function binaryEcho(request, socket) {
+  const key = request.headers['sec-websocket-key'];
+  if (typeof key !== 'string' || !request.url.startsWith('/binary-echo')) {
+    socket.destroy();
+    return;
+  }
+  const accept = createHash('sha1')
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest('base64');
+  socket.write(
+    `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`
+  );
+  let pending = Buffer.alloc(0);
+  socket.on('data', (chunk) => {
+    pending = Buffer.concat([pending, chunk]);
+    while (pending.length >= 2) {
+      const opcode = pending[0] & 15;
+      const size = pending[1] & 127;
+      if (size > 125 || !(pending[1] & 128)) {
+        socket.destroy();
+        return;
+      }
+      if (pending.length < size + 6) return;
+      const body = Buffer.from(pending.subarray(6, size + 6));
+      for (let at = 0; at < size; at++) body[at] ^= pending[2 + (at % 4)];
+      pending = pending.subarray(size + 6);
+      if (opcode === 8) {
+        socket.end(Buffer.from([0x88, 0]));
+        return;
+      }
+      socket.write(Buffer.concat([Buffer.from([0x82, body.length]), body]));
+    }
+  });
+  socket.on('error', () => socket.destroy());
 }
 
 function collect(request) {

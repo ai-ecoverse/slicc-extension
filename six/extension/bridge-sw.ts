@@ -762,7 +762,7 @@ async function handleBridgeMessage(
           channelId,
           kind: 'cdp.event',
           method,
-          params: redactProtected(params),
+          params: redactProtected(params, method),
           sessionId,
         } satisfies ExtensionBridgeEnvelope);
       } catch {}
@@ -776,7 +776,7 @@ async function handleBridgeMessage(
           channelId,
           kind: 'cdp.event',
           method,
-          params: redactProtected(params),
+          params: redactProtected(params, method),
         } satisfies ExtensionBridgeEnvelope);
       } catch {}
     };
@@ -810,7 +810,7 @@ async function handleBridgeMessage(
       channelId: state.channelId,
       kind: 'cdp.response',
       id,
-      result: redactProtected(result),
+      result: redactProtected(result, env.method),
     } satisfies ExtensionBridgeEnvelope);
   } catch (err) {
     port.postMessage({

@@ -438,9 +438,43 @@ export function streamRead(stream, result) {
   throw new Error(ENCODED);
 }
 
-function encodedNamed(value, isProtected) {
-  if (value.base64Encoded !== true) return false;
-  return ENCODED_KEYS.some(
+export class NetworkStreams {
+  constructor(isProtected) {
+    this.isProtected = isProtected;
+    this.streams = new Map();
+  }
+
+  buffer(id, result) {
+    if (!this.streams.has(id)) {
+      if (!id || this.streams.size >= 500) throw new Error(ENCODED);
+      this.streams.set(id, new UrlStream(this.isProtected));
+    }
+    this.read(id, result.bufferedData);
+    return result;
+  }
+
+  read(id, data) {
+    const stream = this.streams.get(id);
+    if (!stream) throw new Error(ENCODED);
+    streamRead(stream, { data, base64Encoded: true });
+  }
+
+  end(id) {
+    this.streams.delete(id);
+  }
+}
+
+function encodedNamed(value, isProtected, method) {
+  const keys = value.base64Encoded === true ? [...ENCODED_KEYS] : [];
+  if (method === 'Network.dataReceived') keys.push('data');
+  if (method === 'Network.streamResourceContent') keys.push('bufferedData');
+  if (method === 'Audits.getEncodedResponse') keys.push('body');
+  if (
+    (method === 'Network.webSocketFrameReceived' || method === 'Network.webSocketFrameSent') &&
+    value.opcode === 2
+  )
+    keys.push('payloadData');
+  return keys.some(
     (key) => typeof value[key] === 'string' && encodedNamesProtected(value[key], isProtected)
   );
 }
@@ -569,25 +603,25 @@ function redactKeys(source, isProtected) {
   return Object.fromEntries(keys.map((key, index) => [renamed[index], source[key]]));
 }
 
-export function redactProtected(value, isProtected) {
+export function redactProtected(value, isProtected, method) {
   if (typeof value === 'string') return redactText(value, isProtected);
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     let out = value;
     value.forEach((item, index) => {
-      const next = redactProtected(item, isProtected);
+      const next = redactProtected(item, isProtected, method);
       if (next === item) return;
       if (out === value) out = [...value];
       out[index] = next;
     });
     return out;
   }
-  if (encodedNamed(value, isProtected)) throw new Error(ENCODED);
+  if (encodedNamed(value, isProtected, method)) throw new Error(ENCODED);
   const source = withHeaders(value, isProtected);
   let out = redactKeys(source, isProtected);
   const keyed = out;
   for (const [key, item] of Object.entries(keyed)) {
-    const next = redactProtected(item, isProtected);
+    const next = redactProtected(item, isProtected, method);
     if (next === item) continue;
     if (out === source || out === keyed) out = { ...keyed };
     out[key] = next;
