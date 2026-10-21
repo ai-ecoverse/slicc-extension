@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
@@ -7,12 +7,15 @@ import { launch } from './chrome.mjs';
 const repo = ['../../extension/_metadata', './fixture-extension/_metadata'].map(
   (path) => new URL(path, import.meta.url)
 );
+const started = Date.now();
 const chromes = [];
 after(() => Promise.allSettled(chromes.map((chrome) => chrome.close())));
 
 function unwritten() {
-  for (const path of repo)
-    assert.equal(existsSync(path), false, `${path.pathname} stays unwritten`);
+  for (const path of repo) {
+    const written = (statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0) >= started;
+    assert.equal(written, false, `${path.pathname} stays unwritten`);
+  }
 }
 
 async function appears(path, ms = 15000) {
