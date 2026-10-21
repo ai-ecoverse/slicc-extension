@@ -65,6 +65,7 @@ import {
   UNSEEN,
   UNWATCHED,
   UrlStream,
+  unknownFrame,
   urlProtected,
   WORLD,
   Worlds,
@@ -975,7 +976,7 @@ class Connection {
 
   frameHidden(tab, frame) {
     const origin = frame.securityOrigin;
-    if (this.frameProtected(tab, frame.id) || typeof origin !== 'string') return true;
+    if (this.frameProtected(tab, frame.id) || unknownFrame(frame)) return true;
     if (extensionOrigin(frame.url) || extensionOrigin(origin)) return true;
     if (this.protectedOrigin(origin)) return true;
     return [frame.url, frame.unreachableUrl].some(
@@ -1045,10 +1046,18 @@ class Connection {
     while (tab.cut.size > 100000) tab.cut.delete(tab.cut.values().next().value);
   }
 
-  sealEvent(tab, method, p) {
+  async sealEvent(tabId, tab, method, p) {
     if (method === 'DOM.documentUpdated') {
       tab.cut?.clear();
       return true;
+    }
+    try {
+      await this.seal(tabId, tab, method, {
+        ...p,
+        nodeId: p.nodeId ?? p.parentId ?? p.parentNodeId ?? p.hostId ?? p.insertionPointId,
+      });
+    } catch {
+      return false;
     }
     if (sealedEvent(p, tab.cut ?? new Set())) {
       this.cutNodes(tab, boundIds(p));
@@ -1500,9 +1509,16 @@ class Connection {
       this.release(tabId);
       return true;
     }
-    const kind = tab.worlds.hideable(ctx, tab.mainFrameId, (origin) =>
-      this.protectedOrigin(origin)
-    );
+    let kind = tab.worlds.hideable(ctx, tab.mainFrameId, (origin) => this.protectedOrigin(origin));
+    if (
+      ctx.auxData?.isDefault !== false &&
+      frameId &&
+      frameId !== tab.mainFrameId &&
+      unknownFrame({ securityOrigin: ctx.origin, url: ctx.origin })
+    ) {
+      tab.frames.set(frameId, true);
+      kind = 'foreign';
+    }
     if (tab.worlds.add(ctx, kind)) this.quietProfilers(tabId);
     return kind !== undefined;
   }
@@ -1511,10 +1527,7 @@ class Connection {
     if (!Array.isArray(tree?.childFrames)) return;
     tree.childFrames = tree.childFrames.filter((node) => {
       const frame = node?.frame ?? {};
-      const hidden =
-        this.frameProtected(tab, frame.id) ||
-        extensionOrigin(frame.url) ||
-        extensionOrigin(frame.securityOrigin);
+      const hidden = this.frameHidden(tab, frame);
       if (hidden && typeof frame.id === 'string') tab.frames.set(frame.id, true);
       return !hidden;
     });
@@ -1551,7 +1564,7 @@ class Connection {
     return false;
   }
 
-  onEvent(source, method, params) {
+  async onEvent(source, method, params) {
     if (typeof source?.sessionId === 'string') return;
     const tabId = source?.tabId;
     const tab = this.tabState(tabId);
@@ -1580,7 +1593,7 @@ class Connection {
     if (profiled(method) && tab.worlds.foreign) return;
     if (tab.worlds.hides(p)) return;
     if (this.frameProtected(tab, p.frameId)) return;
-    if (sealedRead(method) && !this.sealEvent(tab, method, p)) return;
+    if (sealedRead(method) && !(await this.sealEvent(tabId, tab, method, p))) return;
     this.deliver(tabId, tab, method, p);
   }
 

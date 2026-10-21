@@ -50,12 +50,38 @@ function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+const REALM_READS = new Set([
+  'Runtime.evaluate',
+  'Runtime.callFunctionOn',
+  'Runtime.getProperties',
+  'Runtime.getExceptionDetails',
+  'Runtime.compileScript',
+  'Runtime.globalLexicalScopeNames',
+  'Runtime.queryObjects',
+  'Runtime.runScript',
+  'Runtime.awaitPromise',
+  'Runtime.consoleAPICalled',
+  'Runtime.exceptionThrown',
+  'Runtime.bindingCalled',
+]);
+
+export function unknownFrame(frame: CDPPayload): boolean {
+  if (typeof frame['securityOrigin'] !== 'string' || typeof frame['url'] !== 'string') return true;
+  try {
+    const origin = new URL(String(frame['securityOrigin']));
+    new URL(String(frame['url']));
+    return origin.origin === 'null';
+  } catch {
+    return true;
+  }
+}
+
 export function sealedRead(method: string): boolean {
-  return SEALED_DOMAINS.some((domain) => method.startsWith(domain));
+  return REALM_READS.has(method) || SEALED_DOMAINS.some((domain) => method.startsWith(domain));
 }
 
 export function wholePage(method: string): boolean {
-  return WHOLE_PAGE.has(method);
+  return WHOLE_PAGE.has(method) || REALM_READS.has(method) || method.startsWith('CSS.');
 }
 
 export function frameSets(
@@ -164,6 +190,11 @@ export function pruneSealed(value: unknown, seal: Seal, cut: number[] = [], dept
     delete node['contentDocument'];
   }
   for (const [key, item] of Object.entries(node)) {
+    if (sealedItem(item, seal)) {
+      boundIds(item, cut);
+      delete node[key];
+      continue;
+    }
     if (Array.isArray(item)) node[key] = pruneList(item, seal, cut);
     pruneSealed(node[key], seal, cut, depth + 1);
   }

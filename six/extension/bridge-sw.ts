@@ -366,9 +366,14 @@ function subscribeShieldedEvents(deps: BridgeSwDeps, sink: DebuggerEventSink): (
     const unsubscribe = source((tabId, method, params) => {
       const shield = tabShields.get(tabId);
       if (!shield) return;
-      for (const event of shield.onEvent(method, params)) {
-        for (const each of [...sinks]) each(tabId, event.method, event.params);
-      }
+      const deliver = (events: Awaited<ReturnType<TabShield['onEvent']>>): void => {
+        for (const event of events) {
+          for (const each of [...sinks]) each(tabId, event.method, event.params);
+        }
+      };
+      const events = shield.onEvent(method, params);
+      if (Array.isArray(events)) deliver(events);
+      else void events.then(deliver).catch(() => undefined);
     });
     fanout = { sinks, unsubscribe };
     shieldFanouts.set(source, fanout);

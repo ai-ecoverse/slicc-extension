@@ -9,6 +9,7 @@ import {
   sealedEvent,
   sealedNodes,
   sealedRead,
+  unknownFrame,
   wholePage,
 } from './cdp-frames.js';
 import {
@@ -1228,15 +1229,10 @@ export class TabShield {
 
   private frameHidden(frame: CDPPayload): boolean {
     const origin = frame['securityOrigin'];
-    if (this.frameProtected(str(frame['id']) ?? '') || typeof origin !== 'string') return true;
+    if (this.frameProtected(str(frame['id']) ?? '') || unknownFrame(frame)) return true;
     if (extensionOrigin(frame['url']) || extensionOrigin(origin)) return true;
     return [origin, frame['url'], frame['unreachableUrl']].some(
-      (url) =>
-        typeof url === 'string' &&
-        url !== '' &&
-        url !== '://' &&
-        url !== 'null' &&
-        urlProtected(url)
+      (url) => typeof url === 'string' && url !== '' && urlProtected(url)
     );
   }
 
@@ -1311,10 +1307,23 @@ export class TabShield {
     while (this.cut.size > 100000) this.cut.delete(this.cut.values().next().value);
   }
 
-  private sealEvent(method: string, params: CDPPayload): boolean {
+  private async sealEvent(method: string, params: CDPPayload): Promise<boolean> {
     if (method === 'DOM.documentUpdated') {
       this.cut.clear();
       return true;
+    }
+    try {
+      await this.sealFor(method, {
+        ...params,
+        nodeId:
+          params['nodeId'] ??
+          params['parentId'] ??
+          params['parentNodeId'] ??
+          params['hostId'] ??
+          params['insertionPointId'],
+      });
+    } catch {
+      return false;
     }
     if (sealedEvent(params, this.cut)) {
       this.cutNodes(boundIds(params));
@@ -1603,7 +1612,7 @@ export class TabShield {
     return read ? streamRead(read, result) : result;
   }
 
-  onEvent(method: string, params: CDPPayload | undefined): ShieldEvent[] {
+  onEvent(method: string, params: CDPPayload | undefined): ShieldEvent[] | Promise<ShieldEvent[]> {
     const p = params ?? {};
     const id = str(p['requestId']) ?? '';
     if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
@@ -1624,7 +1633,11 @@ export class TabShield {
     if (this.worlds.hides(p)) return [];
     if (this.frameProtected(str(p['frameId']) ?? '')) return [];
     if (DISCOVERY_EVENTS.has(method)) return [];
-    if (sealedRead(method) && !this.sealEvent(method, p)) return [];
+    if (sealedRead(method)) {
+      return this.sealEvent(method, p).then((visible) =>
+        visible ? this.deliver({ method, params: p }) : []
+      );
+    }
     if (method.startsWith('Target.')) {
       if (isObj(p['targetInfo']) && isProtectedTargetType(p['targetInfo']['type'])) return [];
       return [this.redactTarget(method, p)];
@@ -1750,7 +1763,12 @@ export class TabShield {
     if (aux['isDefault'] !== false && kind === undefined) {
       if (frame) this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
       const child = frame !== undefined && frame !== this.mainFrameId;
-      if (child && (extensionOrigin(origin) || (frame && this.hiddenFrames.has(frame)))) {
+      if (
+        child &&
+        (extensionOrigin(origin) ||
+          unknownFrame({ securityOrigin: origin, url: origin }) ||
+          (frame && this.hiddenFrames.has(frame)))
+      ) {
         if (frame) this.hiddenFrames.set(frame, true);
         kind = 'foreign';
       } else if (urlProtected(origin)) {
@@ -1767,10 +1785,7 @@ export class TabShield {
     const kept = tree['childFrames'].filter((node: unknown) => {
       const frame = isObj(node) && isObj(node['frame']) ? node['frame'] : {};
       const id = str(frame['id']) ?? '';
-      const hidden =
-        this.frameProtected(id) ||
-        extensionOrigin(frame['url']) ||
-        extensionOrigin(frame['securityOrigin']);
+      const hidden = this.frameHidden(frame);
       if (hidden && id) this.hiddenFrames.set(id, true);
       return !hidden;
     });

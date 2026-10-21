@@ -1175,12 +1175,38 @@ const NODE_EVENT_KEYS = ['nodeId', 'parentId', 'parentNodeId', 'insertionPointId
 export const DEEP = 'slicc: refused: that reply nests too deeply to check for protected frames';
 const WHOLE_PAGE = new Set(['DOM.performSearch', 'DOMSnapshot.getSnapshot']);
 
+const REALM_READS = new Set([
+  'Runtime.evaluate',
+  'Runtime.callFunctionOn',
+  'Runtime.getProperties',
+  'Runtime.getExceptionDetails',
+  'Runtime.compileScript',
+  'Runtime.globalLexicalScopeNames',
+  'Runtime.queryObjects',
+  'Runtime.runScript',
+  'Runtime.awaitPromise',
+  'Runtime.consoleAPICalled',
+  'Runtime.exceptionThrown',
+  'Runtime.bindingCalled',
+]);
+
+export function unknownFrame(frame) {
+  if (typeof frame.securityOrigin !== 'string' || typeof frame.url !== 'string') return true;
+  try {
+    const origin = new URL(frame.securityOrigin);
+    new URL(frame.url);
+    return origin.origin === 'null';
+  } catch {
+    return true;
+  }
+}
+
 export function sealedRead(method) {
-  return SEALED_DOMAINS.some((domain) => method.startsWith(domain));
+  return REALM_READS.has(method) || SEALED_DOMAINS.some((domain) => method.startsWith(domain));
 }
 
 export function wholePage(method) {
-  return WHOLE_PAGE.has(method);
+  return WHOLE_PAGE.has(method) || REALM_READS.has(method) || method.startsWith('CSS.');
 }
 
 export function frameSets(tree, hidden) {
@@ -1279,6 +1305,11 @@ export function pruneSealed(value, seal, cut = [], depth = 0) {
     delete value.contentDocument;
   }
   for (const [key, item] of Object.entries(value)) {
+    if (sealedItem(item, seal)) {
+      boundIds(item, cut);
+      delete value[key];
+      continue;
+    }
     if (Array.isArray(item)) value[key] = pruneList(item, seal, cut);
     pruneSealed(value[key], seal, cut, depth + 1);
   }

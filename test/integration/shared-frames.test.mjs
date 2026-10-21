@@ -60,7 +60,37 @@ async function observe(url, tag) {
         (node.children ?? []).includes(text)
       );
       if (paragraph) {
-        return { document: owner.contentDocument.backendNodeId, marker: paragraph.backendNodeId };
+        const contexts = [];
+        const sheets = [];
+        const off = chrome.cdp.on(({ method, params, sessionId: from }) => {
+          if (from !== sessionId) return;
+          if (method === 'Runtime.executionContextCreated') contexts.push(params.context);
+          if (method === 'CSS.styleSheetAdded') sheets.push(params.header);
+        });
+        try {
+          await chrome.cdp.send('Runtime.enable', {}, sessionId);
+          await chrome.cdp.send('CSS.enable', {}, sessionId);
+          const context = contexts.find((item) => item.auxData?.frameId === owner.frameId);
+          const sheet = sheets.find((item) => item.frameId === owner.frameId);
+          assert.ok(context, 'the observer sees the child realm');
+          assert.ok(sheet, 'the observer sees the child stylesheet');
+          const { result } = await chrome.cdp.send(
+            'Runtime.evaluate',
+            { expression: 'document.body', contextId: context.id },
+            sessionId
+          );
+          assert.ok(result.objectId, 'the observer sees the child object');
+          return {
+            document: owner.contentDocument.backendNodeId,
+            marker: paragraph.backendNodeId,
+            contextId: context.id,
+            objectId: result.objectId,
+            nodeId: paragraph.nodeId,
+            styleSheetId: sheet.styleSheetId,
+          };
+        } finally {
+          off();
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -70,13 +100,16 @@ async function observe(url, tag) {
   throw new Error('the protected frame never shared the page process');
 }
 
-for (const transport of Object.keys(entry)) {
-  test(`${transport} reads of a page sharing its process with a protected frame leave that frame out`, async (t) => {
+for (const [transport, opaque] of Object.keys(entry).flatMap((name) => [
+  [name, false],
+  [name, true],
+])) {
+  test(`${transport} reads of a page sharing its process with a ${opaque ? 'opaque' : 'protected'} frame leave that frame out`, async (t) => {
     const page = await chrome.visit(t, entry[transport]);
     await page.evaluate(install, transport, extId);
     const tag = `${transport}-${Date.now()}`;
     const late = transport === 'six-bridge';
-    const url = `https://ordinary.test/shared-frame?n=${tag}&delay=${late ? 3000 : 0}`;
+    const url = `https://ordinary.test/shared-frame?n=${tag}&delay=${late ? 3000 : 0}${opaque ? '&opaque' : ''}`;
     await chrome.cdp.send('Target.createTarget', { url });
     const early = late ? undefined : await observe(url, tag);
     const opened = await page.evaluate(async (url) => {
@@ -96,6 +129,34 @@ for (const transport of Object.keys(entry)) {
         }
         const out = {};
         const calls = {
+          evaluate: [
+            'Runtime.evaluate',
+            {
+              expression: 'document.body.innerHTML',
+              contextId: ids.contextId,
+              returnByValue: true,
+            },
+          ],
+          topEvaluate: [
+            'Runtime.evaluate',
+            { expression: 'frames[1].document.body.innerHTML', returnByValue: true },
+          ],
+          properties: ['Runtime.getProperties', { objectId: ids.objectId }],
+          function: [
+            'Runtime.callFunctionOn',
+            {
+              objectId: ids.objectId,
+              functionDeclaration: 'function() { return this.innerHTML }',
+              returnByValue: true,
+            },
+          ],
+          objects: ['Runtime.queryObjects', { prototypeObjectId: ids.objectId }],
+          lexical: ['Runtime.globalLexicalScopeNames', { executionContextId: ids.contextId }],
+          cssEnable: ['CSS.enable', {}],
+          sheet: ['CSS.getStyleSheetText', { styleSheetId: ids.styleSheetId }],
+          classes: ['CSS.collectClassNames', { styleSheetId: ids.styleSheetId }],
+          media: ['CSS.getMediaQueries', {}],
+          matched: ['CSS.getMatchedStylesForNode', { nodeId: ids.nodeId }],
           document: ['DOM.getDocument', { depth: -1, pierce: true }],
           flattened: ['DOM.getFlattenedDocument', { depth: -1, pierce: true }],
           snapshot: ['DOMSnapshot.captureSnapshot', { computedStyles: [] }],
@@ -127,6 +188,21 @@ for (const transport of Object.keys(entry)) {
         !JSON.stringify(value).includes(`frame-secret-${tag}`),
         `${name} ${JSON.stringify(value).slice(0, 400)}`
       );
+    }
+    for (const name of [
+      'evaluate',
+      'topEvaluate',
+      'lexical',
+      'properties',
+      'function',
+      'objects',
+      'matched',
+      'cssEnable',
+      'sheet',
+      'classes',
+      'media',
+    ]) {
+      assert.match(reads[name].error?.message ?? reads[name].error ?? '', /slicc: refused/, name);
     }
     const document = JSON.stringify(reads.document);
     assert.ok(document.includes(`top-${tag}`), document.slice(0, 400));

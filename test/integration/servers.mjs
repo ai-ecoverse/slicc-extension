@@ -215,11 +215,11 @@ export async function pages(tls) {
     if (pathname === '/shared-frame') {
       const n = searchParams.get('n') ?? '';
       const delay = Number(searchParams.get('delay') ?? 0);
-      const page = `<!doctype html><title>shared</title><p>top-${n}</p><iframe src="https://other.test/frame-body?who=plain&n=${n}"></iframe><iframe sandbox src="https://vault.sliccy.ai/frame-body?who=frame-secret&delay=${delay}&n=${n}"></iframe>`;
+      const page = `<!doctype html><title>shared</title><p>top-${n}</p><iframe src="https://other.test/frame-body?who=plain&n=${n}"></iframe><iframe sandbox src="https://${searchParams.has('opaque') ? 'ordinary.test' : 'vault.sliccy.ai'}/frame-body?who=frame-secret&delay=${delay}&n=${n}"></iframe>`;
       return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(page);
     }
     if (pathname === '/frame-body') {
-      const body = `<!doctype html><title>body</title><p>${searchParams.get('who')}-${searchParams.get('n')}</p>`;
+      const body = `<!doctype html><title>body</title><style>.${searchParams.get('who')}-${searchParams.get('n')} { color: red }</style><p>${searchParams.get('who')}-${searchParams.get('n')}</p>`;
       const send = () =>
         response
           .writeHead(200, {
