@@ -1,5 +1,5 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
-import { report } from './guard.mjs';
+import { carriers, report } from './guard.mjs';
 
 const set = JSON.parse(
   await readFile(
@@ -23,10 +23,11 @@ for (const transport of expected) {
   const value = report(set, results, shas[0] ?? 'unknown', transport);
   const complete = shas.length === 1 && variants.every((variant) => covered.includes(variant));
   const pass = value.pass && complete;
+  const tally = carriers(mine.map((shard) => shard.carriers));
   ok &&= pass;
   await writeFile(
     new URL(`summary-${transport}.json`, dir),
-    `${JSON.stringify({ transport, variants: covered, sha: shas[0], ...value, pass }, null, 2)}\n`
+    `${JSON.stringify({ transport, variants: covered, sha: shas[0], carriers: tally, ...value, pass }, null, 2)}\n`
   );
   console.log(
     complete
@@ -34,10 +35,15 @@ for (const transport of expected) {
       : `GUARD-FAIL ${transport}: shards ${covered.join(',')} of ${shas.join(',')}`
   );
   console.log(`  skips ${JSON.stringify(value.skips)}`);
+  console.log(`  carriers ${JSON.stringify(tally)}`);
   console.log(
-    `  passed ${value.passed} (${value.passedClean} without ran/notes), not-run ${value.notRun.length} ids, failed ${value.failed.length}, missing ${value.missing.length}`
+    `  passed ${value.passed} (${value.passedClean} without ran/notes), not-run ${value.notRun.length} ids, failed ${value.failed.length}, incomplete ${value.incomplete.length}, forged ${value.forged.length}, missing ${value.missing.length}`
   );
   for (const row of value.failed)
     console.log(`  fail ${row.id} ${row.target} ${row.variant}: ${row.why}`);
+  for (const row of value.incomplete)
+    console.log(`  incomplete ${row.id} ${row.target} ${row.variant}: ${row.why}`);
+  for (const row of value.forged)
+    console.log(`  forged ${row.id} ${row.target} ${row.variant}: ${row.why}`);
 }
 process.exitCode = ok ? 0 : 1;

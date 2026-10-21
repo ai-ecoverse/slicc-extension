@@ -6,12 +6,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fixtureServer } from '@ai-ecoverse/slicc-browsers/fixture';
+import { waitFor } from '@ai-ecoverse/slicc-browsers/guard-driver.mjs';
 import { run } from '@ai-ecoverse/slicc-browsers/guard-runner';
 import { launch } from '@ai-ecoverse/slicc-shared-web/harness';
 import { install } from '../client.mjs';
 import { extId } from '../extension-page.mjs';
 import { certificate } from '../servers.mjs';
-import { batches, capabilities, entries, report, targets } from './guard.mjs';
+import {
+  capabilities,
+  carrier,
+  entries,
+  report,
+  send,
+  targets,
+  until,
+  waitEvent,
+} from './guard.mjs';
 
 const set = JSON.parse(
   await readFile(
@@ -64,7 +74,8 @@ after(async () => {
 });
 
 async function evaluate(cdp, sessionId, expression) {
-  const answer = await cdp.send(
+  const answer = await send(
+    cdp,
     'Runtime.evaluate',
     { expression, awaitPromise: true, returnByValue: true },
     sessionId
@@ -72,16 +83,6 @@ async function evaluate(cdp, sessionId, expression) {
   if (answer.exceptionDetails)
     throw new Error(answer.exceptionDetails.exception?.description ?? answer.exceptionDetails.text);
   return answer.result.value;
-}
-
-async function until(cdp, sessionId, expression, ms = 15000) {
-  const deadline = Date.now() + ms;
-  for (;;) {
-    const value = await evaluate(cdp, sessionId, expression).catch(() => undefined);
-    if (value) return value;
-    if (Date.now() > deadline) throw new Error(`guard client: ${expression} within ${ms} ms`);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
 }
 
 async function browser() {
@@ -93,18 +94,19 @@ async function browser() {
     args: [`--ignore-certificate-errors-spki-list=${spki}`, `--host-resolver-rules=${rules}`],
   });
   const cdp = chrome.cdp;
+  const tapped = cdp.events;
   const real = new Map();
   let worker;
 
   async function workerSession() {
     if (worker) return worker;
-    const { targetInfos } = await cdp.send('Target.getTargets');
+    const { targetInfos } = await send(cdp, 'Target.getTargets');
     const info = targetInfos.find(
       (target) =>
         target.type === 'service_worker' && target.url.startsWith(`chrome-extension://${extId}/`)
     );
     if (!info) throw new Error('guard observer: no extension service worker');
-    const { sessionId } = await cdp.send('Target.attachToTarget', {
+    const { sessionId } = await send(cdp, 'Target.attachToTarget', {
       targetId: info.targetId,
       flatten: true,
     });
@@ -138,19 +140,18 @@ async function browser() {
 
   async function tabOf(targetId) {
     const expression = `chrome.debugger.getTargets().then((list) => list.find((target) => target.id === ${JSON.stringify(targetId)})?.tabId)`;
-    for (let attempt = 0; attempt < 50; attempt++) {
-      const tabId = await evaluate(cdp, await workerSession(), expression).catch(() => {
+    let tabId;
+    const known = async () => {
+      tabId = await evaluate(cdp, await workerSession(), expression).catch(() => {
         worker = undefined;
         return undefined;
       });
-      if (typeof tabId === 'number') {
-        real.set(String(tabId), targetId);
-        given.set(String(tabId), targetId);
-        return String(tabId);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    return targetId;
+      return typeof tabId === 'number';
+    };
+    if (!(await waitFor(known, 5000, 100))) return targetId;
+    real.set(String(tabId), targetId);
+    given.set(String(tabId), targetId);
+    return String(tabId);
   }
 
   const heard = [];
@@ -160,9 +161,9 @@ async function browser() {
     async send(method, params = {}, sessionId) {
       const tab = typeof params.targetId === 'string' && /^\d+$/.test(params.targetId);
       const mapped = tab ? { ...params, targetId: await realTarget(params.targetId) } : params;
-      if (method === 'Runtime.enable') await cdp.send('Runtime.disable', {}, sessionId);
+      if (method === 'Runtime.enable') await send(cdp, 'Runtime.disable', {}, sessionId);
       try {
-        const result = await cdp.send(method, mapped, sessionId);
+        const result = await send(cdp, method, mapped, sessionId);
         heard.push(JSON.stringify({ result }));
         return result;
       } catch (error) {
@@ -173,19 +174,18 @@ async function browser() {
     on: (listener) => cdp.on(listener),
     off: (listener) => cdp.off(listener),
     get events() {
-      return cdp.events;
+      return tapped;
     },
-    waitEvent: (...args) => cdp.waitEvent(...args),
+    waitEvent: (predicate, ms = 10000) => waitEvent(tapped, predicate, ms),
   };
 
   async function guarded(transport) {
     const entry = entries[transport];
     const url = `${entry.origin}${entry.path}`;
-    const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    const { targetId } = await send(cdp, 'Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await send(cdp, 'Target.attachToTarget', { targetId, flatten: true });
     const events = [];
     const messages = [];
-    const listeners = new Set();
     const off = cdp.on(({ method, params, sessionId: from }) => {
       if (method !== 'Runtime.bindingCalled' || from !== sessionId || params.name !== binding)
         return;
@@ -194,24 +194,23 @@ async function browser() {
         messages.push(payload.text);
         return;
       }
-      const event = asGiven(payload.event);
-      events.push(event);
-      for (const listener of listeners) listener(event);
+      events.push(asGiven(payload.event));
     });
     const close = async () => {
       off();
-      await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined);
+      await send(cdp, 'Target.closeTarget', { targetId }).catch(() => undefined);
     };
     try {
-      await cdp.send('Runtime.enable', {}, sessionId);
-      await cdp.send('Runtime.addBinding', { name: binding }, sessionId);
-      await cdp.send('Page.enable', {}, sessionId);
-      await cdp.send('Page.navigate', { url }, sessionId);
+      await send(cdp, 'Runtime.enable', {}, sessionId);
+      await send(cdp, 'Runtime.addBinding', { name: binding }, sessionId);
+      await send(cdp, 'Page.enable', {}, sessionId);
+      await send(cdp, 'Page.navigate', { url }, sessionId);
       const ready = transport === 'seven' ? " && 'sliccExtension' in globalThis" : '';
+      const expression = `document.readyState === 'complete' && location.href === ${JSON.stringify(url)}${ready}`;
       await until(
-        cdp,
-        sessionId,
-        `document.readyState === 'complete' && location.href === ${JSON.stringify(url)}${ready}`
+        () => evaluate(cdp, sessionId, expression).catch(() => undefined),
+        15000,
+        expression
       );
       await evaluate(
         cdp,
@@ -251,23 +250,7 @@ async function browser() {
         };
         throw error;
       },
-      waitEvent(predicate, ms = 10000) {
-        const found = events.find(predicate);
-        if (found) return Promise.resolve(found);
-        return new Promise((resolve, reject) => {
-          const listener = (event) => {
-            if (!predicate(event)) return;
-            clearTimeout(timer);
-            listeners.delete(listener);
-            resolve(event);
-          };
-          const timer = setTimeout(() => {
-            listeners.delete(listener);
-            reject(new Error(`waitEvent: no event in ${ms} ms`));
-          }, ms);
-          listeners.add(listener);
-        });
-      },
+      waitEvent: (predicate, ms = 10000) => waitEvent(events, predicate, ms),
     };
     return { client, close };
   }
@@ -296,6 +279,7 @@ for (const transport of transports) {
     const vectors = only ? { ...set, vectors: set.vectors.filter((v) => only.test(v.id)) } : set;
     const started = Date.now();
     let done = 0;
+    const tally = {};
     const options = {
       clientFactory: (metadata) => clients(transport, metadata),
       targets: targets(transport),
@@ -303,6 +287,8 @@ for (const transport of transports) {
       variant: variants,
       fixture,
       rowTimeoutMs: 180000,
+      parallel,
+      debug: (entry) => carrier(tally, entry),
       log(row) {
         done += 1;
         const verdict = `${row.control}/${row.guarded}/${row.live}`;
@@ -313,14 +299,7 @@ for (const transport of transports) {
         );
       },
     };
-    const results = [];
-    for (const batch of batches(vectors)) {
-      const execution = await run(batch.vectors, {
-        ...options,
-        parallel: batch.parallel ?? parallel,
-      });
-      results.push(...execution.results);
-    }
+    const { results } = await run(vectors, options);
     const summary = report(vectors, results, sha, transport);
     const out = new URL('../../../artifacts/guard/', import.meta.url);
     await mkdir(out, { recursive: true });
@@ -332,6 +311,7 @@ for (const transport of transports) {
           variants,
           sha,
           seconds: Math.round((Date.now() - started) / 1000),
+          carriers: tally,
           ...summary,
         },
         null,
@@ -340,6 +320,7 @@ for (const transport of transports) {
     );
     console.log(summary.line);
     console.log(`skips ${JSON.stringify(summary.skips)}`);
+    console.log(`carriers ${JSON.stringify(tally)}`);
     assert.deepEqual(
       summary.failed.map((row) => `${row.id} ${row.target} ${row.variant}: ${row.why}`),
       []
