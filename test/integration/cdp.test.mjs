@@ -1904,6 +1904,7 @@ test('shield hides protected network events, holds ExtraInfo until classified, a
     type: 'XHR',
     request: { url: 'https://other.test/y' },
   });
+  api.fire(8, 'Network.loadingFinished', { requestId: 'n2' });
   api.fire(8, 'Network.requestWillBeSent', {
     requestId: 'n3',
     type: 'Script',
@@ -1918,6 +1919,7 @@ test('shield hides protected network events, holds ExtraInfo until classified, a
     .map((m) => [m.method, m.params.requestId]);
   assert.deepEqual(ids, [
     ['Network.requestWillBeSent', 'n2'],
+    ['Network.loadingFinished', 'n2'],
     ['Network.requestWillBeSentExtraInfo', 'n2'],
   ]);
   assert.equal(events(connection, 'Runtime.consoleAPICalled').length, 0);
