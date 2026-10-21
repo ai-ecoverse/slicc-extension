@@ -295,6 +295,15 @@ export function notifyBridgeDebuggerDetached(tabId: number): void {
   }
 }
 
+export function noteBridgeMainFrameResponse(details: {
+  tabId: number;
+  url: string;
+  type: string;
+}): void {
+  if (details.type !== 'main_frame' || !failedBefore(details.tabId, details.url)) return;
+  failedTabs.get(String(details.tabId))?.clear();
+}
+
 export function checkBridgeTabProtection(tabId: number, url: string | undefined): Set<number> {
   if (url && !failedBefore(tabId, url)) failedTabs.get(String(tabId))?.clear();
   if (!url || !isProtectedUrl(url)) return new Set<number>();

@@ -442,7 +442,7 @@ class Connection {
     return this.view(await readTab(this.api, tabId));
   }
 
-  async reattachable(tabId) {
+  async confirmed(tabId) {
     const tab = await readTab(this.api, tabId);
     if (this.tabState(tabId) || !this.failedAt(tabId, tab.url)) return this.view(tab);
     const frame = await this.api.webNavigation
@@ -596,7 +596,7 @@ class Connection {
 
   async guarded(params) {
     const tabId = tabFrom(readTargetId(params));
-    await demandTab(this.api, await this.read(tabId));
+    await demandTab(this.api, await this.confirmed(tabId));
     return tabId;
   }
 
@@ -720,7 +720,7 @@ class Connection {
     if (params.flatten !== true) throw new Error('only flatten: true is supported');
     const targetId = readTargetId(params);
     const tabId = tabFrom(targetId);
-    const seen = await demandTab(this.api, await this.reattachable(tabId));
+    const seen = await demandTab(this.api, await this.confirmed(tabId));
     let tab = this.tabState(tabId);
     if (!tab) {
       if (!this.state.ownedTabs.has(tabId)) {

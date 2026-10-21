@@ -288,6 +288,12 @@ interface ChromeAPI {
         extraInfoSpec?: string[]
       ): void;
     };
+    onResponseStarted: {
+      addListener(
+        callback: (details: { url: string; tabId: number; type: string; frameId: number }) => void,
+        filter: { urls: string[]; types?: string[]; tabId?: number }
+      ): void;
+    };
   };
   tabGroups: {
     update(

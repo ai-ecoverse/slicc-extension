@@ -228,7 +228,7 @@ const JOINS = new Set([',', ';', '(', ')']);
 const URL_CAP = 4096;
 const HOST_CAP = 300;
 const SEEN_CAP = 4096;
-const AUTHORITY_END = /[\\/?#]/g;
+const AUTHORITY_END = /[\\/?#@]/g;
 const TAIL = URL_CAP + 64;
 const PIECE = 65536;
 const NEXT_URL = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]{2,}[^\\/]/i;
@@ -339,10 +339,17 @@ interface Stop {
   join: boolean;
 }
 
+interface Pending {
+  start: number;
+  run: number;
+}
+
 interface Memo {
   from: number;
   stop: Stop;
   authority: number;
+  ats: number[];
+  pending: Pending | undefined;
   work: number;
   budget: number;
   seen: Map<string, boolean>;
@@ -373,10 +380,33 @@ function urlEnd(memo: Memo, text: string, from: number, breaks: Set<number> | un
 
 function authorityEnd(memo: Memo, text: string, from: number): number {
   if (memo.authority < from) {
+    memo.ats = [];
     AUTHORITY_END.lastIndex = from;
-    memo.authority = AUTHORITY_END.exec(text)?.index ?? text.length;
+    let found = AUTHORITY_END.exec(text);
+    while (found && found[0] === '@') {
+      memo.ats.push(found.index);
+      found = AUTHORITY_END.exec(text);
+    }
+    memo.authority = found?.index ?? text.length;
   }
   return memo.authority;
+}
+
+function hostStart(memo: Memo, run: number, end: number): number {
+  let low = 0;
+  let high = memo.ats.length - 1;
+  let found = run - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const at = memo.ats[mid] as number;
+    if (at < end) {
+      found = Math.max(found, at);
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return found + 1;
 }
 
 function judgeOnce(memo: Memo, url: string, isProtected: Judge): boolean {
@@ -401,19 +431,25 @@ function urlAt(
   const starts = openings(text, at, found[0], breaks);
   if (starts.length === 0) return undefined;
   const end = urlEnd(memo, text, run, breaks);
-  const cap = memo.work > memo.budget ? HOST_CAP : URL_CAP;
-  const judged = Math.min(end, authorityEnd(memo, text, run), run + cap);
+  const hostEnd = Math.min(end, authorityEnd(memo, text, run));
+  const host = hostStart(memo, run, hostEnd);
+  const pending = hostEnd === text.length ? memo.pending : undefined;
+  if (pending?.start === -1) {
+    pending.start = (starts[0] as [number, string])[0];
+    pending.run = run;
+  }
+  const long = memo.work > memo.budget && hostEnd - host > HOST_CAP;
+  if (long && pending) return undefined;
   for (const [start, prefix] of starts) {
-    memo.work += judged - start;
-    if (!judgeOnce(memo, prefix + text.slice(start, judged).replace(/\\/g, '/'), isProtected)) {
-      continue;
-    }
+    const scheme = prefix + text.slice(start, run).replace(/\\/g, '/');
+    memo.work += run - start + hostEnd - host;
+    if (!long && !judgeOnce(memo, scheme + text.slice(host, hostEnd), isProtected)) continue;
     return { start, end, url: prefix + text.slice(start, end).replace(/\\/g, '/') };
   }
   return undefined;
 }
 
-function scan(n: Normalized, isProtected: Judge): Span[] {
+function scan(n: Normalized, isProtected: Judge, pending?: Pending): Span[] {
   const out: Span[] = [];
   const { text, breaks } = n;
   if (!ANCHOR.test(text)) return out;
@@ -421,6 +457,8 @@ function scan(n: Normalized, isProtected: Judge): Span[] {
     from: -1,
     stop: { at: -1, join: false },
     authority: -1,
+    ats: [],
+    pending,
     work: 0,
     budget: 4 * text.length + 65536,
     seen: new Map(),
@@ -464,6 +502,12 @@ function tailOf(text: string): string {
     .slice(-TAIL);
 }
 
+function carried(joined: string, text: string, pending: Pending): string {
+  if (pending.start === -1 || pending.start >= text.length - TAIL) return tailOf(joined);
+  const scheme = text.slice(pending.start, pending.run).replace(/[\\/]{3,}/g, '//');
+  return scheme + text.slice(Math.max(pending.run, text.length - URL_CAP));
+}
+
 export class UrlStream {
   private head = '';
   named = false;
@@ -476,7 +520,8 @@ export class UrlStream {
     let out = '';
     let last = head.length;
     let open = '';
-    for (const span of scan(n, isProtected)) {
+    const pending: Pending = { start: -1, run: -1 };
+    for (const span of scan(n, isProtected, pending)) {
       const start = original(n, span.start);
       const end = originalEnd(n, span.end);
       if (end === joined.length && joined.length - start > URL_CAP) open = originOf(span.url);
@@ -486,7 +531,7 @@ export class UrlStream {
       out += joined.slice(last, Math.max(start, last)) + (start >= head.length ? origin : '');
       last = end;
     }
-    this.head = open ? `${open}/` : tailOf(joined);
+    this.head = open ? `${open}/` : carried(joined, n.text, pending);
     return last === head.length ? chunk : out + joined.slice(last);
   }
 
