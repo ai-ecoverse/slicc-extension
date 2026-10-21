@@ -375,8 +375,13 @@ for (const transport of transports) {
             JSON.stringify(event.params ?? {}).includes(foreign.uniqueId)
         ).length;
         const profilers = {};
-        for (const method of ['Debugger.enable', 'Profiler.enable', 'HeapProfiler.enable']) {
-          profilers[method] = await h.attempt(method, {}, sessionId);
+        for (const [method, params] of [
+          ['Debugger.enable', {}],
+          ['DOMDebugger.setEventListenerBreakpoint', { eventName: 'load' }],
+          ['Profiler.enable', {}],
+          ['HeapProfiler.enable', {}],
+        ]) {
+          profilers[method] = await h.attempt(method, params, sessionId);
         }
         const product = await h.evaluate(sessionId, '6 * 7');
         return {
@@ -615,6 +620,16 @@ for (const transport of transports) {
           )
           .map((event) => event.params.context);
         const debug = await h.attempt('Debugger.enable', {}, sessionId);
+        const listener = await h.attempt(
+          'DOMDebugger.setEventListenerBreakpoint',
+          { eventName: 'load' },
+          sessionId
+        );
+        await h.attempt(
+          'DOMDebugger.removeEventListenerBreakpoint',
+          { eventName: 'load' },
+          sessionId
+        );
         await h.attempt('Debugger.disable', {}, sessionId);
         return {
           before,
@@ -622,6 +637,7 @@ for (const transport of transports) {
           listed,
           reserved,
           debug,
+          listener,
           product: await h.evaluate(sessionId, '6 * 7'),
         };
       },
@@ -635,6 +651,7 @@ for (const transport of transports) {
     );
     assert.equal(run.reserved.error, 'slicc: refused: that world name is reserved for the guard');
     assert.equal(run.debug.error, undefined, JSON.stringify(run.debug));
+    assert.equal(run.listener.error, undefined, JSON.stringify(run.listener));
     assert.equal(run.product, 42);
     await page.evaluate((targetId) => h.close(targetId), targetId);
   });

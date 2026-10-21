@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { listen } from '../../extension/cdp.js';
 import { protectedOrigins } from '../../extension/protected.mjs';
 import { protectedRules } from '../../extension/protected-rules.js';
+import { namesProtectedUrl, redactText, urlProtected } from '../../extension/shield.js';
 import { launch } from './chrome.mjs';
 import { openExtensionPage } from './extension-page.mjs';
 
@@ -222,6 +223,33 @@ test('protected origins follow the slicc-browsers corpus, including the vault', 
   assert.equal(match.url('https://vault.sliccy.ai/'), true);
   assert.equal(match.url('https://vault.sliccy.ai/oauth/callback'), true);
   assert.equal(protectedRules.refusal, refused);
+});
+
+test('a target whose query alone carries a protected URL is unprotected, and its nested URL is still redacted', async () => {
+  const root = new URL('../../node_modules/@ai-ecoverse/slicc-browsers/', import.meta.url);
+  const data = JSON.parse(await readFile(new URL('protected.json', root)));
+  const match = protectedOrigins(protectedRules, data.origins);
+  const any = (url) => urlProtected(match, url, { readOnly: true });
+  for (const item of data.targets) {
+    assert.equal(urlProtected(match, item.url), match.url(item.url), item.url);
+  }
+  const nested = data.targets.filter(
+    (item) => !item.protected && !match.url(item.url) && namesProtectedUrl(item.url, any)
+  );
+  assert.ok(nested.length > 0);
+  for (const item of nested) {
+    assert.equal(match.target(item), false, item.url);
+    assert.equal(urlProtected(match, item.url), false, item.url);
+    const shown = redactText(item.url, any);
+    const inner = new URL(item.url).searchParams;
+    const named = [...inner.values()].filter((value) => any(value));
+    assert.ok(named.length > 0, item.url);
+    for (const value of named) {
+      assert.ok(!shown.includes(value), shown);
+      assert.ok(shown.includes(new URL(value).origin), shown);
+    }
+    assert.equal(redactText(shown, any), shown);
+  }
 });
 
 test('an untrusted sender is disconnected before a CDP command can run', () => {

@@ -197,9 +197,13 @@ async function browser() {
       }
       events.push(asGiven(payload.event));
     });
-    const close = async () => {
-      off();
-      await send(cdp, 'Target.closeTarget', { targetId }).catch(() => undefined);
+    let closing;
+    const close = () => {
+      closing ??= (async () => {
+        off();
+        await send(cdp, 'Target.closeTarget', { targetId }).catch(() => undefined);
+      })();
+      return closing;
     };
     try {
       await send(cdp, 'Runtime.enable', {}, sessionId);
@@ -252,6 +256,7 @@ async function browser() {
         throw error;
       },
       waitEvent: (predicate, ms = 10000) => waitEvent(events, predicate, ms),
+      close,
     };
     return { client, close };
   }
@@ -276,8 +281,9 @@ async function pooled(slot, fresh = false) {
   return pool[slot];
 }
 
-async function clients(transport, { slot, vector }) {
-  const own = await pooled(slot, cachesAuth(vector));
+async function clients(transport, metadata) {
+  const { slot } = metadata;
+  const own = await pooled(slot, metadata.leg !== 'guarded' && cachesAuth(metadata.vector));
   const made = await own.guarded(transport);
   return { client: made.client, unguarded: own.observer, close: made.close };
 }
