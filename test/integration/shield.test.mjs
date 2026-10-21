@@ -182,8 +182,12 @@ for (const transport of transports) {
           if (guardedId) await h.close(guardedId);
           const openerAlive = await h.evaluate(sessionId, '1 + 1');
           const openerDetached = h.detached(sessionId);
+          const own = [sessionId, attached.result?.sessionId, guarded.attach.result?.sessionId];
           const attachedTo = h.events
-            .filter((event) => event.method === 'Target.attachedToTarget')
+            .filter(
+              (event) =>
+                event.method === 'Target.attachedToTarget' && !own.includes(event.params?.sessionId)
+            )
             .map((event) => event.params?.targetInfo?.url);
           if (plainId) await h.close(plainId);
           await h.close(targetId);
@@ -740,12 +744,17 @@ test('S7-3: getTargetInfo, discovery events, becomes-protected targetDestroyed, 
     "slicc: refused: target is on seven's origin",
     'and it can no longer be attached'
   );
-  assert.equal(answer.refusedInfo.result.targetInfo.title, '', 'its title is redacted');
-  assert.ok(
-    answer.refusedInfo.result.targetInfo.url.startsWith(targets.vault),
-    'getTargetInfo shows the guard the protected url'
+  assert.equal(
+    answer.refusedInfo.result.targetInfo.title,
+    targets.vault,
+    'its title is redacted to the origin'
   );
-  assert.equal(answer.listed, true, 'protected tabs stay listed with their real url');
+  assert.equal(
+    answer.refusedInfo.result.targetInfo.url,
+    targets.vault,
+    'getTargetInfo shows the guard only the protected origin'
+  );
+  assert.equal(answer.listed, true, 'protected tabs stay listed as their origin');
   assert.equal(answer.distinct, true, 'each attach is its own session');
   assert.equal(answer.closedBoth, true, 'detachedFromTarget for every session on close');
   assert.equal(answer.gone, true, 'targetDestroyed on close');

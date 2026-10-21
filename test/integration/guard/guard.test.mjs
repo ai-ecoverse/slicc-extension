@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash, createPublicKey } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +11,7 @@ import { launch } from '@ai-ecoverse/slicc-shared-web/harness';
 import { install } from '../client.mjs';
 import { extId } from '../extension-page.mjs';
 import { certificate } from '../servers.mjs';
-import { capabilities, entries, report, targets } from './guard.mjs';
+import { batches, capabilities, entries, report, targets } from './guard.mjs';
 
 const set = JSON.parse(
   await readFile(
@@ -40,6 +41,7 @@ const cachesAuth = (vector) => JSON.stringify([vector.setup, vector.trigger]).in
 
 let dir;
 let fixture;
+let spki;
 const pool = [];
 
 before(async () => {
@@ -48,7 +50,11 @@ before(async () => {
     force: true,
   });
   dir = await mkdtemp(join(tmpdir(), 'slicc-extension-guard-'));
-  fixture = await fixtureServer({ tls: await certificate(dir) });
+  const tls = await certificate(dir);
+  spki = createHash('sha256')
+    .update(createPublicKey(tls.cert).export({ type: 'spki', format: 'der' }))
+    .digest('base64');
+  fixture = await fixtureServer({ tls });
 });
 
 after(async () => {
@@ -84,7 +90,7 @@ async function browser() {
     roots: [['/', 'test/integration/page/']],
     coverage: [],
     extensions: ['extension/'],
-    args: ['--ignore-certificate-errors', `--host-resolver-rules=${rules}`],
+    args: [`--ignore-certificate-errors-spki-list=${spki}`, `--host-resolver-rules=${rules}`],
   });
   const cdp = chrome.cdp;
   const real = new Map();
@@ -118,12 +124,51 @@ async function browser() {
     return id ?? tabId;
   }
 
+  const given = new Map();
+
+  function asGiven(value) {
+    if (Array.isArray(value)) return value.map(asGiven);
+    if (!value || typeof value !== 'object') return value;
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      out[key] = key === 'targetId' && given.has(item) ? given.get(item) : asGiven(item);
+    }
+    return out;
+  }
+
+  async function tabOf(targetId) {
+    const expression = `chrome.debugger.getTargets().then((list) => list.find((target) => target.id === ${JSON.stringify(targetId)})?.tabId)`;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const tabId = await evaluate(cdp, await workerSession(), expression).catch(() => {
+        worker = undefined;
+        return undefined;
+      });
+      if (typeof tabId === 'number') {
+        real.set(String(tabId), targetId);
+        given.set(String(tabId), targetId);
+        return String(tabId);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return targetId;
+  }
+
+  const heard = [];
+  cdp.on((message) => heard.push(JSON.stringify(message)));
   const observer = {
+    messages: heard,
     async send(method, params = {}, sessionId) {
       const tab = typeof params.targetId === 'string' && /^\d+$/.test(params.targetId);
       const mapped = tab ? { ...params, targetId: await realTarget(params.targetId) } : params;
       if (method === 'Runtime.enable') await cdp.send('Runtime.disable', {}, sessionId);
-      return cdp.send(method, mapped, sessionId);
+      try {
+        const result = await cdp.send(method, mapped, sessionId);
+        heard.push(JSON.stringify({ result }));
+        return result;
+      } catch (error) {
+        heard.push(JSON.stringify({ error: { message: String(error?.message ?? error) } }));
+        throw error;
+      }
     },
     on: (listener) => cdp.on(listener),
     off: (listener) => cdp.off(listener),
@@ -139,11 +184,17 @@ async function browser() {
     const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     const events = [];
+    const messages = [];
     const listeners = new Set();
     const off = cdp.on(({ method, params, sessionId: from }) => {
       if (method !== 'Runtime.bindingCalled' || from !== sessionId || params.name !== binding)
         return;
-      const event = JSON.parse(params.payload);
+      const payload = JSON.parse(params.payload);
+      if (typeof payload.text === 'string') {
+        messages.push(payload.text);
+        return;
+      }
+      const event = asGiven(payload.event);
       events.push(event);
       for (const listener of listeners) listener(event);
     });
@@ -170,7 +221,7 @@ async function browser() {
       await evaluate(
         cdp,
         sessionId,
-        `(h.cdp.on((event) => globalThis.${binding}(JSON.stringify(event))), true)`
+        `(h.tap((text) => globalThis.${binding}(JSON.stringify({ text }))), h.cdp.on((event) => globalThis.${binding}(JSON.stringify({ event }))), true)`
       );
     } catch (error) {
       await close();
@@ -179,14 +230,20 @@ async function browser() {
     const client = {
       transport,
       events,
+      messages,
       async send(method, params, session) {
-        const args = [method, params ?? {}, ...(session === undefined ? [] : [session])];
+        const raw = params?.targetId;
+        const local =
+          typeof raw === 'string' && /^[0-9A-F]{32}$/.test(raw)
+            ? { ...params, targetId: await tabOf(raw) }
+            : (params ?? {});
+        const args = [method, local, ...(session === undefined ? [] : [session])];
         const answer = await evaluate(
           cdp,
           sessionId,
           `h.cdp.send(...${JSON.stringify(args)}).then((result) => ({ ok: true, result: result ?? {} }), (error) => ({ ok: false, message: String(error?.message ?? error), code: error?.code }))`
         );
-        if (answer.ok) return answer.result;
+        if (answer.ok) return asGiven(answer.result);
         const error = new Error(answer.message);
         error.cdp = {
           message: answer.message,
@@ -239,12 +296,11 @@ for (const transport of transports) {
     const vectors = only ? { ...set, vectors: set.vectors.filter((v) => only.test(v.id)) } : set;
     const started = Date.now();
     let done = 0;
-    const execution = await run(vectors, {
+    const options = {
       clientFactory: (metadata) => clients(transport, metadata),
       targets: targets(transport),
-      capabilities,
+      capabilities: capabilities(transport),
       variant: variants,
-      parallel,
       fixture,
       rowTimeoutMs: 180000,
       log(row) {
@@ -256,8 +312,16 @@ for (const transport of transports) {
           `guard ${transport} ${done} ${row.id} ${row.target} ${row.variant} ${verdict}${why}`
         );
       },
-    });
-    const summary = report(vectors, execution.results, sha, transport);
+    };
+    const results = [];
+    for (const batch of batches(vectors)) {
+      const execution = await run(batch.vectors, {
+        ...options,
+        parallel: batch.parallel ?? parallel,
+      });
+      results.push(...execution.results);
+    }
+    const summary = report(vectors, results, sha, transport);
     const out = new URL('../../../artifacts/guard/', import.meta.url);
     await mkdir(out, { recursive: true });
     await writeFile(

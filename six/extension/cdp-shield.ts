@@ -107,6 +107,10 @@ const REFUSED_METHODS = new Map<string, string>([
     'Target.attachToBrowserTarget would give a page the whole browser',
   ],
   ['Tracing.start', "Tracing.start records every target, seven's included"],
+  [
+    'Network.loadNetworkResource',
+    "Network.loadNetworkResource follows redirects the guard cannot see, into seven's pages too",
+  ],
   ['Extensions.loadUnpacked', "Extensions.loadUnpacked can reach seven's origin"],
   ['Network.clearBrowserCookies', "Network.clearBrowserCookies would clear seven's cookies"],
   ['Storage.clearCookies', "Storage.clearCookies would clear seven's cookies"],
@@ -127,6 +131,9 @@ const STREAM_REFUSAL = 'slicc: refused: stream handle was not opened through the
 const BODY_READ_REFUSAL =
   'slicc: refused: this paused response body was already read the other way';
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+const REROUTE_REFUSAL =
+  'slicc: refused: the rewritten request answered with a protected url, so the guard failed it';
 const PAUSE_REFUSAL = 'slicc: refused: request was not paused toward this client';
 
 export const GUARD_FETCH_PATTERN: CDPPayload = {
@@ -201,6 +208,349 @@ export function webSocketAsHttp(url: string): string {
 export function urlProtected(text: string, readOnly = false): boolean {
   return isProtectedUrl(text, readOnly) || isProtectedUrl(webSocketAsHttp(text), readOnly);
 }
+
+const SCHEME = /[a-z0-9+.-]/i;
+const URL_END = /[\s"'<>`\u0000-\u001f]/;
+const BOUNDARY = /[\s<>"'`=,;([{]/;
+const SLASHES = /[\\/]{2}/g;
+const JOINS = new Set([',', ';', '(', ')']);
+const URL_CAP = 4096;
+const NEXT_URL = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]{2}[^\\/]/i;
+export const KEY_COLLISION =
+  'slicc: refused: two keys of this payload reduce to the same protected origin';
+const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
+const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
+const TARGETS = new Set(['location', 'content-location', 'refresh', 'link']);
+
+const AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i;
+
+function originOf(text: string): string {
+  try {
+    const origin = new URL(text).origin;
+    if (origin && origin !== 'null') return origin;
+  } catch {}
+  return AUTHORITY.exec(text)?.[0] ?? 'about:blank';
+}
+
+interface Span {
+  start: number;
+  end: number;
+  url: string;
+  hit: boolean;
+}
+
+function schemeStart(text: string, colon: number): number {
+  let start = colon;
+  while (start > 0 && colon - start < 32 && SCHEME.test(text[start - 1] ?? '')) start -= 1;
+  while (start < colon && !/[a-z]/i.test(text[start] ?? '')) start += 1;
+  return start;
+}
+
+function judged(text: string, start: number, end: number, prefix: string): Span {
+  const url = prefix + text.slice(start, end).replace(/\\/g, '/');
+  return { start, end, url, hit: urlProtected(url) };
+}
+
+function urlEnd(text: string, from: number, limit = text.length): number {
+  const stop = Math.min(text.length, from + limit);
+  let end = from;
+  while (end < stop && !URL_END.test(text[end] ?? '')) {
+    if (JOINS.has(text[end] ?? '') && NEXT_URL.test(text.slice(end + 1, end + 40))) {
+      return text[end - 1] === ')' && end - 1 > from ? end - 1 : end;
+    }
+    end += 1;
+  }
+  return end;
+}
+
+function opening(text: string, at: number): { start: number; prefix: string } | undefined {
+  const next = text[at + 2];
+  if (next === undefined || next === '/' || next === '\\' || URL_END.test(next)) return undefined;
+  if (text[at - 1] !== ':') {
+    if (at > 0 && !BOUNDARY.test(text[at - 1] ?? '')) return undefined;
+    return { start: at, prefix: 'https:' };
+  }
+  const start = schemeStart(text, at - 1);
+  return start === at - 1 ? undefined : { start, prefix: '' };
+}
+
+function urlAt(text: string, at: number): Span {
+  const miss = { start: at, end: at + 2, url: '', hit: false };
+  const open = opening(text, at);
+  if (!open) return miss;
+  const capped = urlEnd(text, at + 2, URL_CAP);
+  let span = judged(text, open.start, capped, open.prefix);
+  if (!span.hit && open.prefix === '') {
+    const scheme = text.slice(open.start, at - 1).toLowerCase();
+    const inner = WEB_SCHEMES.find((w) => scheme.length > w.length && scheme.endsWith(w));
+    if (inner !== undefined) span = judged(text, at - 1 - inner.length, capped, '');
+  }
+  if (!span.hit) return miss;
+  if (capped - at - 2 < URL_CAP) return span;
+  return { ...span, end: urlEnd(text, capped) };
+}
+
+function spans(text: unknown): Span[] {
+  const out: Span[] = [];
+  if (typeof text !== 'string' || !/[\\/]{2}/.test(text)) return out;
+  SLASHES.lastIndex = 0;
+  for (let found = SLASHES.exec(text); found; found = SLASHES.exec(text)) {
+    const span = urlAt(text, found.index);
+    if (span.hit) out.push(span);
+    SLASHES.lastIndex = span.hit ? Math.max(span.end, found.index + 2) : found.index + 2;
+  }
+  return out;
+}
+
+export function redactText(text: string): string {
+  let out = '';
+  let last = 0;
+  for (const span of spans(text)) {
+    const origin = originOf(span.url);
+    if (span.url === origin || span.url === `${origin}/`) continue;
+    out += text.slice(last, span.start) + origin;
+    last = span.end;
+  }
+  return last === 0 ? text : out + text.slice(last);
+}
+
+export function namesProtectedUrl(text: unknown): boolean {
+  return spans(text).length > 0;
+}
+
+function cleaned(target: string): string {
+  return target
+    .replace(/[\t\n\r]/g, '')
+    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '')
+    .replace(/^(['"])(.*)\1$/s, '$2');
+}
+
+function resolved(target: string, base: string): string {
+  try {
+    return new URL(cleaned(target), base || 'https://slicc.invalid/').href;
+  } catch {
+    return '';
+  }
+}
+
+function targetSpans(name: string, line: string): Array<[number, number]> {
+  const lower = name.toLowerCase();
+  if (lower === 'link') {
+    return [...line.matchAll(/<([^>]*)>/g)].map((m): [number, number] => [
+      m.index + 1,
+      m.index + 1 + (m[1] ?? '').length,
+    ]);
+  }
+  if (lower !== 'refresh') return [[line.length - line.trimStart().length, line.length]];
+  const named = /url\s*=\s*/i.exec(line);
+  if (named) return [[named.index + named[0].length, line.length]];
+  const bare = /^[\s\d.]*[;,]\s*/.exec(line);
+  return bare ? [[bare[0].length, line.length]] : [];
+}
+
+function redactLine(name: string, line: string, base: string): { text: string; hit: boolean } {
+  let out = '';
+  let last = 0;
+  let hit = false;
+  for (const [start, end] of targetSpans(name, line)) {
+    const url = resolved(line.slice(start, end), base);
+    if (!url || !urlProtected(url)) continue;
+    hit = true;
+    out += line.slice(last, start) + originOf(url);
+    last = end;
+  }
+  return { text: last === 0 ? line : out + line.slice(last), hit };
+}
+
+function headerTarget(
+  name: unknown,
+  value: unknown,
+  base: string
+): { text: unknown; hit: boolean } {
+  if (typeof name !== 'string' || typeof value !== 'string' || !TARGETS.has(name.toLowerCase())) {
+    return { text: value, hit: false };
+  }
+  const lines = value.split('\n').map((line) => redactLine(name, line, base));
+  return { text: lines.map((l) => l.text).join('\n'), hit: lines.some((l) => l.hit) };
+}
+
+function headerNamed(name: unknown, value: unknown, base: string): boolean {
+  return namesProtectedUrl(value) || headerTarget(name, value, base).hit;
+}
+
+export function redactHeaders(headers: unknown, base: string): unknown {
+  if (Array.isArray(headers)) {
+    let out: unknown[] = headers;
+    headers.forEach((header: unknown, index) => {
+      if (!isObj(header)) return;
+      const next = headerTarget(header['name'], header['value'], base).text;
+      if (next === header['value']) return;
+      if (out === headers) out = [...headers];
+      out[index] = { ...header, value: next };
+    });
+    return out;
+  }
+  if (!isObj(headers)) return headers;
+  let out = headers;
+  for (const [name, value] of Object.entries(headers)) {
+    const next = headerTarget(name, value, base).text;
+    if (next === value) continue;
+    if (out === headers) out = { ...headers };
+    out[name] = next;
+  }
+  return out;
+}
+
+function redactHeadersText(text: string, base: string): string {
+  const parts = text.split(/(\r?\n)/);
+  let changed = false;
+  const out = parts.map((part) => {
+    const found = /^([^:]+):(.*)$/s.exec(part);
+    if (!found) return part;
+    const name = found[1] ?? '';
+    const value = found[2] ?? '';
+    const next = headerTarget(name.trim(), value, base).text;
+    if (next === value) return part;
+    changed = true;
+    return `${name}:${String(next)}`;
+  });
+  return changed ? out.join('') : text;
+}
+
+function urlNamed(text: unknown): boolean {
+  return typeof text === 'string' && text !== '' && urlProtected(text);
+}
+
+function withHeaders(value: Record<string, unknown>): Record<string, unknown> {
+  let out = value;
+  const request = value['request'];
+  if (Array.isArray(value['responseHeaders'])) {
+    const base = isObj(request) ? (str(request['url']) ?? '') : '';
+    const next = redactHeaders(value['responseHeaders'], base);
+    if (next !== value['responseHeaders']) out = { ...out, responseHeaders: next };
+  }
+  const url = str(value['url']) ?? '';
+  if (isObj(value['headers'])) {
+    const next = redactHeaders(value['headers'], url);
+    if (next !== value['headers']) out = { ...out, headers: next };
+  }
+  const text = str(value['headersText']);
+  if (text !== undefined) {
+    const next = redactHeadersText(text, url);
+    if (next !== text) out = { ...out, headersText: next };
+  }
+  return out;
+}
+
+function redactKeys(source: Record<string, unknown>): Record<string, unknown> {
+  const keys = Object.keys(source);
+  const renamed = keys.map((key) => redactText(key));
+  if (renamed.every((key, index) => key === keys[index])) return source;
+  if (new Set(renamed).size !== renamed.length) throw new Error(KEY_COLLISION);
+  return Object.fromEntries(keys.map((key, index) => [renamed[index], source[key]]));
+}
+
+export function redactProtected<T>(value: T): T {
+  if (typeof value === 'string') return redactText(value) as T;
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    let out: unknown[] = value;
+    value.forEach((item: unknown, index) => {
+      const next = redactProtected(item);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out as T;
+  }
+  const original = value as Record<string, unknown>;
+  const source = redactKeys(withHeaders(original));
+  let out = source;
+  for (const [key, item] of Object.entries(source)) {
+    const next = redactProtected(item);
+    if (next === item) continue;
+    if (out === source) out = { ...source };
+    out[key] = next;
+  }
+  if ('urlFragment' in original && URL_KEYS.some((k) => urlNamed(original[k]))) {
+    if (out === original) out = { ...original };
+    delete out['urlFragment'];
+  }
+  return out as T;
+}
+
+export function headersNameProtected(headers: unknown, base = ''): boolean {
+  if (Array.isArray(headers)) {
+    return headers.some(
+      (header) => isObj(header) && headerNamed(header['name'], header['value'], base)
+    );
+  }
+  if (!isObj(headers)) return false;
+  return Object.entries(headers).some(([name, value]) => headerNamed(name, value, base));
+}
+
+function responseNamesProtected(method: string, params: CDPPayload): boolean {
+  const response = params['response'];
+  const redirect = params['redirectResponse'];
+  if (isObj(response) && headersNameProtected(response['headers'], str(response['url']))) {
+    return true;
+  }
+  if (isObj(redirect) && headersNameProtected(redirect['headers'], str(redirect['url']))) {
+    return true;
+  }
+  if (!method.endsWith('responseReceivedExtraInfo')) return false;
+  const text = str(params['headersText']) ?? '';
+  return (
+    headersNameProtected(params['headers']) ||
+    namesProtectedUrl(text) ||
+    redactHeadersText(text, '') !== text
+  );
+}
+
+function binaryHeadersNameProtected(binary: unknown): boolean {
+  if (typeof binary !== 'string' || binary === '') return false;
+  try {
+    return namesProtectedUrl(atob(binary));
+  } catch {
+    return true;
+  }
+}
+
+function answerNamesProtected(params: CDPPayload, base: string): boolean {
+  return (
+    headersNameProtected(params['responseHeaders'], base) ||
+    headersNameProtected(params['headers'], base) ||
+    binaryHeadersNameProtected(params['binaryResponseHeaders'])
+  );
+}
+
+export function treeNamesProtected(tree: unknown): boolean {
+  const pending: unknown[] = [tree];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!isObj(node)) continue;
+    const frame = isObj(node['frame']) ? node['frame'] : {};
+    for (const key of ['url', 'unreachableUrl']) {
+      const url = str(frame[key]);
+      if (url && urlProtected(url)) return true;
+    }
+    if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
+  }
+  return false;
+}
+
+const DISCOVERY_EVENTS = new Set([
+  'Target.targetCreated',
+  'Target.targetInfoChanged',
+  'Target.targetDestroyed',
+  'Target.targetCrashed',
+]);
+
+const ERROR_PAGE_READS = new Set([
+  'Page.captureSnapshot',
+  'Page.getResourceContent',
+  'Page.searchInResource',
+]);
 
 export function mentions(value: unknown): boolean {
   if (typeof value === 'string') return value.includes('://') && urlProtected(value, true);
@@ -277,6 +627,47 @@ function stripProtectedAssociated(params: CDPPayload): void {
   params['associatedCookies'] = cookies.filter(
     (item) => !(isObj(item) && cookieProtected(item['cookie']))
   );
+}
+
+const SET_COOKIE = /^set-cookie$/i;
+const CACHED = ['fromDiskCache', 'fromServiceWorker', 'fromPrefetchCache', 'fromEarlyHints'];
+
+type Hop = { status: unknown; location: string | undefined } | 'done';
+
+function headerValue(headers: unknown, name: string): string | undefined {
+  if (!isObj(headers)) return undefined;
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === name);
+  return key === undefined ? undefined : String(headers[key]);
+}
+
+function hopOf(redirect: CDPPayload): Hop {
+  if (CACHED.some((key) => redirect[key] === true)) return 'done';
+  return { status: redirect['status'], location: headerValue(redirect['headers'], 'location') };
+}
+
+function hopMatches(hop: Hop | undefined, params: CDPPayload): boolean {
+  if (hop === undefined || hop === 'done') return false;
+  return (
+    params['statusCode'] === hop.status &&
+    headerValue(params['headers'], 'location') === hop.location
+  );
+}
+
+function stripSetCookie(params: CDPPayload): void {
+  const headers = params['headers'];
+  if (isObj(headers)) {
+    for (const key of Object.keys(headers)) if (SET_COOKIE.test(key)) delete headers[key];
+  }
+  const text = params['headersText'];
+  if (typeof text !== 'string') return;
+  const out: string[] = [];
+  let dropping = false;
+  for (const line of text.split(/(?<=\n)/)) {
+    if (/^set-cookie\s*:/i.test(line)) dropping = true;
+    else if (!/^[ \t]/.test(line)) dropping = false;
+    if (!dropping) out.push(line);
+  }
+  params['headersText'] = out.join('');
 }
 
 export function redacted(info: CDPPayload): CDPPayload {
@@ -399,10 +790,14 @@ export class TabShield {
   private readonly held = new Bounded<ShieldEvent[]>(500);
   private readonly frames = new Bounded<string[]>(1000);
   private readonly forwarded = new Bounded<true>(2000);
+  private readonly pausedUrls = new Bounded<string>(2000);
   private readonly bodyReads = new Bounded<string>(2000);
   private readonly streams = new Bounded<true>(500);
   private readonly failedDocuments = new Bounded<true>(200);
   private readonly hiddenFrames = new Bounded<true>(1000);
+  private readonly namedBodies = new Bounded<true>(2000);
+  private readonly hops = new Bounded<Hop>(500);
+  private readonly reroutes = new Map<string, (allowed: boolean) => void>();
   private readonly worlds = new Worlds();
   private clientFetch: ClientFetch | null = null;
   private mainFrameId = '';
@@ -466,7 +861,7 @@ export class TabShield {
   }
 
   failedBeforeCommit(url: string): boolean {
-    return this.failedDocuments.has(url);
+    return this.failedDocuments.has(url.split('#')[0] ?? url);
   }
 
   block(): void {
@@ -496,6 +891,7 @@ export class TabShield {
       this.forwarded.delete(pauseId);
       read = this.bodyReads.delete(pauseId);
     }
+    const reroute = this.pendingReroute(method, input, pauseId);
     let result: CDPPayload;
     try {
       result = await forward(
@@ -503,14 +899,48 @@ export class TabShield {
         params === undefined && rewritten === input ? undefined : rewritten
       );
     } catch (err) {
+      this.reroutes.delete(pauseId);
       if (settles && !/Invalid InterceptionId/i.test(String(err))) {
         this.forwarded.set(pauseId, true);
         if (read !== undefined) this.bodyReads.set(pauseId, read);
       }
       throw err;
     }
+    if (reroute !== undefined) await this.settleReroute(pauseId, reroute);
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     return this.after(method, result ?? {});
+  }
+
+  private pendingReroute(
+    method: string,
+    params: CDPPayload,
+    id: string
+  ): Promise<boolean> | undefined {
+    if (method !== 'Fetch.continueRequest' || params['url'] === undefined) return undefined;
+    return new Promise<boolean>((resolve) => this.reroutes.set(id, resolve));
+  }
+
+  private async settleReroute(id: string, reroute: Promise<boolean>): Promise<void> {
+    const late = new Promise<boolean>((resolve) => setTimeout(resolve, 10000, true));
+    const allowed = await Promise.race([reroute, late]);
+    this.reroutes.delete(id);
+    if (!allowed) refuse(REROUTE_REFUSAL);
+  }
+
+  private rerouted(paused: CDPPayload, id: string): boolean {
+    const waiting = this.reroutes.get(id);
+    const settled =
+      paused['responseStatusCode'] !== undefined || paused['responseErrorReason'] !== undefined;
+    if (!waiting || !settled) return false;
+    this.reroutes.delete(id);
+    const url = requestUrl(paused) ?? '';
+    const named = urlProtected(url) || headersNameProtected(paused['responseHeaders'], url);
+    waiting(!named);
+    if (!named) return false;
+    const networkId = str(paused['networkId']);
+    if (networkId) this.requests.set(networkId, true);
+    this.answer('Fetch.failRequest', { requestId: id, errorReason: 'BlockedByClient' });
+    return true;
   }
 
   visibleContexts(): CDPPayload[] {
@@ -596,6 +1026,10 @@ export class TabShield {
     this.admitWorlds(method, params);
     this.admitRequestIds(method, params);
     if (method === 'Page.navigateToHistoryEntry') await this.admitHistory(params);
+    if (ERROR_PAGE_READS.has(method)) {
+      const tree = await this.send('Page.getFrameTree', {});
+      if (treeNamesProtected(tree['frameTree'])) refuse(PROTECTED_RULES.refusal);
+    }
   }
 
   private admitBrowserWide(method: string, params: CDPPayload): void {
@@ -647,15 +1081,22 @@ export class TabShield {
     if (reason) refuse(reason);
   }
 
+  private admitPaused(method: string, id: string, params: CDPPayload): void {
+    if (answerNamesProtected(params, this.pausedUrls.get(id) ?? '')) {
+      refuse(PROTECTED_RULES.refusal);
+    }
+    if (!FETCH_READS.has(method)) return;
+    if (this.namedBodies.has(id)) refuse(PROTECTED_RULES.refusal);
+    const read = this.bodyReads.get(id);
+    if (read !== undefined && read !== method) refuse(BODY_READ_REFUSAL);
+    this.bodyReads.set(id, method);
+  }
+
   private admitRequestIds(method: string, params: CDPPayload): void {
     if (FETCH_ANSWERS.has(method)) {
       const id = str(params['requestId']);
       if (!id || !this.forwarded.has(id)) refuse(PAUSE_REFUSAL);
-      if (FETCH_READS.has(method)) {
-        const read = this.bodyReads.get(id);
-        if (read !== undefined && read !== method) refuse(BODY_READ_REFUSAL);
-        this.bodyReads.set(id, method);
-      }
+      this.admitPaused(method, id, params);
       return;
     }
     if (BODY_METHODS.has(method)) {
@@ -690,6 +1131,9 @@ export class TabShield {
       void this.send('Fetch.enable', this.fetchParams()).catch(() => this.block());
       return null;
     }
+    if (method === 'Fetch.continueRequest' && params['url'] !== undefined) {
+      return { ...params, interceptResponse: true };
+    }
     if (method === 'Page.addScriptToEvaluateOnNewDocument') {
       return { ...params, source: initScriptGuard() + (str(params['source']) ?? '') };
     }
@@ -700,6 +1144,10 @@ export class TabShield {
   }
 
   private after(method: string, result: CDPPayload): CDPPayload {
+    if (method === 'Page.captureSnapshot') {
+      const data = (str(result['data']) ?? '').replace(/=\r?\n/g, '');
+      if (redactText(data) !== data) refuse(PROTECTED_RULES.refusal);
+    }
     this.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') this.worlds.seen(result['executionContextId']);
     const stream = str(result['stream']);
@@ -729,6 +1177,7 @@ export class TabShield {
     if (profiled(method) && this.worlds.foreign) return [];
     if (this.worlds.hides(p)) return [];
     if (this.frameProtected(str(p['frameId']) ?? '')) return [];
+    if (DISCOVERY_EVENTS.has(method)) return [];
     if (method.startsWith('Target.')) {
       if (isObj(p['targetInfo']) && isProtectedTargetType(p['targetInfo']['type'])) return [];
       return [this.redactTarget(method, p)];
@@ -752,15 +1201,20 @@ export class TabShield {
 
   private onPaused(paused: CDPPayload): ShieldEvent[] {
     const id = str(paused['requestId']) ?? '';
+    if (this.rerouted(paused, id)) return [];
     const protectedUrl = urlProtected(requestUrl(paused) ?? '');
     const tainted = protectedUrl || this.initiatedByProtected(paused);
     this.requests.set(id, tainted);
     const networkId = str(paused['networkId']);
     if (networkId) this.requests.set(networkId, tainted || this.requests.get(networkId) === true);
     if (protectedUrl && paused['resourceType'] === 'Document') {
-      this.failedDocuments.set(requestUrl(paused) ?? '', true);
+      this.failedDocuments.set((requestUrl(paused) ?? '').split('#')[0] ?? '', true);
       this.answer('Fetch.failRequest', { requestId: id, errorReason: 'BlockedByClient' });
       return [];
+    }
+    if (headersNameProtected(paused['responseHeaders'], requestUrl(paused))) {
+      this.namedBodies.set(id, true);
+      if (networkId) this.requests.set(networkId, true);
     }
     const wanted =
       this.clientFetch?.patterns.some((pattern) => patternMatches(pattern, paused)) === true;
@@ -769,6 +1223,7 @@ export class TabShield {
       return [];
     }
     this.forwarded.set(id, true);
+    this.pausedUrls.set(id, requestUrl(paused) ?? '');
     return [{ method: 'Fetch.requestPaused', params: paused }];
   }
 
@@ -890,14 +1345,52 @@ export class TabShield {
     return { method, params: { ...params, targetInfo: redacted(info) } };
   }
 
+  private redirectHop(params: CDPPayload, id: string): boolean {
+    const redirect = params['redirectResponse'];
+    const from = isObj(redirect) ? str(redirect['url']) : undefined;
+    if (!from || urlProtected(from) || !urlProtected(requestUrl(params) ?? '')) return false;
+    this.requests.set(id, true);
+    this.held.delete(id);
+    if (this.hops.get(id) !== 'done') this.hops.set(id, hopOf(redirect as CDPPayload));
+    return true;
+  }
+
+  private redirectExtra(params: CDPPayload, id: string): boolean {
+    const status = params['statusCode'];
+    if (typeof status !== 'number' || !REDIRECTS.has(status)) return false;
+    const awaited = hopMatches(this.hops.get(id), params);
+    const named = responseNamesProtected('Network.responseReceivedExtraInfo', params);
+    if (this.requests.get(id) === true ? !awaited : !named) return false;
+    this.hops.set(id, 'done');
+    this.requests.set(id, true);
+    stripProtectedAssociated(params);
+    stripSetCookie(params);
+    return true;
+  }
+
+  private redirected(event: ShieldEvent, id: string | undefined): boolean {
+    const params = event.params ?? {};
+    if (!id) return false;
+    if (event.method === 'Network.requestWillBeSent') return this.redirectHop(params, id);
+    if (event.method === 'Network.responseReceivedExtraInfo') return this.redirectExtra(params, id);
+    return false;
+  }
+
   private deliver(event: ShieldEvent): ShieldEvent[] {
     const params = event.params ?? {};
     const id = str(params['requestId']);
+    if (this.redirected(event, id)) return [event];
     if (id && this.requests.get(id) === true) {
       this.held.delete(id);
       return [];
     }
-    if (mentions(params)) return [];
+    if (mentions(params) || responseNamesProtected(event.method, params)) {
+      if (id) {
+        this.requests.set(id, true);
+        this.held.delete(id);
+      }
+      return [];
+    }
     if (id && event.method.endsWith('ExtraInfo')) {
       stripProtectedAssociated(params);
       if (this.requests.get(id) === undefined) {

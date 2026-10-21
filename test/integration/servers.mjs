@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:https';
 import { join } from 'node:path';
@@ -74,6 +75,86 @@ export async function pages(tls) {
     }
     if (pathname === '/llms.txt') {
       return response.writeHead(200, { 'content-type': 'text/plain' }).end('# llms');
+    }
+    if (/^\/(auth\/callback|oauth\/mcp-callback|landing)(\/|$)/.test(pathname)) {
+      return response
+        .writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        .end(`<!doctype html><title>callback</title><p>signed in at ${request.url}</p>`);
+    }
+    if (pathname === '/noise') {
+      const size = Math.min(Number(searchParams.get('size') ?? '0'), 8 * 1024 * 1024);
+      return response
+        .writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'cache-control': 'no-store',
+          'access-control-allow-origin': '*',
+        })
+        .end(randomBytes(size));
+    }
+    if (pathname === '/hop') {
+      const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
+      const base = {
+        seven: 'https://seven.sliccy.ai/auth/callback',
+        vault: 'https://vault.sliccy.ai/oauth/mcp-callback',
+        ordinary: 'https://ordinary.test/landing',
+      }[searchParams.get('to') ?? 'ordinary'];
+      const to = {
+        fragment: `${base}?nonce=n#access_token=${mark}&token_type=bearer`,
+        query: `${base}?code=${mark}&state=${mark}`,
+        path: `${base}/${mark}`,
+      }[searchParams.get('form') ?? 'query'];
+      const body = `<!doctype html><title>hop</title><p>${to}</p>`;
+      const how = searchParams.get('how') ?? 'location';
+      const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
+      const relative = {
+        scheme: to.replace(/^https:/, ''),
+        backslash: `/\\${to.slice('https://'.length)}`,
+        tab: `//${to.slice(8, 11)}\t${to.slice(11)}`,
+        path: to.slice(new URL(to).origin.length),
+      }[how];
+      if (relative !== undefined) {
+        return response.writeHead(302, { ...headers, location: relative }).end(body);
+      }
+      if (how === 'location')
+        return response.writeHead(302, { ...headers, location: to }).end(body);
+      if (how === 'link')
+        return response.writeHead(200, { ...headers, link: `<${to}>; rel="next"` }).end(body);
+      return response.writeHead(200, { ...headers, refresh: `0; url=${to}` }).end(body);
+    }
+    if (pathname === '/moved') {
+      const n = searchParams.get('n') ?? '';
+      const host = searchParams.get('to') === 'vault' ? 'vault.sliccy.ai' : 'other.test';
+      return response
+        .writeHead(301, {
+          location: `https://${host}/bounce?n=${n}`,
+          'set-cookie': `moved=S3CR3T${[...n].reverse().join('')}; Secure; SameSite=None; Path=/`,
+          'cache-control': 'max-age=3600',
+        })
+        .end();
+    }
+    if (pathname === '/bounce') {
+      const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
+      return response
+        .writeHead(302, {
+          location: `https://ordinary.test/landing?code=${mark}`,
+          'set-cookie': `bounce=${mark}; Secure; SameSite=None; Path=/`,
+          'cache-control': 'no-store',
+        })
+        .end();
+    }
+    if (pathname === '/signin') {
+      const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
+      const base = {
+        seven: 'https://seven.sliccy.ai/auth/callback',
+        vault: 'https://vault.sliccy.ai/oauth/mcp-callback',
+        ordinary: 'https://ordinary.test/landing',
+      }[searchParams.get('to') ?? 'ordinary'];
+      const to = {
+        fragment: `${base}?nonce=n#access_token=${mark}&token_type=bearer&expires_in=86399`,
+        query: `${base}?code=${mark}&state=${mark}`,
+        path: `${base}/${mark}`,
+      }[searchParams.get('form') ?? 'query'];
+      return response.writeHead(302, { location: to }).end();
     }
     if (pathname === '/redirect') {
       return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();

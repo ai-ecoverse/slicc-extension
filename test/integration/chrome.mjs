@@ -1,3 +1,4 @@
+import { createHash, createPublicKey } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,7 +6,13 @@ import { launch as start } from '@ai-ecoverse/slicc-shared-web/harness';
 import { seven } from '../../extension/seven.js';
 import { certificate, ims, pages, upstream } from './servers.mjs';
 
-export async function launch() {
+function spki(cert) {
+  return createHash('sha256')
+    .update(createPublicKey(cert).export({ type: 'spki', format: 'der' }))
+    .digest('base64');
+}
+
+export async function launch({ pinned = false } = {}) {
   await rm(new URL('../../extension/_metadata', import.meta.url), { recursive: true, force: true });
   const dir = await mkdtemp(join(tmpdir(), 'slicc-extension-'));
   const tls = await certificate(dir);
@@ -32,7 +39,9 @@ export async function launch() {
     coverage: process.env.SLICC_COVERAGE ? undefined : [],
     extensions: ['extension/', 'test/integration/fixture-extension/'],
     args: [
-      '--ignore-certificate-errors',
+      pinned
+        ? `--ignore-certificate-errors-spki-list=${spki(tls.cert)}`
+        : '--ignore-certificate-errors',
       `--host-resolver-rules=${rules}`,
       '--use-fake-device-for-media-stream',
       '--use-fake-ui-for-media-stream',

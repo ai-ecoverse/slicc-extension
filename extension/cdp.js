@@ -19,6 +19,7 @@ import {
   ABOUT_WRAPPED,
   aboutUrl,
   assignExpression,
+  binaryHeadersNameProtected,
   bodyMethod,
   COOKIES,
   cookieReader,
@@ -30,6 +31,9 @@ import {
   extensionOrigin,
   foreignFrame,
   frameIn,
+  headersNameProtected,
+  hopMatches,
+  hopOf,
   initScriptPrefix,
   namesProtectedStorage,
   PROFILED,
@@ -37,18 +41,23 @@ import {
   patternProtected,
   profiled,
   RESERVED_WORLD,
+  redactProtected,
+  redactText,
   refusedOutright,
   requestKey,
   requestUrl,
+  responseNamesProtected,
   sameDocument,
   scopedBinding,
   strictGuard,
   stripProtectedCookies,
+  treeNamesProtected,
   UNSEEN,
   UNWATCHED,
   urlProtected,
   WORLD,
   Worlds,
+  withoutSetCookie,
   wrapsAbout,
 } from './shield.js';
 
@@ -65,7 +74,40 @@ const FETCH_ANSWERS = new Set([
   'Fetch.continueWithAuth',
 ]);
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+const REROUTE =
+  'slicc: refused: the rewritten request answered with a protected url, so the guard failed it';
 const BODY_READ = 'slicc: refused: this paused response body was already read the other way';
+const ERROR_PAGE_READS = new Set([
+  'Page.captureSnapshot',
+  'Page.getResourceContent',
+  'Page.searchInResource',
+]);
+
+function anyProtected(text) {
+  return urlProtected(guard, text);
+}
+
+function redacted(value) {
+  return redactProtected(value, anyProtected);
+}
+
+function unfolded(text) {
+  return textOf(text).replace(/=\r?\n/g, '');
+}
+
+function snapshotChecked(result) {
+  const data = unfolded(result.data);
+  if (redactText(data, anyProtected) !== data) refusal();
+}
+
+function headersProtected(params, base) {
+  return (
+    headersNameProtected(params.responseHeaders, anyProtected, base) ||
+    headersNameProtected(params.headers, anyProtected, base) ||
+    binaryHeadersNameProtected(params.binaryResponseHeaders, anyProtected)
+  );
+}
 
 function textOf(value) {
   return typeof value === 'string' ? value : '';
@@ -86,6 +128,11 @@ function unparseableDestination(url) {
 
 function relative(url) {
   return typeof url === 'string' && url !== '' && !URL.canParse(url);
+}
+
+function unfragmented(url) {
+  const at = url.indexOf('#');
+  return at < 0 ? url : url.slice(0, at);
 }
 
 function redactedUrl(url) {
@@ -296,6 +343,7 @@ class Connection {
       seen: new Set(),
       failed: new Map(),
       streams: new Set(),
+      cut: new Set(),
       discover: false,
       counter: 0,
     };
@@ -320,8 +368,15 @@ class Connection {
 
   post(message) {
     if (this.closed) return;
+    let out;
     try {
-      this.port.postMessage(message);
+      out = redacted(message);
+    } catch (error) {
+      if (typeof message?.id !== 'number') return;
+      out = { id: message.id, error: String(error?.message ?? error) };
+    }
+    try {
+      this.port.postMessage(out);
     } catch {
       return undefined;
     }
@@ -364,10 +419,14 @@ class Connection {
     return this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, method, params));
   }
 
+  failedAt(tabId, url) {
+    const failed = this.state.failed.get(tabId);
+    return Boolean(failed) && unfragmented(textOf(url)) === failed;
+  }
+
   view(tab) {
-    const failed = this.state.failed.get(tab?.id);
-    if (!failed || textOf(tab.url) !== failed) return tab;
-    const pendingUrl = textOf(tab.pendingUrl) === failed ? '' : tab.pendingUrl;
+    if (!this.failedAt(tab?.id, tab?.url)) return tab;
+    const pendingUrl = this.failedAt(tab.id, tab.pendingUrl) ? '' : tab.pendingUrl;
     return { ...tab, url: ERROR_PAGE, title: '', pendingUrl };
   }
 
@@ -375,16 +434,17 @@ class Connection {
     return this.view(await readTab(this.api, tabId));
   }
 
-  info(raw) {
-    const tab = this.view(raw);
-    const hidden =
-      urlProtected(guard, textOf(tab.url)) || urlProtected(guard, textOf(tab.pendingUrl));
-    const url = tab.url || tab.pendingUrl || '';
+  info(tab) {
+    const url = textOf(tab.url);
+    const pending = textOf(tab.pendingUrl);
+    const shown = urlProtected(guard, url) ? redactedUrl(url) : url;
+    const hidden = shown !== url || urlProtected(guard, pending);
+    const reported = shown || (urlProtected(guard, pending) ? redactedUrl(pending) : pending);
     const out = {
       targetId: String(tab.id),
       type: 'page',
-      title: hidden ? '' : (tab.title ?? ''),
-      url: hidden && !/^https?:/i.test(url) ? redactedUrl(url) : url,
+      title: hidden ? (reported === url ? '' : reported) : (tab.title ?? ''),
+      url: reported,
       attached: this.sessionsOf(tab.id).length > 0,
       canAccessOpener: false,
     };
@@ -395,6 +455,7 @@ class Connection {
 
   forget(tabId) {
     this.drop(tabId);
+    this.state.failed.delete(tabId);
     const tab = this.tabState(tabId);
     if (tab) for (const sessionId of tab.sessions) this.state.sessions.delete(sessionId);
     this.state.tabs.delete(tabId);
@@ -405,6 +466,8 @@ class Connection {
     const sessions = this.sessionsOf(tabId);
     const owned = this.state.ownedTabs.has(tabId);
     if (sessions.length === 0 && !owned) return;
+    for (const sessionId of sessions) this.state.cut.add(sessionId);
+    while (this.state.cut.size > 1000) this.state.cut.delete(this.state.cut.values().next().value);
     this.forget(tabId);
     for (const sessionId of sessions) {
       this.post({
@@ -460,7 +523,7 @@ class Connection {
       };
     }
     const tabId = tabFrom(params.targetId);
-    const tab = await this.read(tabId);
+    const tab = await readTab(this.api, tabId);
     this.state.seen.add(tabId);
     return { targetInfo: this.info(tab) };
   }
@@ -663,6 +726,8 @@ class Connection {
         runtime: new Set(),
         requests: new Map(),
         held: new Map(),
+        hops: new Map(),
+        reroutes: new Map(),
         paused: new Map(),
       };
       this.state.tabs.set(tabId, tab);
@@ -695,9 +760,21 @@ class Connection {
     const sessionId = this.state.sessions.has(targetId)
       ? `${targetId}.${++this.state.counter}`
       : targetId;
+    this.state.cut.delete(sessionId);
     this.state.sessions.set(sessionId, { tabId, patterns: null, auth: false });
     tab.sessions.add(sessionId);
     this.state.seen.add(tabId);
+    const current = await readTab(this.api, tabId).catch(() => undefined);
+    if (current) {
+      this.post({
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId,
+          targetInfo: { ...this.info(current), attached: true },
+          waitingForDebugger: false,
+        },
+      });
+    }
     return { sessionId };
   }
 
@@ -785,10 +862,42 @@ class Connection {
     await this.answer(tabId, 'Fetch.continueRequest', { requestId });
   }
 
+  async rerouted(tabId, tab, requestId, params) {
+    const waiting = tab.reroutes.get(requestId);
+    const settled =
+      params.responseStatusCode !== undefined || params.responseErrorReason !== undefined;
+    if (!waiting || !settled) return false;
+    tab.reroutes.delete(requestId);
+    const url = requestUrl(params);
+    const named =
+      urlProtected(guard, url) || headersNameProtected(params.responseHeaders, anyProtected, url);
+    if (named && typeof params.networkId === 'string') tab.requests.set(params.networkId, true);
+    waiting(!named);
+    if (!named) return false;
+    await this.send(tabId, 'Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
+    return true;
+  }
+
+  async reroute(tabId, tab, requestId, params) {
+    const seen = new Promise((resolve) => tab.reroutes.set(requestId, resolve));
+    try {
+      await this.answer(tabId, 'Fetch.continueRequest', { ...params, interceptResponse: true });
+    } catch (error) {
+      tab.reroutes.delete(requestId);
+      throw error;
+    }
+    const late = new Promise((resolve) => setTimeout(resolve, 10000, true));
+    const allowed = await Promise.race([seen, late]);
+    tab.reroutes.delete(requestId);
+    if (!allowed) throw new Error(REROUTE);
+    return {};
+  }
+
   async onPaused(tabId, method, params) {
     const tab = this.tabState(tabId);
     if (!tab) return;
     const requestId = textOf(params?.requestId);
+    if (await this.rerouted(tabId, tab, requestId, params ?? {})) return;
     const url = requestUrl(params);
     const frameId = textOf(params?.frameId);
     const isProtected = urlProtected(guard, url) || tab.frames.get(frameId) === true;
@@ -813,6 +922,8 @@ class Connection {
       await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
       return;
     }
+    const named = headersNameProtected(params.responseHeaders, anyProtected, url);
+    if (named && typeof params.networkId === 'string') tab.requests.set(params.networkId, true);
     const [first] = this.candidates(tabId, params);
     if (first === undefined) {
       if (method === 'Fetch.authRequired') {
@@ -825,7 +936,7 @@ class Connection {
       await this.send(tabId, 'Fetch.continueRequest', { requestId }).catch(() => undefined);
       return;
     }
-    tab.paused.set(requestId, { owner: first, params, method });
+    tab.paused.set(requestId, { owner: first, params, method, named });
     this.post({ method, params, sessionId: first });
   }
 
@@ -871,24 +982,36 @@ class Connection {
       if (urlProtected(guard, textOf(entry?.url))) refusal();
     }
     if (FETCH_ANSWERS.has(method) || FETCH_READS.has(method)) {
-      const entry = tab.paused.get(textOf(params.requestId));
-      if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
-      if (FETCH_READS.has(method)) {
-        if (entry.read !== undefined && entry.read !== method) throw new Error(BODY_READ);
-        entry.read = method;
-      }
-      if (FETCH_ANSWERS.has(method)) entry.claimed = true;
+      this.checkPaused(tab, method, params, sessionId);
     } else if (bodyMethod(method)) {
       const known = tab.requests.get(textOf(requestKey(params)));
       if (known === true) refusal();
       if (known !== false) throw new Error(UNSEEN);
     }
+    if (ERROR_PAGE_READS.has(method)) await this.checkErrorPage(tabId);
     if (
       (method === 'IO.read' || method === 'IO.close') &&
       !this.state.streams.has(textOf(params.handle))
     ) {
       throw new Error(UNSEEN);
     }
+  }
+
+  checkPaused(tab, method, params, sessionId) {
+    const entry = tab.paused.get(textOf(params.requestId));
+    if (!entry || entry.owner !== sessionId || entry.claimed) throw new Error(UNSEEN);
+    if (FETCH_ANSWERS.has(method) && headersProtected(params, requestUrl(entry.params))) refusal();
+    if (FETCH_READS.has(method)) {
+      if (entry.named) refusal();
+      if (entry.read !== undefined && entry.read !== method) throw new Error(BODY_READ);
+      entry.read = method;
+    }
+    if (FETCH_ANSWERS.has(method)) entry.claimed = true;
+  }
+
+  async checkErrorPage(tabId) {
+    const tree = await this.send(tabId, 'Page.getFrameTree', {});
+    if (treeNamesProtected(tree?.frameTree, anyProtected)) refusal();
   }
 
   async admit(tabId, tab, method, params, sessionId) {
@@ -917,14 +1040,18 @@ class Connection {
     }
   }
 
+  sessionOf(sessionId) {
+    const session = typeof sessionId === 'string' ? this.state.sessions.get(sessionId) : undefined;
+    if (session) return session;
+    if (this.state.cut.has(sessionId)) refusal();
+    throw new Error(
+      `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
+    );
+  }
+
   async sessionCommand(message, params) {
     const { method, sessionId } = message;
-    const session = typeof sessionId === 'string' ? this.state.sessions.get(sessionId) : undefined;
-    if (!session) {
-      throw new Error(
-        `No tab attached for sessionId: ${sessionId ?? '(none)'}. Attach to a target first.`
-      );
-    }
+    const session = this.sessionOf(sessionId);
     const { tabId } = session;
     const tab = this.tabState(tabId);
     const seen = await this.admit(tabId, tab, method, params, sessionId);
@@ -954,6 +1081,9 @@ class Connection {
         return {};
       }
       tab.paused.delete(requestId);
+      if (method === 'Fetch.continueRequest' && params.url !== undefined) {
+        return this.reroute(tabId, tab, requestId, params);
+      }
       return this.answer(tabId, method, params);
     }
     const forwarded = outgoing(message, params);
@@ -964,6 +1094,7 @@ class Connection {
     if (about) return this.openBlank(tabId, params, about);
     if (method === 'Page.bringToFront') await activate(this.api, tabId);
     let result = (await this.send(tabId, method, forwarded)) ?? {};
+    if (method === 'Page.captureSnapshot') snapshotChecked(result);
     this.learn(tab, method, result);
     if (cookieReader(method)) result = dropProtectedCookies(guard, result);
     if (typeof result.stream === 'string') this.state.streams.add(result.stream);
@@ -1080,16 +1211,51 @@ class Connection {
     }
   }
 
+  hop(tabId, tab, method, p) {
+    if (method !== 'Network.requestWillBeSent' || typeof p.requestId !== 'string') return false;
+    const from = textOf(p.redirectResponse?.url);
+    if (!from || urlProtected(guard, from) || !urlProtected(guard, textOf(p.request?.url))) {
+      return false;
+    }
+    if (this.frameProtected(tab, p.frameId) || tab.worlds.hides(p)) return true;
+    tab.requests.set(p.requestId, true);
+    tab.held.delete(p.requestId);
+    if (tab.hops.get(p.requestId) !== 'done') tab.hops.set(p.requestId, hopOf(p.redirectResponse));
+    if (tab.hops.size > 500) tab.hops.delete(tab.hops.keys().next().value);
+    this.broadcast(tabId, method, stripProtectedCookies(guard, p));
+    return true;
+  }
+
+  redirectExtra(tabId, tab, method, params, known) {
+    if (method !== 'Network.responseReceivedExtraInfo') return false;
+    if (!REDIRECTS.has(params.statusCode) || typeof params.requestId !== 'string') return false;
+    const id = params.requestId;
+    const awaited = hopMatches(tab.hops.get(id), params);
+    const named = responseNamesProtected(method, params, anyProtected);
+    if (known === true ? !awaited : !named) return false;
+    tab.hops.set(id, 'done');
+    tab.requests.set(id, true);
+    this.broadcast(tabId, method, withoutSetCookie(stripProtectedCookies(guard, params)));
+    return true;
+  }
+
   deliver(tabId, tab, method, params) {
     const id = typeof params?.requestId === 'string' ? params.requestId : undefined;
     const known = this.classify(tab, params);
+    if (this.redirectExtra(tabId, tab, method, params, known)) return;
     if (known === true) {
       tab.held.delete(id);
       return;
     }
     let out = params;
     if (method.startsWith('Network.')) out = stripProtectedCookies(guard, out);
-    if (this.mentions(out)) return;
+    if (this.mentions(out) || responseNamesProtected(method, out, anyProtected)) {
+      if (id !== undefined) {
+        tab.requests.set(id, true);
+        tab.held.delete(id);
+      }
+      return;
+    }
     if (id !== undefined && method.endsWith('ExtraInfo') && known !== false) {
       const held = tab.held.get(id) ?? [];
       held.push([method, out]);
@@ -1106,7 +1272,7 @@ class Connection {
   }
 
   async protectedDocument(tabId, tab, requestId, frameId, url) {
-    if (this.isMain(tab, frameId)) this.state.failed.set(tabId, url);
+    if (this.isMain(tab, frameId)) this.state.failed.set(tabId, unfragmented(url));
     await this.send(tabId, 'Fetch.failRequest', {
       requestId,
       errorReason: 'BlockedByClient',
@@ -1246,6 +1412,7 @@ class Connection {
       this.watchChild(tabId, method, p);
       return;
     }
+    if (this.hop(tabId, tab, method, p)) return;
     if (this.watch(tabId, tab, method, p)) return;
     if (profiled(method) && tab.worlds.foreign) return;
     if (tab.worlds.hides(p)) return;
@@ -1282,9 +1449,9 @@ class Connection {
     const t = this.tabState(tabId);
     if (t || this.state.ownedTabs.has(tabId)) {
       const probe = t ?? { pageUrl: '' };
-      const failed = this.state.failed.get(tabId);
-      if (change.url !== undefined && change.url !== failed) this.state.failed.delete(tabId);
-      if (change.url !== failed && this.leaves(probe, textOf(change.url))) {
+      const same = change.url !== undefined && this.failedAt(tabId, change.url);
+      if (change.url !== undefined && !same) this.state.failed.delete(tabId);
+      if (!same && this.leaves(probe, textOf(change.url))) {
         this.release(tabId);
       } else {
         void this.recheck(tabId);

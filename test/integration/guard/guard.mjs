@@ -1,11 +1,22 @@
 import { summary } from '@ai-ecoverse/slicc-browsers/guard-runner';
 
-export const capabilities = {
-  autoAttach: false,
-  browserSession: false,
-  browserContexts: false,
-  extensionWorld: true,
-};
+export function capabilities(transport) {
+  return {
+    autoAttach: false,
+    browserSession: false,
+    browserContexts: false,
+    extensionWorld: true,
+    discovery: transport === 'seven',
+  };
+}
+
+export function batches(vectors) {
+  const serial = (vector) => vector.id.startsWith('C8.protected-');
+  return [
+    { vectors: { ...vectors, vectors: vectors.vectors.filter((v) => !serial(v)) } },
+    { vectors: { ...vectors, vectors: vectors.vectors.filter(serial) }, parallel: 1 },
+  ].filter((batch) => batch.vectors.vectors.length > 0);
+}
 
 export const entries = {
   seven: { origin: 'https://seven.sliccy.ai', path: '/doc?n=guard-client' },
