@@ -176,7 +176,7 @@ async function browser() {
     get events() {
       return tapped;
     },
-    waitEvent: (predicate, ms = 10000) => waitEvent(tapped, predicate, ms, tapped.length),
+    waitEvent: (predicate, ms = 10000) => waitEvent(tapped, predicate, ms),
   };
 
   async function guarded(transport) {
