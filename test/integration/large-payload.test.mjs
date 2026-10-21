@@ -119,4 +119,39 @@ for (const transport of transports) {
     assert.ok(run.size > 5_000_000, `the body is large: ${run.size}`);
     assert.ok(run.ms < BUDGET, `the body read took ${Math.round(run.ms)} ms`);
   });
+
+  for (const unit of ['=//a', 'https:']) {
+    test(`${transport}: a large evaluate value of repeated ${unit} ending in a protected url reaches the client within ${BUDGET} ms, as its origin only`, async (t) => {
+      const page = await client(t, transport);
+      const n = `rep${++serial}${Date.now()}`;
+      const run = await page.evaluate(
+        async ({ n, unit, budget }) => {
+          const { targetId, sessionId } = await h.open(`https://ordinary.test/doc?n=${n}`);
+          const tail = ' https://vault.sliccy.ai/oauth/mcp-callback?code=S3CR3T';
+          const expression = `${JSON.stringify(unit)}.repeat(1 << 20) + ${JSON.stringify(tail)}`;
+          const started = performance.now();
+          const answer = await Promise.race([
+            h.attempt('Runtime.evaluate', { expression, returnByValue: true }, sessionId),
+            h.sleep(budget * 2).then(() => ({ error: 'no answer' })),
+          ]);
+          const ms = performance.now() - started;
+          const value = String(answer.result?.result?.value ?? '');
+          await h.close(targetId);
+          return {
+            ms,
+            error: answer.error,
+            size: value.length,
+            leaked: value.includes('S3CR3T'),
+            ends: value.endsWith(' https://vault.sliccy.ai'),
+          };
+        },
+        { n, unit, budget: BUDGET }
+      );
+      t.diagnostic(`${transport} ${unit} value ${run.size} chars in ${Math.round(run.ms)} ms`);
+      assert.equal(run.error, undefined);
+      assert.ok(run.ms < BUDGET, `the value took ${Math.round(run.ms)} ms`);
+      assert.equal(run.leaked, false, 'the token reaches the client');
+      assert.equal(run.ends, true, 'the protected url is reduced to its origin');
+    });
+  }
 }
