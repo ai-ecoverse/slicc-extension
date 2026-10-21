@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { listen } from '../../extension/cdp.js';
 import { protectedOrigins } from '../../extension/protected.mjs';
 import { protectedRules } from '../../extension/protected-rules.js';
@@ -1903,6 +1904,7 @@ test('shield hides protected network events, holds ExtraInfo until classified, a
     type: 'XHR',
     request: { url: 'https://other.test/y' },
   });
+  api.fire(8, 'Network.loadingFinished', { requestId: 'n2' });
   api.fire(8, 'Network.requestWillBeSent', {
     requestId: 'n3',
     type: 'Script',
@@ -1917,6 +1919,7 @@ test('shield hides protected network events, holds ExtraInfo until classified, a
     .map((m) => [m.method, m.params.requestId]);
   assert.deepEqual(ids, [
     ['Network.requestWillBeSent', 'n2'],
+    ['Network.loadingFinished', 'n2'],
     ['Network.requestWillBeSentExtraInfo', 'n2'],
   ]);
   assert.equal(events(connection, 'Runtime.consoleAPICalled').length, 0);
@@ -1943,3 +1946,97 @@ test('shield hides protected network events, holds ExtraInfo until classified, a
   assert.equal(allowed.error, undefined);
   cdp.close();
 });
+
+const hopOrders = {
+  'ExtraInfo between the ordinary leg and its hop': ['ordinary', 'extra', 'hop', 'finished'],
+  'ExtraInfo before either leg': ['extra', 'ordinary', 'hop', 'finished'],
+  'ExtraInfo after the hop': ['ordinary', 'hop', 'extra', 'finished'],
+  'ExtraInfo after the chain settles': ['ordinary', 'hop', 'finished', 'extra'],
+};
+const plainOrders = {
+  'ExtraInfo before the request': ['extra', 'ordinary', 'finished'],
+  'ExtraInfo before the response': ['ordinary', 'extra', 'finished'],
+  'ExtraInfo after the chain settles': ['ordinary', 'finished', 'extra'],
+};
+
+function hopEvent(step, requestId) {
+  const moved = 'https://other.test/moved';
+  return {
+    ordinary: ['Network.requestWillBeSent', { requestId, type: 'Fetch', request: { url: moved } }],
+    extra: [
+      'Network.requestWillBeSentExtraInfo',
+      { requestId, headers: { cookie: `bounce=S3CR3T${requestId}` } },
+    ],
+    hop: [
+      'Network.requestWillBeSent',
+      {
+        requestId,
+        type: 'Fetch',
+        request: { url: 'https://vault.sliccy.ai/bounce' },
+        redirectResponse: {
+          url: moved,
+          status: 301,
+          fromDiskCache: true,
+          headers: { location: 'https://vault.sliccy.ai/bounce' },
+        },
+      },
+    ],
+    finished: ['Network.loadingFinished', { requestId }],
+  }[step];
+}
+
+async function sevenOrder(steps, requestId) {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  for (const step of steps) api.fire(8, ...hopEvent(step, requestId));
+  cdp.close();
+  return connection.posted.filter((m) => m.method?.startsWith('Network.'));
+}
+
+async function sixOrder(steps, requestId) {
+  const { default: esbuild } = await import('esbuild');
+  const built = await esbuild.build({
+    entryPoints: [fileURLToPath(new URL('../../six/extension/cdp-shield.ts', import.meta.url))],
+    tsconfig: fileURLToPath(new URL('../../tsconfig.json', import.meta.url)),
+    bundle: true,
+    format: 'esm',
+    write: false,
+    define: { __SLICC_EXT_DEV__: 'false', __DEV__: 'false' },
+  });
+  const source = Buffer.from(built.outputFiles[0].text).toString('base64');
+  const { TabShield } = await import(`data:text/javascript;base64,${source}`);
+  const shield = new TabShield(
+    () => Promise.resolve({}),
+    () => {}
+  );
+  return steps.flatMap((step) => shield.onEvent(...hopEvent(step, requestId)));
+}
+
+const orderTransports = { seven: sevenOrder, six: sixOrder };
+
+for (const [transport, run] of Object.entries(orderTransports)) {
+  for (const [name, steps] of Object.entries(hopOrders)) {
+    test(`${transport}: a protected leg's ExtraInfo behind an ordinary hop never leaks, ${name}`, async () => {
+      const posted = await run(steps, `${transport}${steps.join('')}`);
+      assert.equal(JSON.stringify(posted).includes('S3CR3T'), false);
+      assert.equal(
+        posted.some((m) => m.method === 'Network.requestWillBeSentExtraInfo'),
+        false
+      );
+    });
+  }
+  for (const [name, steps] of Object.entries(plainOrders)) {
+    test(`${transport} control: an ordinary request's ExtraInfo still arrives, ${name}`, async () => {
+      const posted = await run(steps, `${transport}plain${steps.join('')}`);
+      assert.equal(
+        posted.filter((m) => m.method === 'Network.requestWillBeSentExtraInfo').length,
+        1
+      );
+    });
+  }
+}

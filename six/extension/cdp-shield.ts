@@ -132,6 +132,11 @@ const BODY_READ_REFUSAL =
   'slicc: refused: this paused response body was already read the other way';
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+const SETTLES = new Set([
+  'Network.responseReceived',
+  'Network.loadingFinished',
+  'Network.loadingFailed',
+]);
 const REROUTE_REFUSAL =
   'slicc: refused: the rewritten request answered with a protected url, so the guard failed it';
 const PAUSE_REFUSAL = 'slicc: refused: request was not paused toward this client';
@@ -788,6 +793,7 @@ interface ClientFetch {
 export class TabShield {
   private readonly requests = new Bounded<boolean>(5000);
   private readonly held = new Bounded<ShieldEvent[]>(500);
+  private readonly settled = new Bounded<true>(5000);
   private readonly frames = new Bounded<string[]>(1000);
   private readonly forwarded = new Bounded<true>(2000);
   private readonly pausedUrls = new Bounded<string>(2000);
@@ -1376,6 +1382,11 @@ export class TabShield {
     return false;
   }
 
+  private settle(id: string): ShieldEvent[] {
+    this.settled.set(id, true);
+    return this.held.delete(id) ?? [];
+  }
+
   private deliver(event: ShieldEvent): ShieldEvent[] {
     const params = event.params ?? {};
     const id = str(params['requestId']);
@@ -1393,12 +1404,13 @@ export class TabShield {
     }
     if (id && event.method.endsWith('ExtraInfo')) {
       stripProtectedAssociated(params);
-      if (this.requests.get(id) === undefined) {
+      if (!this.settled.has(id)) {
         this.held.set(id, [...(this.held.get(id) ?? []), event]);
         return [];
       }
     }
-    const released = id && this.requests.get(id) === false ? (this.held.delete(id) ?? []) : [];
+    const released =
+      id && this.requests.get(id) === false && SETTLES.has(event.method) ? this.settle(id) : [];
     this.worlds.learn(params);
     return [event, ...released];
   }

@@ -75,6 +75,11 @@ const FETCH_ANSWERS = new Set([
 ]);
 const FETCH_READS = new Set(['Fetch.getResponseBody', 'Fetch.takeResponseBodyAsStream']);
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+const SETTLES = new Set([
+  'Network.responseReceived',
+  'Network.loadingFinished',
+  'Network.loadingFailed',
+]);
 const REROUTE =
   'slicc: refused: the rewritten request answered with a protected url, so the guard failed it';
 const BODY_READ = 'slicc: refused: this paused response body was already read the other way';
@@ -726,6 +731,7 @@ class Connection {
         runtime: new Set(),
         requests: new Map(),
         held: new Map(),
+        settled: new Set(),
         hops: new Map(),
         reroutes: new Map(),
         paused: new Map(),
@@ -1217,9 +1223,9 @@ class Connection {
     if (!from || urlProtected(guard, from) || !urlProtected(guard, textOf(p.request?.url))) {
       return false;
     }
-    if (this.frameProtected(tab, p.frameId) || tab.worlds.hides(p)) return true;
     tab.requests.set(p.requestId, true);
     tab.held.delete(p.requestId);
+    if (this.frameProtected(tab, p.frameId) || tab.worlds.hides(p)) return true;
     if (tab.hops.get(p.requestId) !== 'done') tab.hops.set(p.requestId, hopOf(p.redirectResponse));
     if (tab.hops.size > 500) tab.hops.delete(tab.hops.keys().next().value);
     this.broadcast(tabId, method, stripProtectedCookies(guard, p));
@@ -1256,7 +1262,7 @@ class Connection {
       }
       return;
     }
-    if (id !== undefined && method.endsWith('ExtraInfo') && known !== false) {
+    if (id !== undefined && method.endsWith('ExtraInfo') && !tab.settled.has(id)) {
       const held = tab.held.get(id) ?? [];
       held.push([method, out]);
       tab.held.set(id, held);
@@ -1264,8 +1270,10 @@ class Connection {
       return;
     }
     this.broadcast(tabId, method, out);
-    if (id !== undefined && known === false && tab.held.has(id)) {
-      const held = tab.held.get(id);
+    if (id !== undefined && known === false && SETTLES.has(method)) {
+      tab.settled.add(id);
+      if (tab.settled.size > 5000) tab.settled.delete(tab.settled.values().next().value);
+      const held = tab.held.get(id) ?? [];
       tab.held.delete(id);
       for (const [m, p] of held) this.broadcast(tabId, m, p);
     }
