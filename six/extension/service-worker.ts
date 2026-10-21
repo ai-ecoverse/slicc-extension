@@ -4,6 +4,7 @@ import {
   buildDefaultBridgeSwDeps,
   checkBridgeTabProtection,
   handleBridgePortConnect,
+  noteBridgeMainFrameResponse,
   postOpenSettingsToWelcomedLeaderPorts,
 } from './bridge-sw.js';
 import { handleCapturePopupMessage } from './capture-popup-sw.js';
@@ -87,6 +88,10 @@ installDiscoveryObserver();
 installProtectedFrameTracker();
 
 installCdpProxyListeners();
+
+for (const event of [chrome.webRequest.onHeadersReceived, chrome.webRequest.onResponseStarted]) {
+  event.addListener(noteBridgeMainFrameResponse, { urls: ['<all_urls>'], types: ['main_frame'] });
+}
 
 chrome.tabs.onUpdated.addListener(
   (tabId: number, changeInfo: ChromeTabChangeInfo, tab: ChromeTab) => {

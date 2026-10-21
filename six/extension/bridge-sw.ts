@@ -14,6 +14,7 @@ import {
 } from '@slicc/shared-ts';
 import {
   ABOUT_WRAPPED,
+  Bounded,
   redacted,
   redactProtected,
   redactText,
@@ -115,11 +116,36 @@ const ERROR_PAGE = 'chrome-error://chromewebdata/';
 const DISCOVERY_REFUSAL =
   'slicc: refused: the extension bridge does not report target discovery events';
 
+const failedTabs = new Bounded<Bounded<true>>(500);
+
+function failedBefore(tabId: number, url: string | undefined): boolean {
+  if (!url) return false;
+  return failedTabs.get(String(tabId))?.has(url.split('#')[0] ?? url) === true;
+}
+
+function failuresOf(tabId: number): Bounded<true> {
+  const known = failedTabs.get(String(tabId));
+  if (known) return known;
+  const fresh = new Bounded<true>(200);
+  failedTabs.set(String(tabId), fresh);
+  return fresh;
+}
+
 function failedView(tabId: number, tab: ChromeTab | undefined): ChromeTab | undefined {
-  const shield = tabShields.get(tabId);
-  if (!tab || !shield || !tab.url || !shield.failedBeforeCommit(tab.url)) return tab;
-  const pending = tab.pendingUrl && shield.failedBeforeCommit(tab.pendingUrl) ? '' : tab.pendingUrl;
+  if (!tab || !failedBefore(tabId, tab.url)) return tab;
+  const pending = failedBefore(tabId, tab.pendingUrl) ? '' : tab.pendingUrl;
   return { ...tab, url: ERROR_PAGE, pendingUrl: pending };
+}
+
+async function confirmFailure(tabId: number, deps: BridgeSwDeps): Promise<void> {
+  const tab = await deps.getTab(tabId);
+  if (!failedBefore(tabId, tab?.url) && !failedBefore(tabId, tab?.pendingUrl)) return;
+  const tree = await deps.sendDebuggerCommand(tabId, 'Page.getFrameTree').catch(() => undefined);
+  const frameTree = tree?.['frameTree'] as CDPPayload | undefined;
+  const frame = frameTree?.['frame'] as CDPPayload | undefined;
+  const unreachable = frame?.['unreachableUrl'];
+  if (typeof unreachable === 'string' && failedBefore(tabId, unreachable)) return;
+  failedTabs.get(String(tabId))?.clear();
 }
 
 async function protectedNow(tabId: number, deps: BridgeSwDeps): Promise<boolean> {
@@ -269,15 +295,26 @@ export function notifyBridgeDebuggerDetached(tabId: number): void {
   }
 }
 
+export function noteBridgeMainFrameResponse(details: {
+  tabId: number;
+  url: string;
+  type: string;
+}): void {
+  if (details.type !== 'main_frame' || !failedBefore(details.tabId, details.url)) return;
+  failedTabs.get(String(details.tabId))?.clear();
+}
+
 export function checkBridgeTabProtection(tabId: number, url: string | undefined): Set<number> {
+  if (url && !failedBefore(tabId, url)) failedTabs.get(String(tabId))?.clear();
   if (!url || !isProtectedUrl(url)) return new Set<number>();
-  if (tabShields.get(tabId)?.failedBeforeCommit(url)) return new Set<number>();
+  if (failedBefore(tabId, url)) return new Set<number>();
   return cutProtectedTab(tabId);
 }
 
 function cutProtectedTab(tabId: number): Set<number> {
   const detached = new Set<number>();
   tabShields.delete(tabId);
+  failedTabs.get(String(tabId))?.clear();
   for (const [port, state] of liveBridgePortStates) {
     const detachedSessionIds = [...state.sessionToTab]
       .filter(([, tid]) => tid === tabId)
@@ -310,6 +347,7 @@ const tabShields = new Map<number, TabShield>();
 
 export function __clearTabShieldsForTest(): void {
   tabShields.clear();
+  failedTabs.clear();
   shieldFanouts.clear();
 }
 
@@ -361,7 +399,8 @@ async function ensureTabShield(tabId: number, deps: BridgeSwDeps): Promise<void>
     () => {
       cutProtectedTab(tabId);
       deps.detachDebugger(tabId).catch(() => {});
-    }
+    },
+    failuresOf(tabId)
   );
   tabShields.set(tabId, shield);
   try {
@@ -879,6 +918,7 @@ async function cdpAttachToTarget(
     });
     if (attachedByThisPort) state.ownedTabs.add(tabId);
   }
+  await confirmFailure(tabId, deps);
   if (await protectedNow(tabId, deps)) {
     if (state.ownedTabs.has(tabId)) {
       state.ownedTabs.delete(tabId);

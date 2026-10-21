@@ -211,18 +211,31 @@ export function webSocketAsHttp(url: string): string {
 }
 
 export function urlProtected(text: string, readOnly = false): boolean {
-  return isProtectedUrl(text, readOnly) || isProtectedUrl(webSocketAsHttp(text), readOnly);
+  if (isProtectedUrl(text, readOnly)) return true;
+  const web = webSocketAsHttp(text);
+  return web !== text && isProtectedUrl(web, readOnly);
 }
 
 const SCHEME = /[a-z0-9+.-]/i;
+const LETTER = /[a-z]/i;
 const URL_END = /[\s"'<>`\u0000-\u001f]/;
 const BOUNDARY = /[\s<>"'`=,;([{]/;
-const SLASHES = /[\\/]{2}/g;
+const ANCHORS = /(?:https?|wss?):[\\/]*|[\\/]{2,}/gi;
+const ANCHOR = /(?:https?|wss?):|[\\/]{2}/i;
+const IGNORED = /[\t\n\r]+/g;
+const HAS_IGNORED = /[\t\n\r]/;
 const JOINS = new Set([',', ';', '(', ')']);
 const URL_CAP = 4096;
-const NEXT_URL = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]{2}[^\\/]/i;
+const HOST_CAP = 300;
+const SEEN_CAP = 4096;
+const AUTHORITY_END = /[\\/?#@]/g;
+const TAIL = URL_CAP + 64;
+const PIECE = 65536;
+const NEXT_URL = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]{2,}[^\\/]/i;
+const ENCODED_KEYS = ['body', 'data', 'content', 'postData'];
 export const KEY_COLLISION =
   'slicc: refused: two keys of this payload reduce to the same protected origin';
+export const ENCODED = 'slicc: refused: an encoded payload names a protected url';
 const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
 const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
 const TARGETS = new Set(['location', 'content-location', 'refresh', 'link']);
@@ -241,86 +254,328 @@ interface Span {
   start: number;
   end: number;
   url: string;
-  hit: boolean;
 }
 
-function schemeStart(text: string, colon: number): number {
+interface Normalized {
+  text: string;
+  cuts: Array<[number, number]>;
+  breaks: Set<number> | undefined;
+}
+
+type Judge = (url: string) => boolean;
+
+const judge: Judge = (url) => urlProtected(url);
+const judgeReadOnly: Judge = (url) => urlProtected(url, true);
+
+function normalized(text: string): Normalized {
+  if (!HAS_IGNORED.test(text)) return { text, cuts: [], breaks: undefined };
+  const parts: string[] = [];
+  const cuts: Array<[number, number]> = [];
+  let length = 0;
+  let last = 0;
+  IGNORED.lastIndex = 0;
+  for (let found = IGNORED.exec(text); found; found = IGNORED.exec(text)) {
+    parts.push(text.slice(last, found.index));
+    length += found.index - last;
+    last = found.index + found[0].length;
+    cuts.push([length, last]);
+  }
+  parts.push(text.slice(last));
+  return { text: parts.join(''), cuts, breaks: new Set(cuts.map(([at]) => at)) };
+}
+
+function original(n: Normalized, at: number): number {
+  let low = 0;
+  let high = n.cuts.length - 1;
+  let found: [number, number] | undefined;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const cut = n.cuts[mid] as [number, number];
+    if (cut[0] <= at) {
+      found = cut;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return found === undefined ? at : found[1] + at - found[0];
+}
+
+function originalEnd(n: Normalized, end: number): number {
+  return end === 0 ? 0 : original(n, end - 1) + 1;
+}
+
+function schemeStarts(text: string, colon: number, breaks: Set<number> | undefined): number[] {
   let start = colon;
   while (start > 0 && colon - start < 32 && SCHEME.test(text[start - 1] ?? '')) start -= 1;
-  while (start < colon && !/[a-z]/i.test(text[start] ?? '')) start += 1;
-  return start;
+  while (start < colon && !LETTER.test(text[start] ?? '')) start += 1;
+  if (start === colon) return [];
+  const out = [start];
+  for (let at = start + 1; at < colon; at += 1) {
+    if (breaks?.has(at) && LETTER.test(text[at] ?? '')) out.push(at);
+  }
+  const scheme = text.slice(start, colon).toLowerCase();
+  const inner = WEB_SCHEMES.find((w) => scheme.length > w.length && scheme.endsWith(w));
+  if (inner !== undefined) out.push(colon - inner.length);
+  return out;
 }
 
-function judged(text: string, start: number, end: number, prefix: string): Span {
-  const url = prefix + text.slice(start, end).replace(/\\/g, '/');
-  return { start, end, url, hit: urlProtected(url) };
+function openings(
+  text: string,
+  at: number,
+  anchor: string,
+  breaks: Set<number> | undefined
+): Array<[number, string]> {
+  if (anchor[0] !== '/' && anchor[0] !== '\\') {
+    return schemeStarts(text, at + anchor.indexOf(':'), breaks).map((start) => [start, '']);
+  }
+  if (text[at - 1] === ':') return schemeStarts(text, at - 1, breaks).map((start) => [start, '']);
+  if (at > 0 && !BOUNDARY.test(text[at - 1] ?? '') && !breaks?.has(at)) return [];
+  return [[at, 'https:']];
 }
 
-function urlEnd(text: string, from: number, limit = text.length): number {
-  const stop = Math.min(text.length, from + limit);
+interface Stop {
+  at: number;
+  join: boolean;
+}
+
+interface Pending {
+  start: number;
+  run: number;
+}
+
+interface Memo {
+  from: number;
+  stop: Stop;
+  authority: number;
+  ats: number[];
+  pending: Pending | undefined;
+  work: number;
+  budget: number;
+  seen: Map<string, boolean>;
+}
+
+function stopFrom(text: string, from: number, breaks: Set<number> | undefined): Stop {
   let end = from;
-  while (end < stop && !URL_END.test(text[end] ?? '')) {
+  while (end < text.length && !URL_END.test(text[end] ?? '')) {
+    if (end > from && breaks?.has(end) && NEXT_URL.test(text.slice(end, end + 40))) {
+      return { at: end, join: false };
+    }
     if (JOINS.has(text[end] ?? '') && NEXT_URL.test(text.slice(end + 1, end + 40))) {
-      return text[end - 1] === ')' && end - 1 > from ? end - 1 : end;
+      return { at: end, join: true };
     }
     end += 1;
   }
-  return end;
+  return { at: end, join: false };
 }
 
-function opening(text: string, at: number): { start: number; prefix: string } | undefined {
-  const next = text[at + 2];
-  if (next === undefined || next === '/' || next === '\\' || URL_END.test(next)) return undefined;
-  if (text[at - 1] !== ':') {
-    if (at > 0 && !BOUNDARY.test(text[at - 1] ?? '')) return undefined;
-    return { start: at, prefix: 'https:' };
+function urlEnd(memo: Memo, text: string, from: number, breaks: Set<number> | undefined): number {
+  if (!(memo.from <= from && from < memo.stop.at)) {
+    memo.from = from;
+    memo.stop = stopFrom(text, from, breaks);
   }
-  const start = schemeStart(text, at - 1);
-  return start === at - 1 ? undefined : { start, prefix: '' };
+  const { at, join } = memo.stop;
+  return join && text[at - 1] === ')' && at - 1 > from ? at - 1 : at;
 }
 
-function urlAt(text: string, at: number): Span {
-  const miss = { start: at, end: at + 2, url: '', hit: false };
-  const open = opening(text, at);
-  if (!open) return miss;
-  const capped = urlEnd(text, at + 2, URL_CAP);
-  let span = judged(text, open.start, capped, open.prefix);
-  if (!span.hit && open.prefix === '') {
-    const scheme = text.slice(open.start, at - 1).toLowerCase();
-    const inner = WEB_SCHEMES.find((w) => scheme.length > w.length && scheme.endsWith(w));
-    if (inner !== undefined) span = judged(text, at - 1 - inner.length, capped, '');
+function authorityEnd(memo: Memo, text: string, from: number): number {
+  if (memo.authority < from) {
+    memo.ats = [];
+    AUTHORITY_END.lastIndex = from;
+    let found = AUTHORITY_END.exec(text);
+    while (found && found[0] === '@') {
+      memo.ats.push(found.index);
+      found = AUTHORITY_END.exec(text);
+    }
+    memo.authority = found?.index ?? text.length;
   }
-  if (!span.hit) return miss;
-  if (capped - at - 2 < URL_CAP) return span;
-  return { ...span, end: urlEnd(text, capped) };
+  return memo.authority;
 }
 
-function spans(text: unknown): Span[] {
+function hostStart(memo: Memo, run: number, end: number): number {
+  let low = 0;
+  let high = memo.ats.length - 1;
+  let found = run - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const at = memo.ats[mid] as number;
+    if (at < end) {
+      found = Math.max(found, at);
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return found + 1;
+}
+
+function judgeOnce(memo: Memo, url: string, isProtected: Judge): boolean {
+  const known = memo.seen.get(url);
+  if (known !== undefined) return known;
+  const hit = isProtected(url);
+  if (memo.seen.size < SEEN_CAP) memo.seen.set(url, hit);
+  return hit;
+}
+
+function urlAt(
+  memo: Memo,
+  text: string,
+  found: RegExpExecArray,
+  breaks: Set<number> | undefined,
+  isProtected: Judge
+): Span | undefined {
+  const at = found.index;
+  const run = at + found[0].length;
+  const next = text[run];
+  if (next === undefined || URL_END.test(next)) return undefined;
+  const starts = openings(text, at, found[0], breaks);
+  if (starts.length === 0) return undefined;
+  const end = urlEnd(memo, text, run, breaks);
+  const hostEnd = Math.min(end, authorityEnd(memo, text, run));
+  const host = hostStart(memo, run, hostEnd);
+  const pending = hostEnd === text.length ? memo.pending : undefined;
+  if (pending?.start === -1) {
+    pending.start = (starts[0] as [number, string])[0];
+    pending.run = run;
+  }
+  const long = memo.work > memo.budget && hostEnd - host > HOST_CAP;
+  if (long && pending) return undefined;
+  for (const [start, prefix] of starts) {
+    const scheme = prefix + text.slice(start, run).replace(/\\/g, '/');
+    memo.work += run - start + hostEnd - host;
+    if (!long && !judgeOnce(memo, scheme + text.slice(host, hostEnd), isProtected)) continue;
+    return { start, end, url: prefix + text.slice(start, end).replace(/\\/g, '/') };
+  }
+  return undefined;
+}
+
+function scan(n: Normalized, isProtected: Judge, pending?: Pending): Span[] {
   const out: Span[] = [];
-  if (typeof text !== 'string' || !/[\\/]{2}/.test(text)) return out;
-  SLASHES.lastIndex = 0;
-  for (let found = SLASHES.exec(text); found; found = SLASHES.exec(text)) {
-    const span = urlAt(text, found.index);
-    if (span.hit) out.push(span);
-    SLASHES.lastIndex = span.hit ? Math.max(span.end, found.index + 2) : found.index + 2;
+  const { text, breaks } = n;
+  if (!ANCHOR.test(text)) return out;
+  const memo: Memo = {
+    from: -1,
+    stop: { at: -1, join: false },
+    authority: -1,
+    ats: [],
+    pending,
+    work: 0,
+    budget: 4 * text.length + 65536,
+    seen: new Map(),
+  };
+  ANCHORS.lastIndex = 0;
+  for (let found = ANCHORS.exec(text); found; found = ANCHORS.exec(text)) {
+    const span = urlAt(memo, text, found, breaks, isProtected);
+    if (!span) continue;
+    out.push(span);
+    ANCHORS.lastIndex = Math.max(span.end, ANCHORS.lastIndex);
   }
   return out;
 }
 
+function bare(span: Span): string | undefined {
+  const origin = originOf(span.url);
+  return span.url === origin || span.url === `${origin}/` ? undefined : origin;
+}
+
 export function redactText(text: string): string {
+  const n = normalized(text);
   let out = '';
   let last = 0;
-  for (const span of spans(text)) {
-    const origin = originOf(span.url);
-    if (span.url === origin || span.url === `${origin}/`) continue;
-    out += text.slice(last, span.start) + origin;
-    last = span.end;
+  for (const span of scan(n, judge)) {
+    const origin = bare(span);
+    if (origin === undefined) continue;
+    out += text.slice(last, original(n, span.start)) + origin;
+    last = originalEnd(n, span.end);
   }
   return last === 0 ? text : out + text.slice(last);
 }
 
 export function namesProtectedUrl(text: unknown): boolean {
-  return spans(text).length > 0;
+  return typeof text === 'string' && scan(normalized(text), judge).length > 0;
+}
+
+function tailOf(text: string): string {
+  return text
+    .replace(IGNORED, '\n')
+    .replace(/[\\/]{3,}/g, '//')
+    .slice(-TAIL);
+}
+
+function carried(joined: string, text: string, pending: Pending): string {
+  if (pending.start === -1 || pending.start >= text.length - TAIL) return tailOf(joined);
+  const scheme = text.slice(pending.start, pending.run).replace(/[\\/]{3,}/g, '//');
+  return scheme + text.slice(Math.max(pending.run, text.length - URL_CAP));
+}
+
+export class UrlStream {
+  private head = '';
+  named = false;
+  refused = false;
+
+  push(chunk: string, isProtected: Judge = judge): string {
+    const head = this.head;
+    const joined = head + chunk;
+    const n = normalized(joined);
+    let out = '';
+    let last = head.length;
+    let open = '';
+    const pending: Pending = { start: -1, run: -1 };
+    for (const span of scan(n, isProtected, pending)) {
+      const start = original(n, span.start);
+      const end = originalEnd(n, span.end);
+      if (end === joined.length && joined.length - start > URL_CAP) open = originOf(span.url);
+      const origin = bare(span);
+      if (end <= head.length || origin === undefined) continue;
+      this.named = true;
+      out += joined.slice(last, Math.max(start, last)) + (start >= head.length ? origin : '');
+      last = end;
+    }
+    this.head = open ? `${open}/` : carried(joined, n.text, pending);
+    return last === head.length ? chunk : out + joined.slice(last);
+  }
+
+  pushEncoded(encoded: string): void {
+    const clean = /[^A-Za-z0-9+/=]/.test(encoded) ? encoded.replace(/[\t\n\f\r ]+/g, '') : encoded;
+    for (let at = 0; at < clean.length && !this.named; at += PIECE) {
+      let piece: string;
+      try {
+        piece = atob(clean.slice(at, at + PIECE));
+      } catch {
+        this.named = true;
+        return;
+      }
+      this.push(piece, judgeReadOnly);
+    }
+  }
+}
+
+function encodedNamesProtected(encoded: string): boolean {
+  const stream = new UrlStream();
+  stream.pushEncoded(encoded);
+  return stream.named;
+}
+
+export function streamRead(stream: UrlStream, result: CDPPayload): CDPPayload {
+  if (stream.refused) refuse(ENCODED);
+  const data = result['data'];
+  if (typeof data !== 'string') return result;
+  if (result['base64Encoded'] !== true) {
+    const next = stream.push(data);
+    return next === data ? result : { ...result, data: next };
+  }
+  stream.pushEncoded(data);
+  if (!stream.named) return result;
+  stream.refused = true;
+  refuse(ENCODED);
+}
+
+function encodedNamed(value: Record<string, unknown>): boolean {
+  if (value['base64Encoded'] !== true) return false;
+  return ENCODED_KEYS.some((key) => {
+    const item = value[key];
+    return typeof item === 'string' && encodedNamesProtected(item);
+  });
 }
 
 function cleaned(target: string): string {
@@ -469,6 +724,7 @@ export function redactProtected<T>(value: T): T {
     return out as T;
   }
   const original = value as Record<string, unknown>;
+  if (encodedNamed(original)) refuse(ENCODED);
   const source = redactKeys(withHeaders(original));
   let out = source;
   for (const [key, item] of Object.entries(source)) {
@@ -759,7 +1015,7 @@ export function patternMatches(pattern: unknown, paused: CDPPayload): boolean {
   return wildcard(str(pattern['urlPattern']) ?? '*', requestUrl(paused) ?? '');
 }
 
-class Bounded<V> {
+export class Bounded<V> {
   private readonly map = new Map<string, V>();
   constructor(private readonly limit: number) {}
   get(key: string): V | undefined {
@@ -780,6 +1036,9 @@ class Bounded<V> {
     const value = this.map.get(key);
     this.map.delete(key);
     return value;
+  }
+  clear(): void {
+    this.map.clear();
   }
 }
 
@@ -803,8 +1062,7 @@ export class TabShield {
   private readonly forwarded = new Bounded<true>(2000);
   private readonly pausedUrls = new Bounded<string>(2000);
   private readonly bodyReads = new Bounded<string>(2000);
-  private readonly streams = new Bounded<true>(500);
-  private readonly failedDocuments = new Bounded<true>(200);
+  private readonly streams = new Bounded<UrlStream>(500);
   private readonly hiddenFrames = new Bounded<true>(1000);
   private readonly namedBodies = new Bounded<true>(2000);
   private readonly hops = new Bounded<Hop>(500);
@@ -816,7 +1074,8 @@ export class TabShield {
 
   constructor(
     private readonly send: Send,
-    private readonly onBlocked: () => void
+    private readonly onBlocked: () => void,
+    private readonly failedDocuments = new Bounded<true>(200)
   ) {}
 
   get blocked(): boolean {
@@ -871,10 +1130,6 @@ export class TabShield {
     };
   }
 
-  failedBeforeCommit(url: string): boolean {
-    return this.failedDocuments.has(url.split('#')[0] ?? url);
-  }
-
   block(): void {
     if (this.blockedFlag) return;
     this.blockedFlag = true;
@@ -919,7 +1174,7 @@ export class TabShield {
     }
     if (reroute !== undefined) await this.settleReroute(pauseId, reroute);
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
-    return this.after(method, result ?? {});
+    return this.after(method, result ?? {}, input);
   }
 
   private pendingReroute(
@@ -1154,7 +1409,7 @@ export class TabShield {
     return params;
   }
 
-  private after(method: string, result: CDPPayload): CDPPayload {
+  private after(method: string, result: CDPPayload, params: CDPPayload): CDPPayload {
     if (method === 'Page.captureSnapshot') {
       const data = (str(result['data']) ?? '').replace(/=\r?\n/g, '');
       if (redactText(data) !== data) refuse(PROTECTED_RULES.refusal);
@@ -1162,10 +1417,10 @@ export class TabShield {
     this.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') this.worlds.seen(result['executionContextId']);
     const stream = str(result['stream']);
-    if (stream) this.streams.set(stream, true);
+    if (stream) this.streams.set(stream, new UrlStream());
     const resource = result['resource'];
     const resourceStream = isObj(resource) ? str(resource['stream']) : undefined;
-    if (resourceStream) this.streams.set(resourceStream, true);
+    if (resourceStream) this.streams.set(resourceStream, new UrlStream());
     if (method === 'Page.getFrameTree') this.pruneFrames(result['frameTree']);
     if (method === 'Page.getResourceTree') this.pruneFrames(result['frameTree']);
     if (COOKIE_READERS.has(method)) dropProtectedCookies(result);
@@ -1176,7 +1431,8 @@ export class TabShield {
       if (isProtectedTarget(str(info['url']) ?? '', false, 'unknown'))
         result['targetInfo'] = redacted(info);
     }
-    return result;
+    const read = method === 'IO.read' ? this.streams.get(str(params['handle']) ?? '') : undefined;
+    return read ? streamRead(read, result) : result;
   }
 
   onEvent(method: string, params: CDPPayload | undefined): ShieldEvent[] {

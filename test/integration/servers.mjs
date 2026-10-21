@@ -142,6 +142,28 @@ export async function pages(tls) {
         })
         .end();
     }
+    if (pathname === '/payload') {
+      const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
+      const base = {
+        seven: 'https://seven.sliccy.ai/auth/callback',
+        vault: 'https://vault.sliccy.ai/oauth/mcp-callback',
+        ordinary: 'https://ordinary.test/landing',
+      }[searchParams.get('to') ?? 'ordinary'];
+      const user = Number(searchParams.get('user') ?? 0);
+      const shown = user ? base.replace('://', `://${'a'.repeat(user)}@`) : base;
+      return response
+        .writeHead(200, {
+          'content-type': searchParams.get('type') ?? 'application/octet-stream',
+          'cache-control': 'no-store',
+          'access-control-allow-origin': '*',
+        })
+        .end(
+          Buffer.concat([
+            Buffer.from(searchParams.get('bin') ? [0xff, 0xfe, 0] : []),
+            Buffer.from(`start ${shown}?code=${mark} end`),
+          ])
+        );
+    }
     if (pathname === '/signin') {
       const mark = `S3CR3T${[...(searchParams.get('n') ?? '')].reverse().join('')}`;
       const base = {
