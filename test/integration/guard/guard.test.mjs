@@ -11,7 +11,7 @@ import { launch } from '@ai-ecoverse/slicc-shared-web/harness';
 import { install } from '../client.mjs';
 import { extId } from '../extension-page.mjs';
 import { certificate } from '../servers.mjs';
-import { capabilities, entries, report, targets } from './guard.mjs';
+import { batches, capabilities, entries, report, targets } from './guard.mjs';
 
 const set = JSON.parse(
   await readFile(
@@ -296,12 +296,11 @@ for (const transport of transports) {
     const vectors = only ? { ...set, vectors: set.vectors.filter((v) => only.test(v.id)) } : set;
     const started = Date.now();
     let done = 0;
-    const execution = await run(vectors, {
+    const options = {
       clientFactory: (metadata) => clients(transport, metadata),
       targets: targets(transport),
       capabilities: capabilities(transport),
       variant: variants,
-      parallel,
       fixture,
       rowTimeoutMs: 180000,
       log(row) {
@@ -313,8 +312,16 @@ for (const transport of transports) {
           `guard ${transport} ${done} ${row.id} ${row.target} ${row.variant} ${verdict}${why}`
         );
       },
-    });
-    const summary = report(vectors, execution.results, sha, transport);
+    };
+    const results = [];
+    for (const batch of batches(vectors, transport)) {
+      const execution = await run(batch.vectors, {
+        ...options,
+        parallel: batch.parallel ?? parallel,
+      });
+      results.push(...execution.results);
+    }
+    const summary = report(vectors, results, sha, transport);
     const out = new URL('../../../artifacts/guard/', import.meta.url);
     await mkdir(out, { recursive: true });
     await writeFile(

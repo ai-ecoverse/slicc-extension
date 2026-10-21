@@ -10,6 +10,14 @@ export function capabilities(transport) {
   };
 }
 
+export function batches(vectors, transport) {
+  const serial = (vector) => transport === 'seven' && vector.id.startsWith('C8.protected-');
+  return [
+    { vectors: { ...vectors, vectors: vectors.vectors.filter((v) => !serial(v)) } },
+    { vectors: { ...vectors, vectors: vectors.vectors.filter(serial) }, parallel: 1 },
+  ].filter((batch) => batch.vectors.vectors.length > 0);
+}
+
 export const entries = {
   seven: { origin: 'https://seven.sliccy.ai', path: '/doc?n=guard-client' },
   'six-bridge': { origin: 'https://www.sliccy.ai', path: '/doc?n=guard-client&slicc=leader' },
