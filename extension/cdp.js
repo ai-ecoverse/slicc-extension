@@ -861,7 +861,9 @@ class Connection {
 
   async rerouted(tabId, tab, requestId, params) {
     const waiting = tab.reroutes.get(requestId);
-    if (!waiting || params.responseStatusCode === undefined) return false;
+    const settled =
+      params.responseStatusCode !== undefined || params.responseErrorReason !== undefined;
+    if (!waiting || !settled) return false;
     tab.reroutes.delete(requestId);
     const url = requestUrl(params);
     const named =

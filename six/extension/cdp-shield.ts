@@ -214,6 +214,7 @@ const URL_END = /[\s"'<>`\u0000-\u001f]/;
 const BOUNDARY = /[\s<>"'`=,;([{]/;
 const SLASHES = /[\\/]{2}/g;
 const JOINS = new Set([',', ';', '(', ')']);
+const URL_CAP = 4096;
 const NEXT_URL = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]{2}[^\\/]/i;
 export const KEY_COLLISION =
   'slicc: refused: two keys of this payload reduce to the same protected origin';
@@ -250,9 +251,10 @@ function judged(text: string, start: number, end: number, prefix: string): Span 
   return { start, end, url, hit: urlProtected(url) };
 }
 
-function urlEnd(text: string, from: number): number {
+function urlEnd(text: string, from: number, limit = text.length): number {
+  const stop = Math.min(text.length, from + limit);
   let end = from;
-  while (end < text.length && !URL_END.test(text[end] ?? '')) {
+  while (end < stop && !URL_END.test(text[end] ?? '')) {
     if (JOINS.has(text[end] ?? '') && NEXT_URL.test(text.slice(end + 1, end + 40))) {
       return text[end - 1] === ')' && end - 1 > from ? end - 1 : end;
     }
@@ -261,22 +263,31 @@ function urlEnd(text: string, from: number): number {
   return end;
 }
 
-function urlAt(text: string, at: number): Span {
-  const end = urlEnd(text, at + 2);
-  const miss = { start: at, end, url: '', hit: false };
-  if (end === at + 2 || /[\\/]/.test(text[at + 2] ?? '')) return miss;
+function opening(text: string, at: number): { start: number; prefix: string } | undefined {
+  const next = text[at + 2];
+  if (next === undefined || next === '/' || next === '\\' || URL_END.test(next)) return undefined;
   if (text[at - 1] !== ':') {
-    if (at > 0 && !BOUNDARY.test(text[at - 1] ?? '')) return miss;
-    return judged(text, at, end, 'https:');
+    if (at > 0 && !BOUNDARY.test(text[at - 1] ?? '')) return undefined;
+    return { start: at, prefix: 'https:' };
   }
   const start = schemeStart(text, at - 1);
-  if (start === at - 1) return miss;
-  const whole = judged(text, start, end, '');
-  if (whole.hit) return whole;
-  const scheme = text.slice(start, at - 1).toLowerCase();
-  const inner = WEB_SCHEMES.find((s) => scheme.length > s.length && scheme.endsWith(s));
-  if (inner === undefined) return miss;
-  return judged(text, at - 1 - inner.length, end, '');
+  return start === at - 1 ? undefined : { start, prefix: '' };
+}
+
+function urlAt(text: string, at: number): Span {
+  const miss = { start: at, end: at + 2, url: '', hit: false };
+  const open = opening(text, at);
+  if (!open) return miss;
+  const capped = urlEnd(text, at + 2, URL_CAP);
+  let span = judged(text, open.start, capped, open.prefix);
+  if (!span.hit && open.prefix === '') {
+    const scheme = text.slice(open.start, at - 1).toLowerCase();
+    const inner = WEB_SCHEMES.find((w) => scheme.length > w.length && scheme.endsWith(w));
+    if (inner !== undefined) span = judged(text, at - 1 - inner.length, capped, '');
+  }
+  if (!span.hit) return miss;
+  if (capped - at - 2 < URL_CAP) return span;
+  return { ...span, end: urlEnd(text, capped) };
 }
 
 function spans(text: unknown): Span[] {
@@ -877,7 +888,9 @@ export class TabShield {
 
   private rerouted(paused: CDPPayload, id: string): boolean {
     const waiting = this.reroutes.get(id);
-    if (!waiting || paused['responseStatusCode'] === undefined) return false;
+    const settled =
+      paused['responseStatusCode'] !== undefined || paused['responseErrorReason'] !== undefined;
+    if (!waiting || !settled) return false;
     this.reroutes.delete(id);
     const url = requestUrl(paused) ?? '';
     const named = urlProtected(url) || headersNameProtected(paused['responseHeaders'], url);
