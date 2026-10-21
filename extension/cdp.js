@@ -96,8 +96,8 @@ function anyProtected(text, options) {
   return urlProtected(guard, text, options);
 }
 
-function redacted(value) {
-  return redactProtected(value, anyProtected);
+function redacted(value, method) {
+  return redactProtected(value, anyProtected, method);
 }
 
 function unfolded(text) {
@@ -374,11 +374,11 @@ class Connection {
     port.onDisconnect.addListener(this.shutdown);
   }
 
-  post(message) {
+  post(message, method = message.method) {
     if (this.closed) return;
     let out;
     try {
-      out = redacted(message);
+      out = redacted(message, method);
     } catch (error) {
       if (typeof message?.id !== 'number') return;
       out = { id: message.id, error: String(error?.message ?? error) };
@@ -1539,7 +1539,7 @@ class Connection {
 
   async run(message) {
     try {
-      this.post({ id: message.id, result: await this.dispatch(message) });
+      this.post({ id: message.id, result: await this.dispatch(message) }, message.method);
     } catch (error) {
       this.post({ id: message.id, error: String(error?.message ?? error) });
     }
