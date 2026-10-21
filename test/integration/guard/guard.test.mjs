@@ -314,7 +314,7 @@ for (const transport of transports) {
       },
     };
     const results = [];
-    for (const batch of batches(vectors, transport)) {
+    for (const batch of batches(vectors)) {
       const execution = await run(batch.vectors, {
         ...options,
         parallel: batch.parallel ?? parallel,

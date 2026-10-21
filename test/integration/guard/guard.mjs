@@ -10,8 +10,8 @@ export function capabilities(transport) {
   };
 }
 
-export function batches(vectors, transport) {
-  const serial = (vector) => transport === 'seven' && vector.id.startsWith('C8.protected-');
+export function batches(vectors) {
+  const serial = (vector) => vector.id.startsWith('C8.protected-');
   return [
     { vectors: { ...vectors, vectors: vectors.vectors.filter((v) => !serial(v)) } },
     { vectors: { ...vectors, vectors: vectors.vectors.filter(serial) }, parallel: 1 },
