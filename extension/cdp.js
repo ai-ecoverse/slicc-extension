@@ -35,6 +35,7 @@ import {
   hopMatches,
   hopOf,
   initScriptPrefix,
+  NetworkStreams,
   namesProtectedStorage,
   PROFILED,
   patternMatches,
@@ -742,6 +743,7 @@ class Connection {
         worlds: new Worlds(),
         runtime: new Set(),
         requests: new Map(),
+        networkStreams: new NetworkStreams(anyProtected),
         held: new Map(),
         settled: new Set(),
         hops: new Map(),
@@ -1119,8 +1121,15 @@ class Connection {
     if (method === 'IO.resolveBlob' && typeof result.uuid === 'string') {
       this.openStream(`blob:${result.uuid}`);
     }
+    return this.readResult(tab, method, params, result);
+  }
+
+  readResult(tab, method, params, result) {
     if (method === 'IO.close') this.state.streams.delete(textOf(params.handle));
     if (method === 'IO.read') return streamRead(this.state.streams.get(params.handle), result);
+    if (method === 'Network.streamResourceContent') {
+      return tab.networkStreams.buffer(textOf(params.requestId), result);
+    }
     return result;
   }
 
@@ -1439,6 +1448,16 @@ class Connection {
     const tab = this.tabState(tabId);
     if (!tab) return;
     const p = params ?? {};
+    if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
+      tab.networkStreams.end(textOf(p.requestId));
+    }
+    if (method === 'Network.dataReceived' && typeof p.data === 'string') {
+      try {
+        tab.networkStreams.read(textOf(p.requestId), p.data);
+      } catch {
+        return;
+      }
+    }
     if (method === 'Fetch.requestPaused' || method === 'Fetch.authRequired') {
       void this.onPaused(tabId, method, p).catch(() => undefined);
       return;

@@ -438,6 +438,32 @@ export function streamRead(stream, result) {
   throw new Error(ENCODED);
 }
 
+export class NetworkStreams {
+  constructor(isProtected) {
+    this.isProtected = isProtected;
+    this.streams = new Map();
+  }
+
+  buffer(id, result) {
+    if (!this.streams.has(id)) {
+      if (!id || this.streams.size >= 500) throw new Error(ENCODED);
+      this.streams.set(id, new UrlStream(this.isProtected));
+    }
+    this.read(id, result.bufferedData);
+    return result;
+  }
+
+  read(id, data) {
+    const stream = this.streams.get(id);
+    if (!stream) throw new Error(ENCODED);
+    streamRead(stream, { data, base64Encoded: true });
+  }
+
+  end(id) {
+    this.streams.delete(id);
+  }
+}
+
 function encodedNamed(value, isProtected, method) {
   const keys = value.base64Encoded === true ? [...ENCODED_KEYS] : [];
   if (method === 'Network.dataReceived') keys.push('data');

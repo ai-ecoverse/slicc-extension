@@ -159,6 +159,16 @@ export async function pages(tls) {
       });
       response.write(Buffer.from([0xff, 0xfe, 0]));
       const buffered = searchParams.get('buffered') === '1';
+      const split = searchParams.get('split');
+      if (split) {
+        const at = marker.indexOf('://') + 5;
+        const first = marker.subarray(0, at);
+        const last = marker.subarray(at);
+        if (split === 'buffered') response.write(first);
+        else setTimeout(() => response.write(first), 500);
+        setTimeout(() => response.end(last), 1000);
+        return;
+      }
       if (buffered) response.write(marker);
       setTimeout(() => response.end(buffered ? undefined : marker), 500);
       return;
