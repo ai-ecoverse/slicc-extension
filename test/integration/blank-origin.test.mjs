@@ -125,9 +125,6 @@ async function flow(page, start) {
           href: await h.evaluate(sessionId, 'location.href'),
           frameId: tree.result?.frameTree?.frame?.id,
           detached: h.detached(sessionId),
-          document: params?.child
-            ? await h.attempt('DOM.getDocument', { depth: -1, pierce: true }, sessionId)
-            : undefined,
           child: params?.child
             ? await h.evaluate(
                 sessionId,
@@ -139,12 +136,6 @@ async function flow(page, start) {
       { label, method, params, wait }
     );
     step.raw = await rawOrigin(step.frameId ?? step.answer.result?.frameId);
-    if (params?.child) {
-      step.rawChild = await rawEvaluate(
-        step.frameId,
-        'document.querySelector("iframe").contentWindow.origin + " " + document.querySelector("iframe").contentWindow.location.href'
-      );
-    }
     steps.push(step);
   }
   const done = await page.evaluate(async () => {
@@ -169,18 +160,10 @@ for (const transport of transports) {
       assert.ok(run.steps, JSON.stringify(run));
       const step = (label) => run.steps.find((s) => s.label === label);
       for (const s of run.steps) {
-        if (s.label === 'child about:blank') {
-          assert.equal(s.origin.error, refused, JSON.stringify(s));
-          assert.equal(s.href.error, refused, JSON.stringify(s));
-          assert.equal(s.child.error, refused, JSON.stringify(s));
-          assert.equal(s.raw, 'https://ordinary.test', JSON.stringify(s));
-          assert.equal(s.document.result?.root?.nodeName, '#document', JSON.stringify(s));
-        } else {
-          assert.equal(typeof s.origin, 'string', `${s.label}: ${JSON.stringify(s)}`);
-          assert.ok(!s.origin.startsWith('chrome-extension:'), `${s.label}: ${JSON.stringify(s)}`);
-          assert.equal(s.raw, s.origin, `${s.label}: ${JSON.stringify(s)}`);
-        }
+        assert.equal(typeof s.origin, 'string', `${s.label}: ${JSON.stringify(s)}`);
+        assert.ok(!s.origin.startsWith('chrome-extension:'), `${s.label}: ${JSON.stringify(s)}`);
         assert.equal(s.detached, false, `${s.label}: ${JSON.stringify(s)}`);
+        assert.equal(s.raw, s.origin, `${s.label}: ${JSON.stringify(s)}`);
       }
       assert.equal(run.detaches, 0);
       assert.equal(run.reply, 42);
@@ -227,7 +210,7 @@ for (const transport of transports) {
       const child = step('child about:blank');
       assert.equal(typeof child.answer.result?.loaderId, 'string', JSON.stringify(child));
       assert.notEqual(child.answer.result?.frameId, child.frameId);
-      assert.equal(child.rawChild, 'https://ordinary.test about:blank', JSON.stringify(child));
+      assert.equal(child.child, 'https://ordinary.test about:blank', JSON.stringify(child));
     });
   }
 
@@ -359,47 +342,42 @@ for (const transport of transports) {
     await page.evaluate((id) => h.close(id), run.targetId);
   });
 
-  test(`${transport} an ordinary page with sandboxed about:blank iframes still attaches and answers`, async (t) => {
-    const page = await client(t, transport);
-    const url = 'https://ordinary.test/doc?n=sandboxed-children';
-    const run = await page.evaluate(async (url) => {
-      const created = await h.cdp.send('Target.createTarget', { url });
-      const first = await h.cdp.send('Target.attachToTarget', {
-        targetId: created.targetId,
-        flatten: true,
-      });
-      await h.until(
-        async () => (await h.evaluate(first.sessionId, 'document.readyState')) === 'complete'
+  for (const opaque of [false, true]) {
+    test(`${transport} ${opaque ? 'opaque' : 'same-origin'} sandboxed about:blank iframes still attach and ${opaque ? 'seal realm reads' : 'answer'}`, async (t) => {
+      const page = await client(t, transport);
+      const url = 'https://ordinary.test/doc?n=sandboxed-children';
+      const run = await page.evaluate(
+        async ({ url, opaque }) => {
+          const created = await h.cdp.send('Target.createTarget', { url });
+          const first = await h.cdp.send('Target.attachToTarget', {
+            targetId: created.targetId,
+            flatten: true,
+          });
+          await h.until(
+            async () => (await h.evaluate(first.sessionId, 'document.readyState')) === 'complete'
+          );
+          const made = await h.evaluate(
+            first.sessionId,
+            `Promise.all(${JSON.stringify(opaque ? ['', 'allow-scripts'] : ['allow-same-origin', 'allow-scripts allow-same-origin'])}.map((flags) => new Promise((resolve) => { const f = document.createElement('iframe'); f.setAttribute('sandbox', flags); f.onload = () => resolve(flags); f.src = 'about:blank'; document.body.append(f); }))).then((all) => all.length)`
+          );
+          await h.cdp.send('Target.detachFromTarget', { sessionId: first.sessionId });
+          const again = await h.attempt('Target.attachToTarget', {
+            targetId: created.targetId,
+            flatten: true,
+          });
+          const sessionId = again.result?.sessionId;
+          const reply = sessionId
+            ? await h.evaluate(sessionId, 'document.querySelectorAll("iframe").length')
+            : undefined;
+          await h.close(created.targetId);
+          return { made, again, reply };
+        },
+        { url, opaque }
       );
-      const made = await h.evaluate(
-        first.sessionId,
-        `Promise.all(['', 'allow-scripts', 'allow-same-origin', 'allow-scripts allow-same-origin'].map((flags) => new Promise((resolve) => { const f = document.createElement('iframe'); f.setAttribute('sandbox', flags); f.onload = () => resolve(flags); f.src = 'about:blank'; document.body.append(f); }))).then((all) => all.length)`
-      );
-      await h.cdp.send('Target.detachFromTarget', { sessionId: first.sessionId });
-      const again = await h.attempt('Target.attachToTarget', {
-        targetId: created.targetId,
-        flatten: true,
-      });
-      const sessionId = again.result?.sessionId;
-      const reply = sessionId
-        ? await h.evaluate(sessionId, 'document.querySelectorAll("iframe").length')
-        : undefined;
-      const document = sessionId
-        ? await h.attempt('DOM.getDocument', { depth: -1, pierce: true }, sessionId)
-        : undefined;
-      const selected = document?.result?.root?.nodeId
-        ? await h.attempt(
-            'DOM.querySelectorAll',
-            { nodeId: document.result.root.nodeId, selector: 'iframe' },
-            sessionId
-          )
-        : undefined;
-      await h.close(created.targetId);
-      return { made, again, reply, selected };
-    }, url);
-    assert.equal(run.made, 4, JSON.stringify(run));
-    assert.equal(typeof run.again.result?.sessionId, 'string', JSON.stringify(run));
-    assert.equal(run.reply.error, refused, JSON.stringify(run));
-    assert.equal(run.selected.result?.nodeIds?.length, 4, JSON.stringify(run));
-  });
+      assert.equal(run.made, 2, JSON.stringify(run));
+      assert.equal(typeof run.again.result?.sessionId, 'string', JSON.stringify(run));
+      if (opaque) assert.equal(run.reply.error, refused, JSON.stringify(run));
+      else assert.equal(run.reply, 2, JSON.stringify(run));
+    });
+  }
 }

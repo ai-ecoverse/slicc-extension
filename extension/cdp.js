@@ -52,6 +52,7 @@ import {
   refusedOutright,
   requestKey,
   requestUrl,
+  resolveFrameOrigins,
   responseNamesProtected,
   sameDocument,
   scopedBinding,
@@ -988,6 +989,9 @@ class Connection {
     const tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames').catch(
       () => refusal()
     );
+    await resolveFrameOrigins(tree?.frameTree, tab.uncertain ?? new Set(), (id) =>
+      this.documentOrigin(tabId, id)
+    );
     const frames = frameSets(tree?.frameTree, (frame) => this.frameHidden(tab, frame));
     if (frames.visible.size === 0) refusal();
     const seal = { ...frames, nodes: new Set() };
@@ -1233,7 +1237,7 @@ class Connection {
     let result = (await this.send(tabId, method, forwarded)) ?? {};
     if (seal) result = await this.unseal(tabId, tab, seal, method, result);
     if (method === 'Page.captureSnapshot') snapshotChecked(result);
-    this.learn(tab, method, result);
+    await this.learn(tabId, tab, method, result);
     if (cookieReader(method)) result = dropProtectedCookies(guard, result);
     if (typeof result.stream === 'string') this.openStream(result.stream);
     if (method === 'IO.resolveBlob' && typeof result.uuid === 'string') {
@@ -1255,10 +1259,13 @@ class Connection {
     this.state.streams.set(handle, new UrlStream(anyProtected));
   }
 
-  learn(tab, method, result) {
+  async learn(tabId, tab, method, result) {
     tab.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') tab.worlds.seen(result.executionContextId);
     if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
+      await resolveFrameOrigins(result.frameTree, tab.uncertain ?? new Set(), (id) =>
+        this.documentOrigin(tabId, id)
+      );
       this.pruneFrames(tab, result.frameTree);
     }
   }
@@ -1509,15 +1516,18 @@ class Connection {
       this.release(tabId);
       return true;
     }
-    let kind = tab.worlds.hideable(ctx, tab.mainFrameId, (origin) => this.protectedOrigin(origin));
+    const kind = tab.worlds.hideable(ctx, tab.mainFrameId, (origin) =>
+      this.protectedOrigin(origin)
+    );
     if (
       ctx.auxData?.isDefault !== false &&
       frameId &&
       frameId !== tab.mainFrameId &&
       unknownFrame({ securityOrigin: ctx.origin, url: ctx.origin })
     ) {
-      tab.frames.set(frameId, true);
-      kind = 'foreign';
+      tab.uncertain ??= new Set();
+      tab.uncertain.add(frameId);
+      while (tab.uncertain.size > 1000) tab.uncertain.delete(tab.uncertain.values().next().value);
     }
     if (tab.worlds.add(ctx, kind)) this.quietProfilers(tabId);
     return kind !== undefined;

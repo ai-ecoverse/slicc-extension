@@ -1190,6 +1190,22 @@ const REALM_READS = new Set([
   'Runtime.bindingCalled',
 ]);
 
+export async function resolveFrameOrigins(tree, uncertain, readOrigin) {
+  const pending = [...(Array.isArray(tree?.childFrames) ? tree.childFrames : [])];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    const frame = node?.frame;
+    if (!frame || typeof frame.id !== 'string') continue;
+    if (
+      (typeof frame.url === 'string' && /^about:(?:blank|srcdoc)(?:[?#]|$)/i.test(frame.url)) ||
+      uncertain.has(frame.id)
+    ) {
+      frame.securityOrigin = await readOrigin(frame.id).catch(() => 'null');
+    }
+    if (Array.isArray(node.childFrames)) pending.push(...node.childFrames);
+  }
+}
+
 export function unknownFrame(frame) {
   if (typeof frame.securityOrigin !== 'string' || typeof frame.url !== 'string') return true;
   try {

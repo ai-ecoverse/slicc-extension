@@ -65,6 +65,29 @@ const REALM_READS = new Set([
   'Runtime.bindingCalled',
 ]);
 
+export async function resolveFrameOrigins(
+  tree: unknown,
+  uncertain: Ids,
+  readOrigin: (id: string) => Promise<string>
+): Promise<void> {
+  const pending = isObj(tree) ? [...list(tree['childFrames'])] : [];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!isObj(node) || !isObj(node['frame'])) continue;
+    const frame = node['frame'];
+    const id = frame['id'];
+    if (typeof id !== 'string') continue;
+    const url = frame['url'];
+    if (
+      (typeof url === 'string' && /^about:(?:blank|srcdoc)(?:[?#]|$)/i.test(url)) ||
+      uncertain.has(id)
+    ) {
+      frame['securityOrigin'] = await readOrigin(id).catch(() => 'null');
+    }
+    pending.push(...list(node['childFrames']));
+  }
+}
+
 export function unknownFrame(frame: CDPPayload): boolean {
   if (typeof frame['securityOrigin'] !== 'string' || typeof frame['url'] !== 'string') return true;
   try {

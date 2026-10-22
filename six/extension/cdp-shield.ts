@@ -5,6 +5,7 @@ import {
   nodeSelectors,
   pruneSealed,
   pruneSnapshot,
+  resolveFrameOrigins,
   type Seal,
   sealedEvent,
   sealedNodes,
@@ -1111,6 +1112,7 @@ export class TabShield {
   private readonly streams = new Bounded<UrlStream>(500);
   private readonly networkStreams = new NetworkStreams();
   private readonly hiddenFrames = new Bounded<true>(1000);
+  private readonly uncertainFrames = new Bounded<true>(1000);
   private readonly namedBodies = new Bounded<true>(2000);
   private readonly hops = new Bounded<Hop>(500);
   private readonly reroutes = new Map<string, (allowed: boolean) => void>();
@@ -1240,6 +1242,9 @@ export class TabShield {
     if (!sealedRead(method)) return undefined;
     const tree = await this.send('Page.getFrameTree', {}).catch(() =>
       refuse(PROTECTED_RULES.refusal)
+    );
+    await resolveFrameOrigins(tree['frameTree'], this.uncertainFrames, (id) =>
+      this.documentOrigin(id)
     );
     const frames = frameSets(tree['frameTree'], (frame) => this.frameHidden(frame));
     if (frames.visible.size === 0) refuse(PROTECTED_RULES.refusal);
@@ -1583,7 +1588,7 @@ export class TabShield {
     return params;
   }
 
-  private after(method: string, result: CDPPayload, params: CDPPayload): CDPPayload {
+  private async after(method: string, result: CDPPayload, params: CDPPayload): Promise<CDPPayload> {
     if (method === 'Page.captureSnapshot') {
       const data = (str(result['data']) ?? '').replace(/=\r?\n/g, '');
       if (redactText(data) !== data) refuse(PROTECTED_RULES.refusal);
@@ -1595,8 +1600,12 @@ export class TabShield {
     const resource = result['resource'];
     const resourceStream = isObj(resource) ? str(resource['stream']) : undefined;
     if (resourceStream) this.streams.set(resourceStream, new UrlStream());
-    if (method === 'Page.getFrameTree') this.pruneFrames(result['frameTree']);
-    if (method === 'Page.getResourceTree') this.pruneFrames(result['frameTree']);
+    if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
+      await resolveFrameOrigins(result['frameTree'], this.uncertainFrames, (id) =>
+        this.documentOrigin(id)
+      );
+      this.pruneFrames(result['frameTree']);
+    }
     if (COOKIE_READERS.has(method)) dropProtectedCookies(result);
     if (method === 'Page.getNavigationHistory') redactHistory(result);
     if (method === 'Target.getTargetInfo' && isObj(result['targetInfo'])) {
@@ -1763,12 +1772,10 @@ export class TabShield {
     if (aux['isDefault'] !== false && kind === undefined) {
       if (frame) this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
       const child = frame !== undefined && frame !== this.mainFrameId;
-      if (
-        child &&
-        (extensionOrigin(origin) ||
-          unknownFrame({ securityOrigin: origin, url: origin }) ||
-          (frame && this.hiddenFrames.has(frame)))
-      ) {
+      if (child && unknownFrame({ securityOrigin: origin, url: origin })) {
+        this.uncertainFrames.set(frame, true);
+      }
+      if (child && (extensionOrigin(origin) || (frame && this.hiddenFrames.has(frame)))) {
         if (frame) this.hiddenFrames.set(frame, true);
         kind = 'foreign';
       } else if (urlProtected(origin)) {
