@@ -4,7 +4,6 @@ import { createHash, createPublicKey } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, before, test } from 'node:test';
 import { fixtureServer } from '@ai-ecoverse/slicc-browsers/fixture';
 import { waitFor } from '@ai-ecoverse/slicc-browsers/guard-driver.mjs';
 import { run } from '@ai-ecoverse/slicc-browsers/guard-runner';
@@ -19,6 +18,7 @@ import {
   entries,
   report,
   send,
+  strict,
   targets,
   until,
   waitEvent,
@@ -29,10 +29,7 @@ const set = JSON.parse(
     new URL('../../../node_modules/@ai-ecoverse/slicc-browsers/guard-vectors.json', import.meta.url)
   )
 );
-const transports = (process.env.GUARD_TRANSPORT ?? 'seven,six-bridge').split(',');
-const variants = (process.env.GUARD_VARIANT ?? 'prompt,lagging').split(',');
 const parallel = Number(process.env.GUARD_PARALLEL ?? 4);
-const only = process.env.GUARD_ONLY ? new RegExp(process.env.GUARD_ONLY) : undefined;
 const sha =
   process.env.GUARD_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const hosts = [
@@ -60,22 +57,24 @@ const sharing = [
   '--disable-features=IsolateOrigins,site-per-process',
 ];
 
-before(async () => {
+async function setUp() {
   dir = await mkdtemp(join(tmpdir(), 'slicc-extension-guard-'));
   const tls = await certificate(dir);
   spki = createHash('sha256')
     .update(createPublicKey(tls.cert).export({ type: 'spki', format: 'der' }))
     .digest('base64');
   fixture = await fixtureServer({ tls });
-});
+}
 
-after(async () => {
+async function tearDown() {
   await Promise.allSettled(
     [...pool, ...unisolated].map(async (browser) => (await browser)?.close())
   );
+  pool.length = 0;
+  unisolated.length = 0;
   await fixture?.close();
   if (dir) await rm(dir, { recursive: true, force: true });
-});
+}
 
 async function evaluate(cdp, sessionId, expression) {
   const answer = await send(
@@ -302,57 +301,60 @@ async function clients(transport, metadata) {
   return { client: made.client, unguarded: own.observer, close: made.close };
 }
 
-for (const transport of transports) {
-  test(`guard vectors on ${transport}, ${variants.join(' and ')}`, async () => {
-    const vectors = only ? { ...set, vectors: set.vectors.filter((v) => only.test(v.id)) } : set;
-    const started = Date.now();
-    let done = 0;
-    const tally = {};
-    const options = {
-      clientFactory: (metadata) => clients(transport, metadata),
-      targets: targets(transport),
-      capabilities: capabilities(transport),
-      variant: variants,
-      fixture,
-      rowTimeoutMs: 180000,
-      parallel,
-      debug: (entry) => carrier(tally, entry),
-      log(row) {
-        done += 1;
-        const verdict = `${row.control}/${row.guarded}/${row.live}`;
-        const why =
-          verdict === 'pass/pass/pass' ? '' : ` ${row.why ?? ''} ${(row.errors ?? []).join(' | ')}`;
-        console.log(
-          `guard ${transport} ${done} ${row.id} ${row.target} ${row.variant} ${verdict}${why}`
-        );
-      },
-    };
-    const { results } = await run(vectors, options);
-    const summary = report(vectors, results, sha, transport);
-    const out = new URL('../../../artifacts/guard/', import.meta.url);
-    await mkdir(out, { recursive: true });
-    await writeFile(
-      new URL(`${transport}-${variants.join('-')}.json`, out),
-      `${JSON.stringify(
-        {
-          transport,
-          variants,
-          sha,
-          seconds: Math.round((Date.now() - started) / 1000),
-          carriers: tally,
-          ...summary,
-        },
-        null,
-        2
-      )}\n`
-    );
-    console.log(summary.line);
-    console.log(`skips ${JSON.stringify(summary.skips)}`);
-    console.log(`carriers ${JSON.stringify(tally)}`);
-    assert.deepEqual(
-      summary.failed.map((row) => `${row.id} ${row.target} ${row.variant}: ${row.why}`),
-      []
-    );
-    assert.ok(only || summary.pass, summary.line);
-  });
+async function sweep(transport, variant) {
+  const started = Date.now();
+  let done = 0;
+  const tally = {};
+  const options = {
+    clientFactory: (metadata) => clients(transport, metadata),
+    targets: targets(transport),
+    capabilities: capabilities(transport),
+    variant: [variant],
+    fixture,
+    rowTimeoutMs: 180000,
+    parallel,
+    debug: (entry) => carrier(tally, entry),
+    log(row) {
+      done += 1;
+      const verdict = `${row.control}/${row.guarded}/${row.live}`;
+      const why =
+        verdict === 'pass/pass/pass' ? '' : ` ${row.why ?? ''} ${(row.errors ?? []).join(' | ')}`;
+      console.log(
+        `guard ${transport} ${variant} ${done} ${row.id} ${row.target} ${row.variant} ${verdict}${why}`
+      );
+    },
+  };
+  const { results } = await run(set, options);
+  return { results, tally, seconds: Math.round((Date.now() - started) / 1000) };
+}
+
+export async function runGuard(transport, variant) {
+  await setUp();
+  let swept;
+  try {
+    swept = await sweep(transport, variant);
+  } finally {
+    await tearDown();
+  }
+  const { results, tally, seconds } = swept;
+  const summary = report(set, results, sha, transport);
+  const problems = strict(summary);
+  const out = new URL('../../../artifacts/guard/', import.meta.url);
+  await mkdir(out, { recursive: true });
+  await writeFile(
+    new URL(`${transport}-${variant}.json`, out),
+    `${JSON.stringify(
+      { transport, variants: [variant], sha, seconds, carriers: tally, problems, ...summary },
+      null,
+      2
+    )}\n`
+  );
+  console.log(summary.line);
+  console.log(`skips ${JSON.stringify(summary.skips)}`);
+  console.log(`carriers ${JSON.stringify(tally)}`);
+  console.log(
+    `passed ${summary.passed} (${summary.passedClean} without ran/notes), not-run ${summary.notRun.length} ids, failed ${summary.failed.length}, incomplete ${summary.incomplete.length}, forged ${summary.forged.length}, missing ${summary.missing.length}`
+  );
+  assert.deepEqual(problems, [], summary.line);
+  assert.match(summary.line, /^GUARD-PASS slicc-extension@/);
 }

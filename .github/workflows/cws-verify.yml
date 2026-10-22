@@ -3,7 +3,6 @@ name: cws-verify
 on:
   schedule:
     - cron: "23 * * * *"
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,7 +18,7 @@ jobs:
   probe:
     name: the version the store serves, on main
     if: github.ref == 'refs/heads/main'
-    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -41,13 +40,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ITEM_ID: ${{ vars.CHROME_WEB_STORE_ITEM_ID }}
-        run: node scripts/cert/cws-verify.mjs --probe
+        run: node scripts/cws-verify.mjs --probe
 
   rebuild:
     name: rebuild the release from its tag, without a token that can write
     needs: probe
     if: needs.probe.outputs.recorded == 'false'
-    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
@@ -84,7 +83,7 @@ jobs:
     name: store crx = release zip = rebuild
     needs: [probe, rebuild]
     if: ${{ !cancelled() && needs.probe.result == 'success' }}
-    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -116,4 +115,4 @@ jobs:
         run: |
           args=(--expect "$VERSION")
           [ -n "$REBUILT" ] && args+=(--rebuilt "$REBUILT")
-          node scripts/gate.mjs cws-verify -- node scripts/cert/cws-verify.mjs "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          node scripts/cws-verify.mjs "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"

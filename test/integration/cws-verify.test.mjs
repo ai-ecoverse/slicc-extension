@@ -7,7 +7,7 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const cert = join(root, 'scripts/cert');
+const script = join(root, 'scripts/cws-verify.mjs');
 const scratch = mkdtempSync(join(tmpdir(), 'cws-verify-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -46,18 +46,7 @@ function verify(storeFiles, releaseFiles, rebuiltFiles) {
       code: 0,
       out: execFileSync(
         process.execPath,
-        [
-          join(root, 'scripts/gate.mjs'),
-          'cws-verify',
-          '--',
-          process.execPath,
-          join(cert, 'cws-verify.mjs'),
-          '--crx',
-          s,
-          '--zip',
-          join(scratch, 'release.zip'),
-          ...rebuilt,
-        ],
+        [script, '--crx', s, '--zip', join(scratch, 'release.zip'), ...rebuilt],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
       ),
     };
@@ -113,11 +102,9 @@ test('cws-verify refuses a zip entry whose bytes fail its CRC', () => {
   zip(join(scratch, 'release'), { 'manifest.json': manifest, 'cdp.js': 'guard();\n' });
   let out = '';
   try {
-    execFileSync(
-      process.execPath,
-      [join(cert, 'cws-verify.mjs'), '--crx', s, '--zip', join(scratch, 'release.zip')],
-      { encoding: 'utf8' }
-    );
+    execFileSync(process.execPath, [script, '--crx', s, '--zip', join(scratch, 'release.zip')], {
+      encoding: 'utf8',
+    });
   } catch (err) {
     out = err.stdout;
   }

@@ -137,3 +137,23 @@ export function report(set, results, sha, transport) {
     results,
   };
 }
+
+const where = (row) => `${row.id} ${row.target} ${row.variant}`;
+
+export function strict(value) {
+  const results = value.results ?? [];
+  const problems = [];
+  if (results.length === 0) problems.push('no rows ran');
+  else if (value.passed === 0) problems.push(`all ${results.length} rows skipped or not run`);
+  for (const row of results)
+    if ([row.control, row.guarded, row.live].includes('skip') && !row.reason)
+      problems.push(`skip without a reason: ${where(row)}`);
+  for (const row of value.failed) problems.push(`failed: ${where(row)} ${row.why ?? ''}`.trim());
+  for (const row of value.incomplete)
+    problems.push(`incomplete: ${where(row)} ${row.why ?? ''}`.trim());
+  for (const row of value.forged) problems.push(`forged: ${where(row)} ${row.why}`);
+  for (const row of value.missing) problems.push(`missing: ${where(row)}`);
+  if (!value.pass) problems.push(`not a pass: ${value.line}`);
+  if (!/^GUARD-PASS /.test(value.line ?? '')) problems.push(`no GUARD-PASS line: ${value.line}`);
+  return problems;
+}
