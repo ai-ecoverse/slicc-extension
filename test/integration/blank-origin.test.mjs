@@ -342,36 +342,42 @@ for (const transport of transports) {
     await page.evaluate((id) => h.close(id), run.targetId);
   });
 
-  test(`${transport} an ordinary page with sandboxed about:blank iframes still attaches and answers`, async (t) => {
-    const page = await client(t, transport);
-    const url = 'https://ordinary.test/doc?n=sandboxed-children';
-    const run = await page.evaluate(async (url) => {
-      const created = await h.cdp.send('Target.createTarget', { url });
-      const first = await h.cdp.send('Target.attachToTarget', {
-        targetId: created.targetId,
-        flatten: true,
-      });
-      await h.until(
-        async () => (await h.evaluate(first.sessionId, 'document.readyState')) === 'complete'
+  for (const opaque of [false, true]) {
+    test(`${transport} ${opaque ? 'opaque' : 'same-origin'} sandboxed about:blank iframes still attach and ${opaque ? 'seal realm reads' : 'answer'}`, async (t) => {
+      const page = await client(t, transport);
+      const url = 'https://ordinary.test/doc?n=sandboxed-children';
+      const run = await page.evaluate(
+        async ({ url, opaque }) => {
+          const created = await h.cdp.send('Target.createTarget', { url });
+          const first = await h.cdp.send('Target.attachToTarget', {
+            targetId: created.targetId,
+            flatten: true,
+          });
+          await h.until(
+            async () => (await h.evaluate(first.sessionId, 'document.readyState')) === 'complete'
+          );
+          const made = await h.evaluate(
+            first.sessionId,
+            `Promise.all(${JSON.stringify(opaque ? ['', 'allow-scripts'] : ['allow-same-origin', 'allow-scripts allow-same-origin'])}.map((flags) => new Promise((resolve) => { const f = document.createElement('iframe'); f.setAttribute('sandbox', flags); f.onload = () => resolve(flags); f.src = 'about:blank'; document.body.append(f); }))).then((all) => all.length)`
+          );
+          await h.cdp.send('Target.detachFromTarget', { sessionId: first.sessionId });
+          const again = await h.attempt('Target.attachToTarget', {
+            targetId: created.targetId,
+            flatten: true,
+          });
+          const sessionId = again.result?.sessionId;
+          const reply = sessionId
+            ? await h.evaluate(sessionId, 'document.querySelectorAll("iframe").length')
+            : undefined;
+          await h.close(created.targetId);
+          return { made, again, reply };
+        },
+        { url, opaque }
       );
-      const made = await h.evaluate(
-        first.sessionId,
-        `Promise.all(['', 'allow-scripts', 'allow-same-origin', 'allow-scripts allow-same-origin'].map((flags) => new Promise((resolve) => { const f = document.createElement('iframe'); f.setAttribute('sandbox', flags); f.onload = () => resolve(flags); f.src = 'about:blank'; document.body.append(f); }))).then((all) => all.length)`
-      );
-      await h.cdp.send('Target.detachFromTarget', { sessionId: first.sessionId });
-      const again = await h.attempt('Target.attachToTarget', {
-        targetId: created.targetId,
-        flatten: true,
-      });
-      const sessionId = again.result?.sessionId;
-      const reply = sessionId
-        ? await h.evaluate(sessionId, 'document.querySelectorAll("iframe").length')
-        : undefined;
-      await h.close(created.targetId);
-      return { made, again, reply };
-    }, url);
-    assert.equal(run.made, 4, JSON.stringify(run));
-    assert.equal(typeof run.again.result?.sessionId, 'string', JSON.stringify(run));
-    assert.equal(run.reply, 4, JSON.stringify(run));
-  });
+      assert.equal(run.made, 2, JSON.stringify(run));
+      assert.equal(typeof run.again.result?.sessionId, 'string', JSON.stringify(run));
+      if (opaque) assert.equal(run.reply.error, refused, JSON.stringify(run));
+      else assert.equal(run.reply, 2, JSON.stringify(run));
+    });
+  }
 }

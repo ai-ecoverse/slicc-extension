@@ -1,5 +1,19 @@
 import type { CDPPayload } from '@slicc/shared-ts';
 import {
+  boundIds,
+  frameSets,
+  nodeSelectors,
+  pruneSealed,
+  pruneSnapshot,
+  resolveFrameOrigins,
+  type Seal,
+  sealedEvent,
+  sealedNodes,
+  sealedRead,
+  unknownFrame,
+  wholePage,
+} from './cdp-frames.js';
+import {
   ABOUT_WORLD,
   extensionOrigin,
   PROFILED,
@@ -1085,6 +1099,8 @@ interface ClientFetch {
   handleAuthRequests: boolean;
 }
 
+type Sealed = { visible: Set<string>; sealed: Set<string>; nodes: Set<unknown> };
+
 export class TabShield {
   private readonly requests = new Bounded<boolean>(5000);
   private readonly held = new Bounded<ShieldEvent[]>(500);
@@ -1096,11 +1112,14 @@ export class TabShield {
   private readonly streams = new Bounded<UrlStream>(500);
   private readonly networkStreams = new NetworkStreams();
   private readonly hiddenFrames = new Bounded<true>(1000);
+  private readonly uncertainFrames = new Bounded<true>(1000);
   private readonly namedBodies = new Bounded<true>(2000);
   private readonly hops = new Bounded<Hop>(500);
   private readonly reroutes = new Map<string, (allowed: boolean) => void>();
   private readonly worlds = new Worlds();
   private clientFetch: ClientFetch | null = null;
+  private seal: Sealed | undefined;
+  private readonly cut = new Set<unknown>();
   private mainFrameId = '';
   private blockedFlag = false;
 
@@ -1190,6 +1209,7 @@ export class TabShield {
       read = this.bodyReads.delete(pauseId);
     }
     const reroute = this.pendingReroute(method, input, pauseId);
+    const seal = await this.sealFor(method, input);
     let result: CDPPayload;
     try {
       result = await forward(
@@ -1206,7 +1226,134 @@ export class TabShield {
     }
     if (reroute !== undefined) await this.settleReroute(pauseId, reroute);
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
-    return this.after(method, result ?? {}, input);
+    return this.after(method, await this.unseal(seal, method, result ?? {}), input);
+  }
+
+  private frameHidden(frame: CDPPayload): boolean {
+    const origin = frame['securityOrigin'];
+    if (this.frameProtected(str(frame['id']) ?? '') || unknownFrame(frame)) return true;
+    if (extensionOrigin(frame['url']) || extensionOrigin(origin)) return true;
+    return [origin, frame['url'], frame['unreachableUrl']].some(
+      (url) => typeof url === 'string' && url !== '' && urlProtected(url)
+    );
+  }
+
+  private async sealFor(method: string, params: CDPPayload): Promise<Sealed | undefined> {
+    if (!sealedRead(method)) return undefined;
+    const tree = await this.send('Page.getFrameTree', {}).catch(() =>
+      refuse(PROTECTED_RULES.refusal)
+    );
+    await resolveFrameOrigins(tree['frameTree'], this.uncertainFrames, (id) =>
+      this.documentOrigin(id)
+    );
+    const frames = frameSets(tree['frameTree'], (frame) => this.frameHidden(frame));
+    if (frames.visible.size === 0) refuse(PROTECTED_RULES.refusal);
+    const seal: Sealed = { ...frames, nodes: new Set<unknown>() };
+    this.seal = seal;
+    if (frames.sealed.size === 0) return seal;
+    const frameId = params['frameId'];
+    if (typeof frameId === 'string' && !frames.visible.has(frameId)) {
+      refuse(PROTECTED_RULES.refusal);
+    }
+    if (method === 'DOMSnapshot.captureSnapshot') return seal;
+    const snapshot = await this.send('DOMSnapshot.captureSnapshot', { computedStyles: [] }).catch(
+      () => refuse(PROTECTED_RULES.refusal)
+    );
+    seal.nodes = sealedNodes(snapshot, frames.visible);
+    if (seal.nodes.size === 0) return seal;
+    if (wholePage(method)) refuse(PROTECTED_RULES.refusal);
+    const { backend, dom, objects } = nodeSelectors(params);
+    const ids: unknown[] = [...backend];
+    for (const nodeId of dom) ids.push(await this.backendOf({ nodeId }, true));
+    for (const objectId of objects) ids.push(await this.backendOf({ objectId }, false));
+    if (ids.some((id) => seal.nodes.has(id))) refuse(PROTECTED_RULES.refusal);
+    return seal;
+  }
+
+  private async backendOf(params: CDPPayload, strict: boolean): Promise<unknown> {
+    try {
+      const answer = await this.send('DOM.describeNode', params);
+      return isObj(answer['node']) ? answer['node']['backendNodeId'] : undefined;
+    } catch (error) {
+      if (strict) throw error;
+      return undefined;
+    }
+  }
+
+  private async unseal(
+    seal: Sealed | undefined,
+    method: string,
+    result: CDPPayload
+  ): Promise<CDPPayload> {
+    if (!seal) return result;
+    if (method === 'DOMSnapshot.captureSnapshot') return pruneSnapshot(result, seal.visible);
+    if (seal.sealed.size === 0) return result;
+    this.cutNodes(pruneSealed(result, seal));
+    if (seal.nodes.size === 0) return result;
+    if (seal.nodes.has(result['backendNodeId']) || seal.sealed.has(str(result['frameId']) ?? '')) {
+      refuse(PROTECTED_RULES.refusal);
+    }
+    const nodeId = result['nodeId'];
+    if (typeof nodeId === 'number' && seal.nodes.has(await this.backendOf({ nodeId }, false))) {
+      refuse(PROTECTED_RULES.refusal);
+    }
+    if (Array.isArray(result['nodeIds'])) {
+      const kept: unknown[] = [];
+      for (const id of result['nodeIds']) {
+        if (!seal.nodes.has(await this.backendOf({ nodeId: id }, false))) kept.push(id);
+      }
+      result['nodeIds'] = kept;
+    }
+    return result;
+  }
+
+  private cutNodes(ids: number[]): void {
+    for (const id of ids) this.cut.add(id);
+    while (this.cut.size > 100000) this.cut.delete(this.cut.values().next().value);
+  }
+
+  private async sealEvent(method: string, params: CDPPayload): Promise<boolean> {
+    if (method === 'DOM.documentUpdated') {
+      this.cut.clear();
+      return true;
+    }
+    try {
+      await this.sealFor(method, {
+        ...params,
+        nodeId:
+          params['nodeId'] ??
+          params['parentId'] ??
+          params['parentNodeId'] ??
+          params['hostId'] ??
+          params['insertionPointId'],
+      });
+    } catch {
+      return false;
+    }
+    if (sealedEvent(params, this.cut)) {
+      this.cutNodes(boundIds(params));
+      return false;
+    }
+    const last = this.seal;
+    const seal: Seal = {
+      nodes: last?.nodes ?? new Set(),
+      sealed: {
+        has: (id) => this.frameProtected(str(id) ?? '') || last?.sealed.has(str(id) ?? '') === true,
+      },
+      visible: {
+        has: (id) => {
+          const frame = str(id) ?? '';
+          if (!frame || this.frameProtected(frame)) return false;
+          return this.frames.has(frame) || last?.visible.has(frame) === true;
+        },
+      },
+    };
+    try {
+      this.cutNodes(pruneSealed(params, seal));
+    } catch {
+      return false;
+    }
+    return true;
   }
 
   private pendingReroute(
@@ -1441,7 +1588,7 @@ export class TabShield {
     return params;
   }
 
-  private after(method: string, result: CDPPayload, params: CDPPayload): CDPPayload {
+  private async after(method: string, result: CDPPayload, params: CDPPayload): Promise<CDPPayload> {
     if (method === 'Page.captureSnapshot') {
       const data = (str(result['data']) ?? '').replace(/=\r?\n/g, '');
       if (redactText(data) !== data) refuse(PROTECTED_RULES.refusal);
@@ -1453,8 +1600,12 @@ export class TabShield {
     const resource = result['resource'];
     const resourceStream = isObj(resource) ? str(resource['stream']) : undefined;
     if (resourceStream) this.streams.set(resourceStream, new UrlStream());
-    if (method === 'Page.getFrameTree') this.pruneFrames(result['frameTree']);
-    if (method === 'Page.getResourceTree') this.pruneFrames(result['frameTree']);
+    if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
+      await resolveFrameOrigins(result['frameTree'], this.uncertainFrames, (id) =>
+        this.documentOrigin(id)
+      );
+      this.pruneFrames(result['frameTree']);
+    }
     if (COOKIE_READERS.has(method)) dropProtectedCookies(result);
     if (method === 'Page.getNavigationHistory') redactHistory(result);
     if (method === 'Target.getTargetInfo' && isObj(result['targetInfo'])) {
@@ -1470,7 +1621,7 @@ export class TabShield {
     return read ? streamRead(read, result) : result;
   }
 
-  onEvent(method: string, params: CDPPayload | undefined): ShieldEvent[] {
+  onEvent(method: string, params: CDPPayload | undefined): ShieldEvent[] | Promise<ShieldEvent[]> {
     const p = params ?? {};
     const id = str(p['requestId']) ?? '';
     if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
@@ -1491,6 +1642,11 @@ export class TabShield {
     if (this.worlds.hides(p)) return [];
     if (this.frameProtected(str(p['frameId']) ?? '')) return [];
     if (DISCOVERY_EVENTS.has(method)) return [];
+    if (sealedRead(method)) {
+      return this.sealEvent(method, p).then((visible) =>
+        visible ? this.deliver({ method, params: p }) : []
+      );
+    }
     if (method.startsWith('Target.')) {
       if (isObj(p['targetInfo']) && isProtectedTargetType(p['targetInfo']['type'])) return [];
       return [this.redactTarget(method, p)];
@@ -1616,6 +1772,9 @@ export class TabShield {
     if (aux['isDefault'] !== false && kind === undefined) {
       if (frame) this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
       const child = frame !== undefined && frame !== this.mainFrameId;
+      if (child && unknownFrame({ securityOrigin: origin, url: origin })) {
+        this.uncertainFrames.set(frame, true);
+      }
       if (child && (extensionOrigin(origin) || (frame && this.hiddenFrames.has(frame)))) {
         if (frame) this.hiddenFrames.set(frame, true);
         kind = 'foreign';
@@ -1633,10 +1792,7 @@ export class TabShield {
     const kept = tree['childFrames'].filter((node: unknown) => {
       const frame = isObj(node) && isObj(node['frame']) ? node['frame'] : {};
       const id = str(frame['id']) ?? '';
-      const hidden =
-        this.frameProtected(id) ||
-        extensionOrigin(frame['url']) ||
-        extensionOrigin(frame['securityOrigin']);
+      const hidden = this.frameHidden(frame);
       if (hidden && id) this.hiddenFrames.set(id, true);
       return !hidden;
     });

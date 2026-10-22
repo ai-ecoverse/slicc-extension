@@ -212,6 +212,24 @@ export async function pages(tls) {
     if (pathname === '/redirect') {
       return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();
     }
+    if (pathname === '/shared-frame') {
+      const n = searchParams.get('n') ?? '';
+      const delay = Number(searchParams.get('delay') ?? 0);
+      const page = `<!doctype html><title>shared</title><p>top-${n}</p><iframe src="https://other.test/frame-body?who=plain&n=${n}"></iframe><iframe sandbox src="https://${searchParams.has('opaque') ? 'ordinary.test' : 'vault.sliccy.ai'}/frame-body?who=frame-secret&delay=${delay}&n=${n}"></iframe>`;
+      return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(page);
+    }
+    if (pathname === '/frame-body') {
+      const body = `<!doctype html><title>body</title><style>.${searchParams.get('who')}-${searchParams.get('n')} { color: red }</style><p>${searchParams.get('who')}-${searchParams.get('n')}</p>`;
+      const send = () =>
+        response
+          .writeHead(200, {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+          })
+          .end(body);
+      setTimeout(send, Math.min(Number(searchParams.get('delay') ?? 0), 10000));
+      return;
+    }
     if (pathname === '/frame') {
       const src = JSON.stringify(searchParams.get('src') ?? '/');
       const page = `<!doctype html><title>frame</title><iframe src=${src}></iframe>`;

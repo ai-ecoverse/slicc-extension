@@ -21,6 +21,7 @@ import {
   assignExpression,
   binaryHeadersNameProtected,
   bodyMethod,
+  boundIds,
   COOKIES,
   cookieReader,
   cookieRefused,
@@ -31,25 +32,33 @@ import {
   extensionOrigin,
   foreignFrame,
   frameIn,
+  frameSets,
   headersNameProtected,
   hopMatches,
   hopOf,
   initScriptPrefix,
   NetworkStreams,
   namesProtectedStorage,
+  nodeSelectors,
   PROFILED,
   patternMatches,
   patternProtected,
   profiled,
+  pruneSealed,
+  pruneSnapshot,
   RESERVED_WORLD,
   redactProtected,
   redactText,
   refusedOutright,
   requestKey,
   requestUrl,
+  resolveFrameOrigins,
   responseNamesProtected,
   sameDocument,
   scopedBinding,
+  sealedEvent,
+  sealedNodes,
+  sealedRead,
   streamRead,
   strictGuard,
   stripProtectedCookies,
@@ -57,9 +66,11 @@ import {
   UNSEEN,
   UNWATCHED,
   UrlStream,
+  unknownFrame,
   urlProtected,
   WORLD,
   Worlds,
+  wholePage,
   withoutCookieHeaders,
   withoutSetCookie,
   wrapsAbout,
@@ -964,6 +975,115 @@ class Connection {
     return typeof frameId === 'string' && tab.frames.get(frameId) === true;
   }
 
+  frameHidden(tab, frame) {
+    const origin = frame.securityOrigin;
+    if (this.frameProtected(tab, frame.id) || unknownFrame(frame)) return true;
+    if (extensionOrigin(frame.url) || extensionOrigin(origin)) return true;
+    if (this.protectedOrigin(origin)) return true;
+    return [frame.url, frame.unreachableUrl].some(
+      (url) => typeof url === 'string' && url !== '' && urlProtected(guard, url)
+    );
+  }
+
+  async seal(tabId, tab, method, params) {
+    const tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames').catch(
+      () => refusal()
+    );
+    await resolveFrameOrigins(tree?.frameTree, tab.uncertain ?? new Set(), (id) =>
+      this.documentOrigin(tabId, id)
+    );
+    const frames = frameSets(tree?.frameTree, (frame) => this.frameHidden(tab, frame));
+    if (frames.visible.size === 0) refusal();
+    const seal = { ...frames, nodes: new Set() };
+    tab.seal = seal;
+    if (frames.sealed.size === 0) return seal;
+    if (typeof params.frameId === 'string' && !frames.visible.has(params.frameId)) refusal();
+    if (method === 'DOMSnapshot.captureSnapshot') return seal;
+    const snapshot = await bounded(
+      this.send(tabId, 'DOMSnapshot.captureSnapshot', { computedStyles: [] }),
+      10000,
+      'snapshot'
+    ).catch(() => refusal());
+    seal.nodes = sealedNodes(snapshot, frames.visible);
+    if (seal.nodes.size === 0) return seal;
+    if (wholePage(method)) refusal();
+    const { backend, dom, objects } = nodeSelectors(params);
+    const ids = [...backend];
+    for (const nodeId of dom) ids.push(await this.backendOf(tabId, { nodeId }, true));
+    for (const objectId of objects) ids.push(await this.backendOf(tabId, { objectId }, false));
+    if (ids.some((id) => seal.nodes.has(id))) refusal();
+    return seal;
+  }
+
+  async backendOf(tabId, params, strict) {
+    try {
+      return (await this.send(tabId, 'DOM.describeNode', params))?.node?.backendNodeId;
+    } catch (error) {
+      if (strict) throw error;
+      return undefined;
+    }
+  }
+
+  async unseal(tabId, tab, seal, method, result) {
+    if (method === 'DOMSnapshot.captureSnapshot') return pruneSnapshot(result, seal.visible);
+    if (seal.sealed.size === 0) return result;
+    this.cutNodes(tab, pruneSealed(result, seal));
+    if (seal.nodes.size === 0) return result;
+    if (seal.nodes.has(result.backendNodeId) || seal.sealed.has(result.frameId)) refusal();
+    if (typeof result.nodeId === 'number') {
+      if (seal.nodes.has(await this.backendOf(tabId, { nodeId: result.nodeId }, false))) refusal();
+    }
+    if (Array.isArray(result.nodeIds)) {
+      const kept = [];
+      for (const nodeId of result.nodeIds) {
+        const id = await this.backendOf(tabId, { nodeId }, false);
+        if (!seal.nodes.has(id)) kept.push(nodeId);
+      }
+      result.nodeIds = kept;
+    }
+    return result;
+  }
+
+  cutNodes(tab, ids) {
+    tab.cut ??= new Set();
+    for (const id of ids) tab.cut.add(id);
+    while (tab.cut.size > 100000) tab.cut.delete(tab.cut.values().next().value);
+  }
+
+  async sealEvent(tabId, tab, method, p) {
+    if (method === 'DOM.documentUpdated') {
+      tab.cut?.clear();
+      return true;
+    }
+    try {
+      await this.seal(tabId, tab, method, {
+        ...p,
+        nodeId: p.nodeId ?? p.parentId ?? p.parentNodeId ?? p.hostId ?? p.insertionPointId,
+      });
+    } catch {
+      return false;
+    }
+    if (sealedEvent(p, tab.cut ?? new Set())) {
+      this.cutNodes(tab, boundIds(p));
+      return false;
+    }
+    const seal = {
+      nodes: tab.seal?.nodes ?? new Set(),
+      sealed: { has: (id) => this.frameProtected(tab, id) || tab.seal?.sealed.has(id) === true },
+      visible: {
+        has: (id) =>
+          !this.frameProtected(tab, id) &&
+          (tab.frames.get(id) === false || tab.seal?.visible.has(id) === true),
+      },
+    };
+    try {
+      this.cutNodes(tab, pruneSealed(p, seal));
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
   checkParams(method, params, tab) {
     if ((cookieSetter(method) || cookieReader(method)) && cookieUrlUnparseable(guard, params)) {
       throw new Error(protectedRules.unparseableRefusal);
@@ -1113,9 +1233,11 @@ class Connection {
     const about = method === 'Page.navigate' ? aboutUrl(params.url) : undefined;
     if (about) return this.openBlank(tabId, params, about);
     if (method === 'Page.bringToFront') await activate(this.api, tabId);
+    const seal = sealedRead(method) ? await this.seal(tabId, tab, method, params) : undefined;
     let result = (await this.send(tabId, method, forwarded)) ?? {};
+    if (seal) result = await this.unseal(tabId, tab, seal, method, result);
     if (method === 'Page.captureSnapshot') snapshotChecked(result);
-    this.learn(tab, method, result);
+    await this.learn(tabId, tab, method, result);
     if (cookieReader(method)) result = dropProtectedCookies(guard, result);
     if (typeof result.stream === 'string') this.openStream(result.stream);
     if (method === 'IO.resolveBlob' && typeof result.uuid === 'string') {
@@ -1137,10 +1259,13 @@ class Connection {
     this.state.streams.set(handle, new UrlStream(anyProtected));
   }
 
-  learn(tab, method, result) {
+  async learn(tabId, tab, method, result) {
     tab.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') tab.worlds.seen(result.executionContextId);
     if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
+      await resolveFrameOrigins(result.frameTree, tab.uncertain ?? new Set(), (id) =>
+        this.documentOrigin(tabId, id)
+      );
       this.pruneFrames(tab, result.frameTree);
     }
   }
@@ -1394,6 +1519,16 @@ class Connection {
     const kind = tab.worlds.hideable(ctx, tab.mainFrameId, (origin) =>
       this.protectedOrigin(origin)
     );
+    if (
+      ctx.auxData?.isDefault !== false &&
+      frameId &&
+      frameId !== tab.mainFrameId &&
+      unknownFrame({ securityOrigin: ctx.origin, url: ctx.origin })
+    ) {
+      tab.uncertain ??= new Set();
+      tab.uncertain.add(frameId);
+      while (tab.uncertain.size > 1000) tab.uncertain.delete(tab.uncertain.values().next().value);
+    }
     if (tab.worlds.add(ctx, kind)) this.quietProfilers(tabId);
     return kind !== undefined;
   }
@@ -1402,10 +1537,7 @@ class Connection {
     if (!Array.isArray(tree?.childFrames)) return;
     tree.childFrames = tree.childFrames.filter((node) => {
       const frame = node?.frame ?? {};
-      const hidden =
-        this.frameProtected(tab, frame.id) ||
-        extensionOrigin(frame.url) ||
-        extensionOrigin(frame.securityOrigin);
+      const hidden = this.frameHidden(tab, frame);
       if (hidden && typeof frame.id === 'string') tab.frames.set(frame.id, true);
       return !hidden;
     });
@@ -1442,7 +1574,7 @@ class Connection {
     return false;
   }
 
-  onEvent(source, method, params) {
+  async onEvent(source, method, params) {
     if (typeof source?.sessionId === 'string') return;
     const tabId = source?.tabId;
     const tab = this.tabState(tabId);
@@ -1471,6 +1603,7 @@ class Connection {
     if (profiled(method) && tab.worlds.foreign) return;
     if (tab.worlds.hides(p)) return;
     if (this.frameProtected(tab, p.frameId)) return;
+    if (sealedRead(method) && !(await this.sealEvent(tabId, tab, method, p))) return;
     this.deliver(tabId, tab, method, p);
   }
 

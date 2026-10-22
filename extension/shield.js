@@ -1159,3 +1159,254 @@ export function scopedBinding(params) {
 
 export const UNWATCHED =
   "slicc: refused: the guard couldn't start watching this tab's execution contexts, so it doesn't attach";
+
+const SEALED_DOMAINS = [
+  'DOM.',
+  'DOMSnapshot.',
+  'Accessibility.',
+  'CSS.',
+  'Overlay.',
+  'DOMDebugger.',
+  'LayerTree.',
+  'Animation.',
+];
+const NODE_KEY = /^(?:[a-z]+N|n)odeIds?$/;
+const NODE_EVENT_KEYS = ['nodeId', 'parentId', 'parentNodeId', 'insertionPointId', 'hostId'];
+export const DEEP = 'slicc: refused: that reply nests too deeply to check for protected frames';
+const WHOLE_PAGE = new Set(['DOM.performSearch', 'DOMSnapshot.getSnapshot']);
+
+const REALM_READS = new Set([
+  'Runtime.evaluate',
+  'Runtime.callFunctionOn',
+  'Runtime.getProperties',
+  'Runtime.getExceptionDetails',
+  'Runtime.compileScript',
+  'Runtime.globalLexicalScopeNames',
+  'Runtime.queryObjects',
+  'Runtime.runScript',
+  'Runtime.awaitPromise',
+  'Runtime.consoleAPICalled',
+  'Runtime.exceptionThrown',
+  'Runtime.bindingCalled',
+]);
+
+export async function resolveFrameOrigins(tree, uncertain, readOrigin) {
+  const pending = [...(Array.isArray(tree?.childFrames) ? tree.childFrames : [])];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    const frame = node?.frame;
+    if (!frame || typeof frame.id !== 'string') continue;
+    if (
+      (typeof frame.url === 'string' && /^about:(?:blank|srcdoc)(?:[?#]|$)/i.test(frame.url)) ||
+      uncertain.has(frame.id)
+    ) {
+      frame.securityOrigin = await readOrigin(frame.id).catch(() => 'null');
+    }
+    if (Array.isArray(node.childFrames)) pending.push(...node.childFrames);
+  }
+}
+
+export function unknownFrame(frame) {
+  if (typeof frame.securityOrigin !== 'string' || typeof frame.url !== 'string') return true;
+  try {
+    const origin = new URL(frame.securityOrigin);
+    new URL(frame.url);
+    return origin.origin === 'null';
+  } catch {
+    return true;
+  }
+}
+
+export function sealedRead(method) {
+  return REALM_READS.has(method) || SEALED_DOMAINS.some((domain) => method.startsWith(domain));
+}
+
+export function wholePage(method) {
+  return WHOLE_PAGE.has(method) || REALM_READS.has(method) || method.startsWith('CSS.');
+}
+
+export function frameSets(tree, hidden) {
+  const visible = new Set();
+  const sealed = new Set();
+  const pending = [[tree, false, true]];
+  while (pending.length > 0) {
+    const [node, above, top] = pending.pop();
+    const frame = node?.frame;
+    if (!frame || typeof frame.id !== 'string') continue;
+    const shut = above || (!top && hidden(frame));
+    (shut ? sealed : visible).add(frame.id);
+    for (const child of Array.isArray(node.childFrames) ? node.childFrames : []) {
+      pending.push([child, shut, false]);
+    }
+  }
+  return { visible, sealed };
+}
+
+export function sealedNodes(snapshot, visible) {
+  const strings = Array.isArray(snapshot?.strings) ? snapshot.strings : [];
+  const documents = Array.isArray(snapshot?.documents) ? snapshot.documents : [];
+  const nodes = new Set();
+  documents.forEach((doc) => {
+    if (visible.has(strings[doc?.frameId])) return;
+    for (const id of doc?.nodes?.backendNodeId ?? []) nodes.add(id);
+  });
+  return nodes;
+}
+
+export function nodeSelectors(params) {
+  const out = { backend: [], dom: [], objects: [] };
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (key === 'objectId' && typeof value === 'string') out.objects.push(value);
+    if (!NODE_KEY.test(key)) continue;
+    const list = (Array.isArray(value) ? value : [value]).filter((id) => typeof id === 'number');
+    out[key.startsWith('backend') ? 'backend' : 'dom'].push(...list);
+  }
+  return out;
+}
+
+export function boundIds(node, out = [], depth = 0) {
+  if (depth > 1000) throw new Error(DEEP);
+  if (node === null || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    for (const item of node) boundIds(item, out, depth + 1);
+    return out;
+  }
+  if (typeof node.nodeId === 'number' && node.nodeId > 0) out.push(node.nodeId);
+  for (const value of Object.values(node)) boundIds(value, out, depth + 1);
+  return out;
+}
+
+function sealedItem(item, seal) {
+  if (item === null || typeof item !== 'object') return false;
+  if (seal.nodes.has(item.backendNodeId) || seal.nodes.has(item.backendDOMNodeId)) return true;
+  return typeof item.nodeId === 'string' && seal.sealed.has(item.frameId);
+}
+
+function pruneList(list, seal, cut) {
+  const gone = new Set();
+  let kept = list.filter((item) => {
+    if (!sealedItem(item, seal)) return true;
+    if (item.nodeId !== undefined) gone.add(item.nodeId);
+    boundIds(item, cut);
+    return false;
+  });
+  for (let grew = true; grew; ) {
+    grew = false;
+    kept = kept.filter((item) => {
+      if (!gone.has(item?.parentId)) return true;
+      if (item.nodeId !== undefined) gone.add(item.nodeId);
+      boundIds(item, cut);
+      grew = true;
+      return false;
+    });
+  }
+  return kept;
+}
+
+export function pruneSealed(value, seal, cut = [], depth = 0) {
+  if (depth > 1000) throw new Error(DEEP);
+  if (value === null || typeof value !== 'object') return cut;
+  if (Array.isArray(value)) {
+    for (const item of value) pruneSealed(item, seal, cut, depth + 1);
+    return cut;
+  }
+  const inner = value.contentDocument;
+  if (
+    inner &&
+    (seal.nodes.has(inner.backendNodeId) ||
+      typeof value.frameId !== 'string' ||
+      !seal.visible.has(value.frameId))
+  ) {
+    boundIds(inner, cut);
+    delete value.contentDocument;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (sealedItem(item, seal)) {
+      boundIds(item, cut);
+      delete value[key];
+      continue;
+    }
+    if (Array.isArray(item)) value[key] = pruneList(item, seal, cut);
+    pruneSealed(value[key], seal, cut, depth + 1);
+  }
+  return cut;
+}
+
+export function sealedEvent(params, cut) {
+  return NODE_EVENT_KEYS.some((key) => cut.has(params?.[key]));
+}
+
+const RARE_STRINGS = [
+  'shadowRootType',
+  'textValue',
+  'inputValue',
+  'pseudoType',
+  'pseudoIdentifier',
+  'currentSourceURL',
+  'originURL',
+];
+const DOCUMENT_STRINGS = [
+  'documentURL',
+  'title',
+  'baseURL',
+  'contentLanguage',
+  'encodingName',
+  'publicId',
+  'systemId',
+  'frameId',
+];
+
+export function pruneSnapshot(snapshot, visible) {
+  const strings = Array.isArray(snapshot?.strings) ? snapshot.strings : [];
+  const documents = Array.isArray(snapshot?.documents) ? snapshot.documents : [];
+  const index = new Map();
+  documents.forEach((doc, at) => {
+    if (visible.has(strings[doc?.frameId])) index.set(at, index.size);
+  });
+  const fresh = [];
+  const seen = new Map();
+  const str = (at) => {
+    if (typeof at !== 'number' || at < 0) return at;
+    if (!seen.has(at)) {
+      seen.set(at, fresh.length);
+      fresh.push(typeof strings[at] === 'string' ? strings[at] : '');
+    }
+    return seen.get(at);
+  };
+  const all = (list) => (Array.isArray(list) ? list.map(str) : list);
+  const nested = (list) => (Array.isArray(list) ? list.map(all) : list);
+  const kept = documents
+    .filter((_, at) => index.has(at))
+    .map((doc) => {
+      const out = { ...doc };
+      for (const key of DOCUMENT_STRINGS) out[key] = str(doc[key]);
+      const nodes = { ...(doc.nodes ?? {}) };
+      nodes.nodeName = all(nodes.nodeName);
+      nodes.nodeValue = all(nodes.nodeValue);
+      nodes.attributes = nested(nodes.attributes);
+      for (const key of RARE_STRINGS) {
+        if (nodes[key]) nodes[key] = { ...nodes[key], value: all(nodes[key].value) };
+      }
+      const content = nodes.contentDocumentIndex;
+      if (content) {
+        const pairs = (content.index ?? [])
+          .map((node, at) => [node, index.get(content.value?.[at])])
+          .filter(([, target]) => target !== undefined);
+        nodes.contentDocumentIndex = {
+          index: pairs.map(([node]) => node),
+          value: pairs.map(([, target]) => target),
+        };
+      }
+      out.nodes = nodes;
+      if (doc.layout) {
+        out.layout = {
+          ...doc.layout,
+          styles: nested(doc.layout.styles),
+          text: all(doc.layout.text),
+          blendedBackgroundColors: all(doc.layout.blendedBackgroundColors),
+        };
+      }
+      return out;
+    });
+  return { ...snapshot, documents: kept, strings: fresh };
+}

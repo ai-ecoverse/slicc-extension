@@ -13,7 +13,7 @@ function spki(cert) {
     .digest('base64');
 }
 
-export async function launch({ pinned = false } = {}) {
+export async function launch({ pinned = false, args = [] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'slicc-extension-'));
   const tls = await certificate(dir);
   const site = await pages(tls);
@@ -46,6 +46,7 @@ export async function launch({ pinned = false } = {}) {
       `--host-resolver-rules=${rules}`,
       '--use-fake-device-for-media-stream',
       '--use-fake-ui-for-media-stream',
+      ...args,
     ],
   }).catch(async (error) => {
     await copy.remove();
