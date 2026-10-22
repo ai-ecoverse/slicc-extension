@@ -235,6 +235,58 @@ async function burst(tabId) {
   };
 }
 
+async function blockedHop(tabId) {
+  const h = globalThis.h;
+  const started = Date.now();
+  const readExpr =
+    'JSON.stringify({doc:window.__sliccDoc??null,href:location.href,restored:window.__sliccRestored===true,type:(performance.getEntriesByType("navigation")[0]||{}).type||"",reasons:(performance.getEntriesByType("navigation")[0]||{}).notRestoredReasons||null})';
+  const { sessionId } = await h.cdp.send('Target.attachToTarget', {
+    targetId: String(tabId),
+    flatten: true,
+  });
+  const read = () =>
+    h.cdp
+      .send('Runtime.evaluate', { expression: readExpr, returnByValue: true }, sessionId)
+      .then((result) => ({ t: Date.now() - started, value: result?.result?.value ?? null }))
+      .catch((error) => ({ t: Date.now() - started, error: String(error?.message ?? error) }));
+  const bounded = (attempt) =>
+    Promise.race([
+      attempt,
+      new Promise((resolve) =>
+        setTimeout(() => resolve({ t: Date.now() - started, error: 'timeout' }), 2000)
+      ),
+    ]);
+  const before = await bounded(read());
+  const hopped = await bounded(
+    h.cdp
+      .send(
+        'Runtime.evaluate',
+        {
+          expression: 'location.assign("https://vault.sliccy.ai/marker?hop=1")',
+          userGesture: true,
+          returnByValue: true,
+        },
+        sessionId
+      )
+      .then((result) => ({ t: Date.now() - started, value: result?.result?.value ?? null }))
+      .catch((error) => ({ t: Date.now() - started, error: String(error?.message ?? error) }))
+  );
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const step = (expression) =>
+    bounded(
+      h.cdp
+        .send('Runtime.evaluate', { expression, userGesture: true, returnByValue: true }, sessionId)
+        .then((result) => ({ t: Date.now() - started, value: result?.result?.value ?? null }))
+        .catch((error) => ({ t: Date.now() - started, error: String(error?.message ?? error) }))
+    );
+  const back = await step('history.go(-1)');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const backAgain = await step('history.go(-1)');
+  const during = [];
+  for (let i = 0; i < 6; i++) during.push(await bounded(read()));
+  return { sessionId, before, hopped, back, backAgain, during };
+}
+
 function parsed(row) {
   if (!row || typeof row.value !== 'string') return undefined;
   try {
@@ -283,7 +335,7 @@ function summarize(name, run, autopsy) {
 }
 
 test('a restored history entry is admitted only after a live tab check', {
-  timeout: 180000,
+  timeout: 240000,
 }, async (t) => {
   process.env.SLICC_CDP_PORTS = '9300-9309';
   chrome = await launch({ prepare: prepareExtension });
@@ -294,6 +346,7 @@ test('a restored history entry is admitted only after a live tab check', {
   await woke.evaluate(install, 'seven', extId);
   const probe = await eligibility();
   const reports = [];
+  const hops = [];
   for (const transport of ['seven', 'six-bridge']) {
     const page = await chrome.visit(t, entry[transport]);
     await page.evaluate(install, transport, extId);
@@ -310,6 +363,36 @@ test('a restored history entry is admitted only after a live tab check', {
       }
       return '';
     }, `${ordinary}?n=${transport}`);
+    if (transport === 'six-bridge') {
+      const hopRun = await page.evaluate(blockedHop, extensionTab);
+      const hopRows = [hopRun.before, ...(hopRun.during ?? [])].map((row) => parsed(row));
+      hops.push({
+        before: parsed(hopRun.before),
+        hopped: hopRun.hopped,
+        back: hopRun.back,
+        backAgain: hopRun.backAgain,
+        protectedReads: hopRows.filter((row) => row?.doc === 'protected').length,
+        samples: (hopRun.during ?? []).map((row) => parsed(row)?.doc ?? row?.error ?? 'unread'),
+      });
+      await page.evaluate(
+        (sessionId) =>
+          globalThis.h.cdp.send('Target.detachFromTarget', { sessionId }).catch(() => undefined),
+        hopRun.sessionId
+      );
+      const reset = await chrome.cdp.send('Target.attachToTarget', {
+        targetId: tab.targetId,
+        flatten: true,
+      });
+      await chrome.cdp.send(
+        'Page.navigate',
+        { url: `${ordinary}?n=${transport}` },
+        reset.sessionId
+      );
+      await settled(reset.sessionId, ordinary);
+      await chrome.cdp
+        .send('Target.detachFromTarget', { sessionId: reset.sessionId })
+        .catch(() => undefined);
+    }
     const run = await page.evaluate(burst, extensionTab);
     await page.evaluate(
       (sessionId) =>
@@ -332,21 +415,25 @@ test('a restored history entry is admitted only after a live tab check', {
   }
   assert.equal(JSON.parse(probe.reading).restored, true);
   assert.equal(reports.length, 2);
-  assert.equal(version?.product?.startsWith('Chrome/'), true);
-  const failures = [];
   for (const report of reports) {
-    try {
-      await t.test(report.transport, async () => {
-        assert.equal(report.before?.doc, 'ordinary', report.transport);
-        assert.equal(report.protectedReads, 0, report.transport);
-        assert.equal(report.autopsy?.parsed?.doc, 'protected', report.transport);
-        assert.equal(report.autopsy?.parsed?.restored, true, report.transport);
-      });
-    } catch {
-      failures.push(report.transport);
-    }
+    assert.equal(report.before?.doc, 'ordinary');
+    assert.equal(report.protectedReads, 0);
+    assert.equal(report.autopsy?.parsed?.doc, 'protected');
+    assert.equal(report.autopsy?.parsed?.restored, true);
   }
-  assert.deepEqual(failures, []);
+  assert.equal(hops.length, 1);
+  for (const hop of hops) {
+    const detail = JSON.stringify({
+      before: hop.before,
+      hopped: hop.hopped,
+      back: hop.back,
+      backAgain: hop.backAgain,
+      samples: hop.samples,
+    });
+    assert.equal(hop.before?.doc, 'ordinary', detail);
+    assert.equal(hop.protectedReads, 0, detail);
+  }
+  assert.equal(version?.product?.startsWith('Chrome/'), true);
 });
 
 after(() => chrome?.close());
