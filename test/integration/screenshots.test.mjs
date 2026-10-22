@@ -25,13 +25,13 @@ after(async () => {
 });
 
 test('extension pages load without console errors', async (t) => {
+  const first = await chrome.page(t);
   for (const pageName of extPages) {
-    const page = await chrome.page(t);
+    const page = await first.tab();
     const url = `chrome-extension://${extId}/${pageName}`;
     await page.send('Page.navigate', { url });
     await page.until((href) => location.href === href && document.readyState === 'complete', url);
     await new Promise((resolve) => setTimeout(resolve, 500));
     assert.deepEqual(page.errors, [], `${pageName} had console errors: ${page.errors.join('; ')}`);
-    await page.close();
   }
 });

@@ -251,12 +251,15 @@ async function browser(extra = []) {
           typeof raw === 'string' && /^[0-9A-F]{32}$/.test(raw)
             ? { ...params, targetId: await tabOf(raw) }
             : (params ?? {});
-        const args = [method, local, ...(session === undefined ? [] : [session])];
-        const answer = await evaluate(
-          cdp,
-          sessionId,
-          `h.cdp.send(...${JSON.stringify(args)}).then((result) => ({ ok: true, result: result ?? {} }), (error) => ({ ok: false, message: String(error?.message ?? error), code: error?.code }))`
-        );
+        const call = (args) =>
+          evaluate(
+            cdp,
+            sessionId,
+            `h.cdp.send(...${JSON.stringify(args)}).then((result) => ({ ok: true, result: result ?? {} }), (error) => ({ ok: false, message: String(error?.message ?? error), code: error?.code }))`
+          );
+        if (method.startsWith('Input.') && session !== undefined)
+          await call(['Page.bringToFront', {}, session]);
+        const answer = await call([method, local, ...(session === undefined ? [] : [session])]);
         if (answer.ok) return asGiven(answer.result);
         const error = new Error(answer.message);
         error.cdp = {
