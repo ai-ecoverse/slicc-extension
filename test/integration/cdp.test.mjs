@@ -188,8 +188,19 @@ function fakeChrome() {
     },
   };
   let send = api.debugger.sendCommand;
+  api.probes = new Set();
   let mainFrame = plainTree.frameTree.frame;
   const wrapped = async (target, method, params) => {
+    if (method === 'Runtime.evaluate' && params?.objectGroup === 'slicc:document-binding') {
+      api.sent.push({ tabId: target.tabId, method, params });
+      const objectId = '123.9999.0';
+      api.probes.add(objectId);
+      return { result: { type: 'object', objectId } };
+    }
+    if (method === 'Runtime.releaseObject' && api.probes.has(params?.objectId)) {
+      api.sent.push({ tabId: target.tabId, method, params });
+      return {};
+    }
     const answer = await send(target, method, params);
     if (method === 'Page.getFrameTree' && answer?.frameTree) {
       const pending = [answer.frameTree];
@@ -232,6 +243,8 @@ function open(url = 'https://seven.sliccy.ai/play') {
 function user(api) {
   return api.sent.filter(
     (sent) =>
+      sent.params?.objectGroup !== 'slicc:document-binding' &&
+      !(sent.method === 'Runtime.releaseObject' && api.probes.has(sent.params?.objectId)) &&
       ![
         'Fetch.enable',
         'Page.getFrameTree',

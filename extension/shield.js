@@ -1149,6 +1149,8 @@ export class DocumentBindings {
     this.contexts = new Map();
     this.handles = new Map();
     this.backends = new Map();
+    this.namespaces = new Map();
+    this.proven = new Set();
   }
 
   remember(tree) {
@@ -1186,23 +1188,46 @@ export class DocumentBindings {
     return undefined;
   }
 
+  namespace(objectId) {
+    return typeof objectId === 'string' ? /^(-?\d+\.-?\d+)\.-?\d+$/.exec(objectId)?.[1] : undefined;
+  }
+
+  proof(context, objectId) {
+    const document = this.contexts.get(context.id);
+    const namespace = this.namespace(objectId);
+    if (!document || !namespace || typeof context.uniqueId !== 'string') return false;
+    this.namespaces.set(namespace, document);
+    this.proven.add(context.uniqueId);
+    return true;
+  }
+
   learn(value, document, depth = 0) {
     if (depth > 32 || !value || typeof value !== 'object') return;
     if (typeof value.nodeId === 'number' && typeof value.backendNodeId === 'number') {
       this.backends.set(value.nodeId, value.backendNodeId);
     }
     for (const [key, item] of Object.entries(value)) {
+      if (key === 'value' && typeof value.type === 'string') continue;
       const values = Array.isArray(item) ? item : [item];
       for (const entry of values) {
         const handle = this.key(key, entry);
         if (handle) {
-          this.handles.set(handle, document);
+          const owner = handle.startsWith('object:')
+            ? this.namespaces.get(this.namespace(entry))
+            : document;
+          this.handles.set(handle, owner);
           if (this.handles.size > 50000) this.handles.delete(this.handles.keys().next().value);
         } else {
           this.learn(entry, document, depth + 1);
         }
       }
     }
+  }
+
+  event(params, mainFrameId) {
+    const context = this.contexts.get(params.executionContextId ?? params.context?.id);
+    const parent = this.handles.get(`node:${params.parentId ?? params.parentNodeId}`);
+    this.learn(params, context ?? parent ?? this.frames.get(params.frameId ?? mainFrameId));
   }
 
   scopeContext(key, item, tree) {
@@ -1222,7 +1247,11 @@ export class DocumentBindings {
         this.scopeContext(key, item, tree);
         if (key === 'arguments' && item?.objectId) this.scope({ objectId: item.objectId }, tree);
         const handle = this.key(key, item);
-        if (handle && !this.current(this.handles.get(handle), tree)) {
+        const document =
+          handle?.startsWith('object:') && this.handles.has(handle)
+            ? this.namespaces.get(this.namespace(item))
+            : this.handles.get(handle);
+        if (handle && !this.current(document, tree)) {
           throw new Error(UNSEEN_CONTEXT);
         }
       }
@@ -1251,7 +1280,7 @@ export class DocumentBindings {
     }
     const root = frameIn(tree);
     let document = root && { frameId: root.id, loaderId: root.loaderId };
-    if (params.objectId) document = this.handles.get(`object:${params.objectId}`);
+    if (params.objectId) document = this.namespaces.get(this.namespace(params.objectId));
     const keyed = method === 'Runtime.evaluate' || method === 'Runtime.callFunctionOn';
     const numbered = [
       'Runtime.compileScript',

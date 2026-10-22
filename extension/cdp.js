@@ -66,6 +66,7 @@ import {
   stripProtectedCookies,
   treeNamesProtected,
   UNSEEN,
+  UNSEEN_CONTEXT,
   UNWATCHED,
   UrlStream,
   unknownFrame,
@@ -1229,10 +1230,49 @@ class Connection {
     );
   }
 
+  async prove(tabId, tab, tree) {
+    for (const context of tab.worlds.visible()) {
+      const frame = frameIn(tree, context.auxData?.frameId);
+      const current = tab.documents.current(tab.documents.contexts.get(context.id), tree);
+      if (
+        typeof context.uniqueId !== 'string' ||
+        tab.documents.proven.has(context.uniqueId) ||
+        !frame ||
+        anyProtected(frame.url) ||
+        anyProtected(frame.securityOrigin)
+      )
+        continue;
+      if (!current && context.origin !== frame.securityOrigin && frame.url !== ERROR_PAGE) continue;
+      let answer;
+      try {
+        answer = await this.send(tabId, 'Runtime.evaluate', {
+          expression: '({})',
+          uniqueContextId: context.uniqueId,
+          objectGroup: 'slicc:document-binding',
+        });
+      } catch (error) {
+        if (!current) continue;
+        throw error;
+      }
+      if (!current) {
+        const checked = await this.send(tabId, 'Page.getFrameTree', {});
+        if (frameIn(checked?.frameTree, frame.id)?.loaderId !== frame.loaderId) continue;
+        tab.documents.frame(frame);
+        tab.documents.context(context);
+      }
+      const objectId = answer?.result?.objectId;
+      if (!tab.documents.proof(context, objectId)) throw new Error(UNSEEN_CONTEXT);
+      void this.send(tabId, 'Runtime.releaseObject', { objectId }).catch(() => undefined);
+    }
+  }
+
   async bind(tabId, tab, method, params) {
     if (method.startsWith('Input.') && tab.pendingFrames.size > 0) refusal();
     if (!sealedRead(method) && !method.startsWith('Runtime.')) return { params };
     const tree = await this.send(tabId, 'Page.getFrameTree', {}).catch(() => refusal());
+    const root = frameIn(tree?.frameTree);
+    if (anyProtected(root?.url) || anyProtected(root?.securityOrigin)) refusal();
+    await this.prove(tabId, tab, tree?.frameTree);
     return tab.documents.bind(
       method,
       params ?? {},
@@ -1431,6 +1471,7 @@ class Connection {
     const tab = this.tabState(tabId);
     const runtime = method.startsWith('Runtime.');
     tab?.worlds.learn(params);
+    if (method.startsWith('DOM.') || runtime) tab?.documents.event(params, tab.mainFrameId);
     for (const sessionId of this.sessionsOf(tabId)) {
       if (runtime && !tab?.runtime.has(sessionId)) continue;
       this.post({ method, params, sessionId });

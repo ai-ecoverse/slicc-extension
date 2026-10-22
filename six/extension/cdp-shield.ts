@@ -264,6 +264,8 @@ class DocumentBindings {
   readonly contexts = new Map<number, DocumentRef>();
   readonly handles = new Map<string, DocumentRef | undefined>();
   readonly backends = new Map<number, number>();
+  readonly namespaces = new Map<string, DocumentRef>();
+  readonly proven = new Set<string>();
 
   remember(tree: unknown): void {
     const pending = [tree];
@@ -306,6 +308,20 @@ class DocumentBindings {
     return undefined;
   }
 
+  namespace(objectId: unknown): string | undefined {
+    return typeof objectId === 'string' ? /^(-?\d+\.-?\d+)\.-?\d+$/.exec(objectId)?.[1] : undefined;
+  }
+
+  proof(context: CDPPayload, objectId: unknown): boolean {
+    const document = this.contexts.get(context['id'] as number);
+    const namespace = this.namespace(objectId);
+    const unique = str(context['uniqueId']);
+    if (!document || !namespace || unique === undefined) return false;
+    this.namespaces.set(namespace, document);
+    this.proven.add(unique);
+    return true;
+  }
+
   learn(value: unknown, document: DocumentRef | undefined, depth = 0): void {
     if (depth > 32 || !value || typeof value !== 'object') return;
     if (
@@ -316,11 +332,15 @@ class DocumentBindings {
       this.backends.set(value['nodeId'], value['backendNodeId']);
     }
     for (const [key, item] of Object.entries(value)) {
+      if (key === 'value' && isObj(value) && typeof value['type'] === 'string') continue;
       const values = Array.isArray(item) ? item : [item];
       for (const entry of values) {
         const handle = this.key(key, entry);
         if (handle) {
-          this.handles.set(handle, document);
+          const owner = handle.startsWith('object:')
+            ? this.namespaces.get(this.namespace(entry) ?? '')
+            : document;
+          this.handles.set(handle, owner);
           if (this.handles.size > 50000)
             this.handles.delete(this.handles.keys().next().value as string);
         } else {
@@ -328,6 +348,13 @@ class DocumentBindings {
         }
       }
     }
+  }
+
+  event(params: CDPPayload, mainFrameId: string): void {
+    const created = isObj(params['context']) ? params['context'] : {};
+    const context = this.contexts.get((params['executionContextId'] ?? created['id']) as number);
+    const parent = this.handles.get(`node:${String(params['parentId'] ?? params['parentNodeId'])}`);
+    this.learn(params, context ?? parent ?? this.frames.get(str(params['frameId']) ?? mainFrameId));
   }
 
   scopeContext(key: string, item: unknown, tree: unknown): void {
@@ -349,7 +376,11 @@ class DocumentBindings {
           this.scope({ objectId: item['objectId'] }, tree);
         }
         const handle = this.key(key, item);
-        if (handle && !this.current(this.handles.get(handle), tree)) refuse(UNSEEN_CONTEXT);
+        const document =
+          handle?.startsWith('object:') && this.handles.has(handle)
+            ? this.namespaces.get(this.namespace(item) ?? '')
+            : this.handles.get(handle ?? '');
+        if (handle && !this.current(document, tree)) refuse(UNSEEN_CONTEXT);
       }
     }
   }
@@ -385,7 +416,8 @@ class DocumentBindings {
       frameId: str(root['id']) ?? '',
       loaderId: str(root['loaderId']) ?? '',
     };
-    if (params['objectId']) document = this.handles.get(`object:${String(params['objectId'])}`);
+    if (params['objectId'])
+      document = this.namespaces.get(this.namespace(params['objectId']) ?? '');
     const keyed = method === 'Runtime.evaluate' || method === 'Runtime.callFunctionOn';
     const numbered = [
       'Runtime.compileScript',
@@ -1690,6 +1722,50 @@ export class TabShield {
     refuse(ABOUT_STUCK);
   }
 
+  private async prove(tree: unknown): Promise<void> {
+    for (const context of this.worlds.visible()) {
+      const unique = str(context['uniqueId']);
+      const aux = isObj(context['auxData']) ? context['auxData'] : {};
+      const frame = frameIn(tree, str(aux['frameId']));
+      const current = this.documents.current(
+        this.documents.contexts.get(context['id'] as number),
+        tree
+      );
+      if (
+        unique === undefined ||
+        this.documents.proven.has(unique) ||
+        !frame ||
+        urlProtected(str(frame['url']) ?? '') ||
+        urlProtected(str(frame['securityOrigin']) ?? '')
+      )
+        continue;
+      if (!current && context['origin'] !== frame['securityOrigin'] && frame['url'] !== ERROR_PAGE)
+        continue;
+      let answer: CDPPayload;
+      try {
+        answer = await this.send('Runtime.evaluate', {
+          expression: '({})',
+          uniqueContextId: unique,
+          objectGroup: 'slicc:document-binding',
+        });
+      } catch (error) {
+        if (!current) continue;
+        throw error;
+      }
+      if (!current) {
+        const checked = await this.send('Page.getFrameTree', {});
+        if (frameIn(checked['frameTree'], str(frame['id']))?.['loaderId'] !== frame['loaderId'])
+          continue;
+        this.documents.frame(frame);
+        this.documents.context(context);
+      }
+      const remote = isObj(answer['result']) ? answer['result'] : {};
+      const objectId = remote['objectId'];
+      if (!this.documents.proof(context, objectId)) refuse(UNSEEN_CONTEXT);
+      void this.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+    }
+  }
+
   private async bind(
     method: string,
     params: CDPPayload
@@ -1700,6 +1776,10 @@ export class TabShield {
     const tree = await this.send('Page.getFrameTree', {}).catch(() =>
       refuse(PROTECTED_RULES.refusal)
     );
+    const root = frameIn(tree['frameTree'], undefined);
+    if (urlProtected(str(root?.['url']) ?? '') || urlProtected(str(root?.['securityOrigin']) ?? ''))
+      refuse(PROTECTED_RULES.refusal);
+    await this.prove(tree['frameTree']);
     return this.documents.bind(
       method,
       params,
@@ -2261,6 +2341,9 @@ export class TabShield {
       }
     }
     const released = id && SETTLES.has(event.method) ? this.settle(id) : [];
+    if (event.method.startsWith('DOM.') || event.method.startsWith('Runtime.')) {
+      this.documents.event(params, this.mainFrameId);
+    }
     this.worlds.learn(params);
     return [event, ...released];
   }
