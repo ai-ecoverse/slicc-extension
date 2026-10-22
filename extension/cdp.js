@@ -28,6 +28,7 @@ import {
   cookieRefused,
   cookieSetter,
   cookieUrlUnparseable,
+  DocumentBindings,
   dropProtectedCookies,
   EXTENSION_FRAME,
   extensionOrigin,
@@ -640,6 +641,7 @@ class Connection {
       return false;
     }
     const main = tree?.frameTree?.frame;
+    tab.documents.remember(tree?.frameTree);
     if (!main || typeof main.id !== 'string' || main.id === '') return false;
     if (this.protectedOrigin(textOf(main.securityOrigin))) return false;
     if (await this.inheritedProtected(tabId, main)) return false;
@@ -753,6 +755,8 @@ class Connection {
         pageUrl: seen.url,
         frames: new Map(),
         worlds: new Worlds(),
+        documents: new DocumentBindings(),
+        pendingFrames: new Set(),
         runtime: new Set(),
         requests: new Map(),
         networkStreams: new NetworkStreams(anyProtected),
@@ -1225,6 +1229,24 @@ class Connection {
     );
   }
 
+  async bind(tabId, tab, method, params) {
+    if (method.startsWith('Input.') && tab.pendingFrames.size > 0) refusal();
+    if (!sealedRead(method) && !method.startsWith('Runtime.')) return { params };
+    const tree = await this.send(tabId, 'Page.getFrameTree', {}).catch(() => refusal());
+    return tab.documents.bind(
+      method,
+      params ?? {},
+      tab.worlds.visible(),
+      tree?.frameTree,
+      tab.mainFrameId
+    );
+  }
+
+  async returned(tabId, sessionId, method) {
+    if (this.state.cut.has(sessionId)) refusal();
+    await this.checkReturn(tabId, sessionId, method);
+  }
+
   async sessionCommand(message, params) {
     const { method, sessionId } = message;
     const session = this.sessionOf(sessionId);
@@ -1270,9 +1292,12 @@ class Connection {
     if (about) return this.openBlank(tabId, params, about);
     if (method === 'Page.bringToFront') await activate(this.api, tabId);
     const seal = sealedRead(method) ? await this.seal(tabId, tab, method, params) : undefined;
+    const binding = await this.bind(tabId, tab, method, forwarded);
     await this.admit(tabId, tab, method, params, sessionId);
-    let result = (await this.send(tabId, method, forwarded)) ?? {};
+    let result = (await this.send(tabId, method, binding.params)) ?? {};
+    await this.returned(tabId, sessionId, method);
     if (seal) result = await this.unseal(tabId, tab, seal, method, result);
+    tab.documents.learn(result, binding.document);
     if (method === 'Page.captureSnapshot') snapshotChecked(result);
     await this.learn(tabId, tab, method, result);
     if (cookieReader(method)) result = dropProtectedCookies(guard, result);
@@ -1533,6 +1558,10 @@ class Connection {
   }
 
   watchFrame(tabId, tab, frame) {
+    tab.documents.frame(frame);
+    tab.pendingFrames.delete(textOf(frame.id));
+    tab.pendingFrames.delete('');
+    if (!frame.parentId) tab.pendingFrames.clear();
     const url = textOf(frame.url);
     const isProtected =
       this.protectedOrigin(textOf(frame.securityOrigin)) || urlProtected(guard, url);
@@ -1554,6 +1583,7 @@ class Connection {
   }
 
   watchContext(tabId, tab, ctx) {
+    tab.documents.context(ctx);
     const frameId = textOf(ctx.auxData?.frameId);
     const isProtected = this.protectedOrigin(textOf(ctx.origin));
     if (isProtected && ctx.auxData?.isDefault && frameId && frameId === tab.mainFrameId) {
@@ -1595,15 +1625,28 @@ class Connection {
   }
 
   watch(tabId, tab, method, p) {
+    if (
+      [
+        'Page.frameStartedLoading',
+        'Page.frameStartedNavigating',
+        'Page.frameRequestedNavigation',
+        'Page.frameScheduledNavigation',
+      ].includes(method)
+    ) {
+      tab.pendingFrames.add(textOf(p.frameId));
+    }
+    if (method === 'Page.navigatedWithinDocument') tab.pendingFrames.delete(textOf(p.frameId));
     if (this.headsToProtected(method, p)) return true;
     if (method === 'Page.frameNavigated') return this.watchFrame(tabId, tab, p.frame ?? {});
     if (method === 'Runtime.executionContextCreated') {
       return this.watchContext(tabId, tab, p.context ?? {});
     }
     if (method === 'Runtime.executionContextDestroyed') {
+      tab.documents.contexts.delete(p.executionContextId);
       return tab.worlds.remove(p.executionContextId);
     }
     if (method === 'Runtime.executionContextsCleared') {
+      tab.documents.contexts.clear();
       tab.worlds.clear();
       return false;
     }

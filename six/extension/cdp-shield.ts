@@ -20,6 +20,7 @@ import {
   profiled,
   RESERVED_WORLD,
   scopedBinding,
+  UNSEEN_CONTEXT,
   WORLD,
   Worlds,
 } from './cdp-worlds.js';
@@ -251,6 +252,175 @@ export function frameIn(tree: unknown, frameId: string | undefined): CDPPayload 
 export function sameDocument(current: string, next: string): boolean {
   return next.includes('#') && current.split('#')[0] === next.split('#')[0];
 }
+
+interface DocumentRef {
+  frameId: string;
+  loaderId: string;
+  uniqueId?: string | undefined;
+}
+
+class DocumentBindings {
+  readonly frames = new Map<string, DocumentRef>();
+  readonly contexts = new Map<number, DocumentRef>();
+  readonly handles = new Map<string, DocumentRef | undefined>();
+  readonly backends = new Map<number, number>();
+
+  remember(tree: unknown): void {
+    const pending = [tree];
+    while (pending.length > 0) {
+      const node = pending.pop();
+      if (!isObj(node)) continue;
+      this.frame(node['frame']);
+      if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
+    }
+  }
+
+  frame(frame: unknown): void {
+    if (!isObj(frame)) return;
+    const id = str(frame['id']);
+    const loaderId = str(frame['loaderId']);
+    if (id !== undefined && loaderId !== undefined) {
+      this.frames.set(id, { frameId: id, loaderId });
+    }
+  }
+
+  context(context: CDPPayload): void {
+    const aux = isObj(context['auxData']) ? context['auxData'] : {};
+    const document = this.frames.get(str(aux['frameId']) ?? '');
+    const id = context['id'];
+    if (document && typeof id === 'number') {
+      this.contexts.set(id, { ...document, uniqueId: str(context['uniqueId']) });
+    }
+  }
+
+  current(document: DocumentRef | undefined, tree: unknown): boolean {
+    if (!document) return false;
+    return frameIn(tree, document.frameId)?.['loaderId'] === document.loaderId;
+  }
+
+  key(key: string, value: unknown): string | undefined {
+    if (/^(objectId|\w+ObjectId)$/.test(key) && typeof value === 'string') return `object:${value}`;
+    if (/^(?:[a-z]+N|n)odeIds?$/.test(key) && typeof value === 'number') {
+      return `${key.startsWith('backend') ? 'backend' : 'node'}:${value}`;
+    }
+    return undefined;
+  }
+
+  learn(value: unknown, document: DocumentRef | undefined, depth = 0): void {
+    if (depth > 32 || !value || typeof value !== 'object') return;
+    if (
+      isObj(value) &&
+      typeof value['nodeId'] === 'number' &&
+      typeof value['backendNodeId'] === 'number'
+    ) {
+      this.backends.set(value['nodeId'], value['backendNodeId']);
+    }
+    for (const [key, item] of Object.entries(value)) {
+      const values = Array.isArray(item) ? item : [item];
+      for (const entry of values) {
+        const handle = this.key(key, entry);
+        if (handle) {
+          this.handles.set(handle, document);
+          if (this.handles.size > 50000)
+            this.handles.delete(this.handles.keys().next().value as string);
+        } else {
+          this.learn(entry, document, depth + 1);
+        }
+      }
+    }
+  }
+
+  scopeContext(key: string, item: unknown, tree: unknown): void {
+    if (key === 'contextId' || key === 'executionContextId') {
+      if (!this.current(this.contexts.get(item as number), tree)) refuse(UNSEEN_CONTEXT);
+    }
+    if (key === 'uniqueContextId' || key === 'executionContextUniqueId') {
+      const document = [...this.contexts.values()].find((entry) => entry.uniqueId === item);
+      if (!this.current(document, tree)) refuse(UNSEEN_CONTEXT);
+    }
+  }
+
+  scope(params: CDPPayload, tree: unknown): void {
+    for (const [key, value] of Object.entries(params)) {
+      const values = Array.isArray(value) ? value : [value];
+      for (const item of values) {
+        this.scopeContext(key, item, tree);
+        if (key === 'arguments' && isObj(item) && item['objectId']) {
+          this.scope({ objectId: item['objectId'] }, tree);
+        }
+        const handle = this.key(key, item);
+        if (handle && !this.current(this.handles.get(handle), tree)) refuse(UNSEEN_CONTEXT);
+      }
+    }
+  }
+
+  bind(
+    method: string,
+    params: CDPPayload,
+    visible: CDPPayload[],
+    tree: unknown,
+    mainFrameId: string
+  ): { params: CDPPayload; document: DocumentRef | undefined } {
+    this.scope(params, tree);
+    if (
+      params['nodeId'] !== undefined &&
+      [
+        'DOM.describeNode',
+        'DOM.getOuterHTML',
+        'DOM.resolveNode',
+        'DOM.focus',
+        'DOM.scrollIntoViewIfNeeded',
+        'DOM.getBoxModel',
+        'DOM.getContentQuads',
+        'DOM.setFileInputFiles',
+      ].includes(method)
+    ) {
+      const backendNodeId = this.backends.get(params['nodeId'] as number);
+      if (backendNodeId === undefined) refuse(UNSEEN_CONTEXT);
+      const { nodeId, ...rest } = params;
+      params = { ...rest, backendNodeId };
+    }
+    const root = frameIn(tree, undefined);
+    let document = root && {
+      frameId: str(root['id']) ?? '',
+      loaderId: str(root['loaderId']) ?? '',
+    };
+    if (params['objectId']) document = this.handles.get(`object:${String(params['objectId'])}`);
+    const keyed = method === 'Runtime.evaluate' || method === 'Runtime.callFunctionOn';
+    const numbered = [
+      'Runtime.compileScript',
+      'Runtime.runScript',
+      'Runtime.globalLexicalScopeNames',
+    ].includes(method);
+    if ((!keyed && !numbered) || (method === 'Runtime.callFunctionOn' && params['objectId'])) {
+      return { params, document };
+    }
+    const id = params['contextId'] ?? params['executionContextId'];
+    const unique = params['uniqueContextId'];
+    const context = [...visible].reverse().find((entry) => {
+      if (id !== undefined && entry['id'] !== id) return false;
+      if (unique !== undefined && entry['uniqueId'] !== unique) return false;
+      const aux = isObj(entry['auxData']) ? entry['auxData'] : {};
+      if (
+        id === undefined &&
+        unique === undefined &&
+        !(aux['isDefault'] && aux['frameId'] === mainFrameId)
+      )
+        return false;
+      return this.current(this.contexts.get(entry['id'] as number), tree);
+    });
+    if (!context || typeof context['uniqueId'] !== 'string') refuse(UNSEEN_CONTEXT);
+    document = this.contexts.get(context['id'] as number);
+    const { contextId, executionContextId, uniqueContextId, ...rest } = params;
+    return {
+      document,
+      params: keyed
+        ? { ...rest, uniqueContextId: context['uniqueId'] }
+        : { ...rest, executionContextId: context['id'] },
+    };
+  }
+}
+
 
 function isObj(value: unknown): value is CDPPayload {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -1164,6 +1334,8 @@ export class TabShield {
   private readonly hops = new Bounded<Hop>(500);
   private readonly reroutes = new Map<string, (allowed: boolean) => void>();
   private readonly worlds = new Worlds();
+  private readonly documents = new DocumentBindings();
+  private readonly pendingFrames = new Set<string>();
   private clientFetch: ClientFetch | null = null;
   private seal: Sealed | undefined;
   private readonly cut = new Set<unknown>();
@@ -1200,6 +1372,7 @@ export class TabShield {
   private async inventoryFrames(): Promise<void> {
     const tree = await this.send('Page.getFrameTree', {});
     const root = tree['frameTree'];
+    this.documents.remember(root);
     const main = isObj(root) && isObj(root['frame']) ? str(root['frame']['id']) : undefined;
     if (!main) refuse(PROTECTED_RULES.refusal);
     this.mainFrameId = main;
@@ -1261,12 +1434,13 @@ export class TabShield {
     }
     const reroute = this.pendingReroute(method, input, pauseId);
     const seal = await this.sealFor(method, input);
+    const binding = await this.bind(method, rewritten);
     await this.gate(method, input);
     let result: CDPPayload;
     try {
       result = await forward(
         method,
-        params === undefined && rewritten === input ? undefined : rewritten
+        params === undefined && binding.params === input ? undefined : binding.params
       );
     } catch (err) {
       this.reroutes.delete(pauseId);
@@ -1280,6 +1454,7 @@ export class TabShield {
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     const opened = await this.after(method, await this.unseal(seal, method, result ?? {}), input);
     await this.checkReturn(method);
+    this.documents.learn(opened, binding.document);
     return opened;
   }
 
@@ -1515,6 +1690,25 @@ export class TabShield {
     refuse(ABOUT_STUCK);
   }
 
+  private async bind(
+    method: string,
+    params: CDPPayload
+  ): Promise<{ params: CDPPayload; document: DocumentRef | undefined }> {
+    if (method.startsWith('Input.') && this.pendingFrames.size > 0) refuse(PROTECTED_RULES.refusal);
+    if (!sealedRead(method) && !method.startsWith('Runtime.'))
+      return { params, document: undefined };
+    const tree = await this.send('Page.getFrameTree', {}).catch(() =>
+      refuse(PROTECTED_RULES.refusal)
+    );
+    return this.documents.bind(
+      method,
+      params,
+      this.worlds.visible(),
+      tree['frameTree'],
+      this.mainFrameId
+    );
+  }
+
   private async gate(method: string, params: CDPPayload): Promise<void> {
     if (BROWSER_LEVEL.has(method)) return;
     if (FETCH_SETTLES.has(method)) {
@@ -1522,6 +1716,7 @@ export class TabShield {
       return;
     }
     const tab = await this.readLive();
+    if (method.startsWith('Input.') && tab.status === 'loading') refuse(PROTECTED_RULES.refusal);
     const confirmed = await this.confirmedError(tab);
     this.refuseShown(confirmed ? this.failedView(tab) : tab, await this.openerState(tab));
     if (tab.status === 'loading' && !confirmed) await this.protectedHistory();
@@ -1896,7 +2091,28 @@ export class TabShield {
     return (this.frames.get(frameId) ?? []).some((url) => urlProtected(url));
   }
 
+  private navigation(method: string, params: CDPPayload): void {
+    if (
+      [
+        'Page.frameStartedLoading',
+        'Page.frameStartedNavigating',
+        'Page.frameRequestedNavigation',
+        'Page.frameScheduledNavigation',
+      ].includes(method)
+    )
+      this.pendingFrames.add(str(params['frameId']) ?? '');
+    if (method === 'Page.navigatedWithinDocument')
+      this.pendingFrames.delete(str(params['frameId']) ?? '');
+    if (method !== 'Page.frameNavigated' || !isObj(params['frame'])) return;
+    const frame = params['frame'];
+    this.documents.frame(frame);
+    this.pendingFrames.delete(str(frame['id']) ?? '');
+    this.pendingFrames.delete('');
+    if (frame['parentId'] === undefined) this.pendingFrames.clear();
+  }
+
   private watchCommit(method: string, params: CDPPayload): boolean {
+    this.navigation(method, params);
     if (method === 'Page.frameNavigated' && isObj(params['frame'])) {
       const frame = params['frame'];
       const url = `${str(frame['url']) ?? ''}${str(frame['urlFragment']) ?? ''}`;
@@ -1915,9 +2131,11 @@ export class TabShield {
       return false;
     }
     if (method === 'Runtime.executionContextDestroyed') {
+      this.documents.contexts.delete(params['executionContextId'] as number);
       return this.worlds.remove(params['executionContextId']);
     }
     if (method === 'Runtime.executionContextsCleared') {
+      this.documents.contexts.clear();
       this.worlds.clear();
       return false;
     }
@@ -1928,6 +2146,7 @@ export class TabShield {
   }
 
   private watchContext(context: CDPPayload): boolean {
+    this.documents.context(context);
     const aux = isObj(context['auxData']) ? context['auxData'] : {};
     const origin = str(context['origin']) ?? '';
     const frame = str(aux['frameId']);

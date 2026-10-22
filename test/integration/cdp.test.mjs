@@ -36,7 +36,11 @@ function port(name, url, id = extensionId) {
   };
 }
 
-const plainTree = { frameTree: { frame: { id: 'MAIN', url: 'https://other.test/' } } };
+const plainTree = {
+  frameTree: {
+    frame: { id: 'MAIN', loaderId: 'doc-MAIN-https://other.test/', url: 'https://other.test/' },
+  },
+};
 
 function fakeChrome() {
   const eventListeners = new Set();
@@ -183,6 +187,37 @@ function fakeChrome() {
       for (const listener of detachListeners) listener({ tabId }, 'target_closed');
     },
   };
+  let send = api.debugger.sendCommand;
+  let mainFrame = plainTree.frameTree.frame;
+  const wrapped = async (target, method, params) => {
+    const answer = await send(target, method, params);
+    if (method === 'Page.getFrameTree' && answer?.frameTree) {
+      const pending = [answer.frameTree];
+      while (pending.length > 0) {
+        const node = pending.pop();
+        if (node?.frame) node.frame.loaderId ??= `doc-${node.frame.id}-${node.frame.url}`;
+        if (node?.childFrames) pending.push(...node.childFrames);
+      }
+      mainFrame = answer.frameTree.frame;
+    }
+    if (method === 'Runtime.enable') {
+      api.fire(target.tabId, 'Runtime.executionContextCreated', {
+        context: {
+          id: 9999,
+          uniqueId: 'fake-main',
+          origin: 'https://other.test',
+          auxData: { frameId: mainFrame.id, isDefault: true },
+        },
+      });
+    }
+    return answer;
+  };
+  Object.defineProperty(api.debugger, 'sendCommand', {
+    get: () => wrapped,
+    set: (next) => {
+      send = next;
+    },
+  });
   return api;
 }
 
@@ -388,7 +423,11 @@ test('flatten true keeps the session on the attaching port and forwards its even
   });
   assert.deepEqual(evaluated.result, { value: 2 });
   assert.deepEqual(user(api), [
-    { tabId: 8, method: 'Runtime.evaluate', params: { expression: '1+1' } },
+    {
+      tabId: 8,
+      method: 'Runtime.evaluate',
+      params: { expression: '1+1', uniqueContextId: 'fake-main' },
+    },
   ]);
   assert.deepEqual(api.sent[0], {
     tabId: 8,

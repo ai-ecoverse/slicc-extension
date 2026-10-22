@@ -1143,6 +1143,149 @@ export class Worlds {
   }
 }
 
+export class DocumentBindings {
+  constructor() {
+    this.frames = new Map();
+    this.contexts = new Map();
+    this.handles = new Map();
+    this.backends = new Map();
+  }
+
+  remember(tree) {
+    const pending = [tree];
+    while (pending.length) {
+      const node = pending.pop();
+      this.frame(node?.frame);
+      if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
+    }
+  }
+
+  frame(frame) {
+    if (typeof frame?.id === 'string' && typeof frame.loaderId === 'string') {
+      this.frames.set(frame.id, { frameId: frame.id, loaderId: frame.loaderId });
+    }
+  }
+
+  context(context) {
+    const document = this.frames.get(context?.auxData?.frameId);
+    if (document && typeof context?.id === 'number') {
+      this.contexts.set(context.id, { ...document, uniqueId: context.uniqueId });
+    }
+  }
+
+  current(document, tree) {
+    if (!document) return false;
+    return frameIn(tree, document.frameId)?.loaderId === document.loaderId;
+  }
+
+  key(key, value) {
+    if (OBJECT_KEY.test(key) && typeof value === 'string') return `object:${value}`;
+    if (NODE_KEY.test(key) && typeof value === 'number') {
+      return `${key.startsWith('backend') ? 'backend' : 'node'}:${value}`;
+    }
+    return undefined;
+  }
+
+  learn(value, document, depth = 0) {
+    if (depth > 32 || !value || typeof value !== 'object') return;
+    if (typeof value.nodeId === 'number' && typeof value.backendNodeId === 'number') {
+      this.backends.set(value.nodeId, value.backendNodeId);
+    }
+    for (const [key, item] of Object.entries(value)) {
+      const values = Array.isArray(item) ? item : [item];
+      for (const entry of values) {
+        const handle = this.key(key, entry);
+        if (handle) {
+          this.handles.set(handle, document);
+          if (this.handles.size > 50000) this.handles.delete(this.handles.keys().next().value);
+        } else {
+          this.learn(entry, document, depth + 1);
+        }
+      }
+    }
+  }
+
+  scopeContext(key, item, tree) {
+    if (key === 'contextId' || key === 'executionContextId') {
+      if (!this.current(this.contexts.get(item), tree)) throw new Error(UNSEEN_CONTEXT);
+    }
+    if (key === 'uniqueContextId' || key === 'executionContextUniqueId') {
+      const document = [...this.contexts.values()].find((entry) => entry.uniqueId === item);
+      if (!this.current(document, tree)) throw new Error(UNSEEN_CONTEXT);
+    }
+  }
+
+  scope(params, tree) {
+    for (const [key, value] of Object.entries(params)) {
+      const values = Array.isArray(value) ? value : [value];
+      for (const item of values) {
+        this.scopeContext(key, item, tree);
+        if (key === 'arguments' && item?.objectId) this.scope({ objectId: item.objectId }, tree);
+        const handle = this.key(key, item);
+        if (handle && !this.current(this.handles.get(handle), tree)) {
+          throw new Error(UNSEEN_CONTEXT);
+        }
+      }
+    }
+  }
+
+  bind(method, params, visible, tree, mainFrameId) {
+    this.scope(params, tree);
+    if (
+      params.nodeId !== undefined &&
+      [
+        'DOM.describeNode',
+        'DOM.getOuterHTML',
+        'DOM.resolveNode',
+        'DOM.focus',
+        'DOM.scrollIntoViewIfNeeded',
+        'DOM.getBoxModel',
+        'DOM.getContentQuads',
+        'DOM.setFileInputFiles',
+      ].includes(method)
+    ) {
+      const backendNodeId = this.backends.get(params.nodeId);
+      if (backendNodeId === undefined) throw new Error(UNSEEN_CONTEXT);
+      const { nodeId, ...rest } = params;
+      params = { ...rest, backendNodeId };
+    }
+    const root = frameIn(tree);
+    let document = root && { frameId: root.id, loaderId: root.loaderId };
+    if (params.objectId) document = this.handles.get(`object:${params.objectId}`);
+    const keyed = method === 'Runtime.evaluate' || method === 'Runtime.callFunctionOn';
+    const numbered = [
+      'Runtime.compileScript',
+      'Runtime.runScript',
+      'Runtime.globalLexicalScopeNames',
+    ].includes(method);
+    if ((!keyed && !numbered) || (method === 'Runtime.callFunctionOn' && params.objectId)) {
+      return { params, document };
+    }
+    const id = params.contextId ?? params.executionContextId;
+    const unique = params.uniqueContextId;
+    const context = [...visible].reverse().find((entry) => {
+      if (id !== undefined && entry.id !== id) return false;
+      if (unique !== undefined && entry.uniqueId !== unique) return false;
+      if (
+        id === undefined &&
+        unique === undefined &&
+        !(entry.auxData?.isDefault && entry.auxData.frameId === mainFrameId)
+      )
+        return false;
+      return this.current(this.contexts.get(entry.id), tree);
+    });
+    if (!context || typeof context.uniqueId !== 'string') throw new Error(UNSEEN_CONTEXT);
+    document = this.contexts.get(context.id);
+    const { contextId, executionContextId, uniqueContextId, ...rest } = params;
+    return {
+      document,
+      params: keyed
+        ? { ...rest, uniqueContextId: context.uniqueId }
+        : { ...rest, executionContextId: context.id },
+    };
+  }
+}
+
 export const EXTENSION_FRAME =
   "slicc: refused: another browser extension has a frame in this tab, and Chrome doesn't let one extension debug another's frames";
 
