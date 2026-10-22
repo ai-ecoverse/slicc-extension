@@ -212,6 +212,20 @@ export async function pages(tls) {
     if (pathname === '/redirect') {
       return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();
     }
+    if (pathname === '/marker') {
+      const page =
+        '<!doctype html><meta charset="utf-8"><title>marker</title><script>' +
+        'window.__sliccDoc=location.hostname==="vault.sliccy.ai"?"protected":"ordinary";' +
+        'window.__sliccRestored=false;' +
+        'addEventListener("pageshow",function(e){window.__sliccRestored=e.persisted===true;});' +
+        '</script>';
+      return response
+        .writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'public, max-age=3600',
+        })
+        .end(page);
+    }
     if (pathname === '/frame') {
       const src = JSON.stringify(searchParams.get('src') ?? '/');
       const page = `<!doctype html><title>frame</title><iframe src=${src}></iframe>`;
