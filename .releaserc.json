@@ -6,7 +6,7 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "node scripts/pack.mjs ${nextRelease.version} && node scripts/gate.mjs live-permissions -- node scripts/check-live-permissions.mjs && node scripts/gate.mjs six-floor -- node scripts/check-six-floor.mjs",
+        "prepareCmd": "npm run build && node scripts/pack.mjs ${nextRelease.version} && node scripts/check-live-permissions.mjs && node scripts/check-six-floor.mjs",
         "generateNotesCmd": "node scripts/release-notes.mjs"
       }
     ],

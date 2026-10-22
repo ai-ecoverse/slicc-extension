@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { crc32, inflateRawSync } from 'node:zlib';
-import { isMain } from '../is-main.mjs';
+import { isMain } from './is-main.mjs';
 
 const ITEM = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
 const UPDATE_URL = 'https://clients2.google.com/service/update2/crx';

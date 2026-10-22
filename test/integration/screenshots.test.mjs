@@ -1,55 +1,37 @@
 import assert from 'node:assert/strict';
-import { mkdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright-core';
-import { certificate } from './servers.mjs';
+import { after, before, test } from 'node:test';
+import { launch } from '@ai-ecoverse/slicc-shared-web/harness';
+import { copies } from './copies.mjs';
+import { extId } from './extension-page.mjs';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
-const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
 const extPages = ['sidepanel.html', 'secrets.html', 'capture-popup.html', 'picker-popup.html'];
 
-async function launchWithExtension(extensionDir) {
-  const dir = await mkdir(join(tmpdir(), `slicc-shot-${Date.now()}`), {
-    recursive: true,
-  });
-  const tls = await certificate(dir);
-  const browser = await chromium.launchPersistentContext(join(dir, 'profile'), {
-    executablePath: chromium.executablePath(),
-    headless: false,
-    args: [
-      '--headless=new',
-      `--load-extension=${extensionDir}`,
-      `--disable-extensions-except=${extensionDir}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--ignore-certificate-errors',
-    ],
-    ignoreDefaultArgs: ['--disable-extensions', '--headless'],
-  });
-  return { browser, dir };
-}
+let chrome;
+let copy;
 
-test('extension pages load without console errors', async () => {
-  await rm(join(root, 'extension', '_metadata'), { recursive: true, force: true });
-  const { browser, dir } = await launchWithExtension(join(root, 'extension'));
-  try {
-    for (const pageName of extPages) {
-      const errors = [];
-      const page = await browser.newPage();
-      page.on('pageerror', (err) => errors.push(err.message));
-      await page.goto(`chrome-extension://${extId}/${pageName}`, {
-        waitUntil: 'load',
-        timeout: 10000,
-      });
-      await page.waitForTimeout(500);
-      assert.deepEqual(errors, [], `${pageName} had console errors: ${errors.join('; ')}`);
-      await page.close();
-    }
-  } finally {
-    await browser.close();
-    await rm(dir, { recursive: true, force: true });
+before(async () => {
+  copy = await copies(['extension/']);
+  chrome = await launch({
+    roots: [['/', 'test/integration/page/']],
+    coverage: [],
+    extensions: copy.paths,
+    args: ['--ignore-certificate-errors'],
+  });
+});
+
+after(async () => {
+  await chrome?.close();
+  await copy?.remove();
+});
+
+test('extension pages load without console errors', async (t) => {
+  const first = await chrome.page(t);
+  for (const pageName of extPages) {
+    const page = await first.tab();
+    const url = `chrome-extension://${extId}/${pageName}`;
+    await page.send('Page.navigate', { url });
+    await page.until((href) => location.href === href && document.readyState === 'complete', url);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.deepEqual(page.errors, [], `${pageName} had console errors: ${page.errors.join('; ')}`);
   }
 });

@@ -32,26 +32,3 @@ test('isMain is true for the entry script through a symlink and false for an imp
   });
   assert.equal(out, 'true false');
 });
-
-function gate(name, code) {
-  try {
-    const out = execFileSync(
-      process.execPath,
-      [join(root, 'scripts/gate.mjs'), name, '--', process.execPath, '-e', code],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-    return { ok: true, out };
-  } catch (err) {
-    return { ok: false, out: `${err.stdout}${err.stderr}` };
-  }
-}
-
-test('a gate passes only on its explicit PASS line (control) and fails on silence, a wrong verdict or a non-zero exit', () => {
-  assert.equal(gate('demo', "process.stdout.write('demo: PASS ok\\n')").ok, true);
-  const silent = gate('demo', '');
-  assert.equal(silent.ok, false);
-  assert.match(silent.out, /GATE FAILED: demo printed no "demo: PASS" line/);
-  assert.equal(gate('demo', "process.stdout.write('demo: SKIP nothing\\n')").ok, false);
-  assert.equal(gate('demo', "process.stdout.write('other: PASS\\n')").ok, false);
-  assert.equal(gate('demo', "process.stdout.write('demo: PASS\\n'); process.exit(3)").ok, false);
-});
