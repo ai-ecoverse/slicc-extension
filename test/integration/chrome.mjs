@@ -13,7 +13,7 @@ function spki(cert) {
     .digest('base64');
 }
 
-export async function launch({ pinned = false, args = [] } = {}) {
+export async function launch({ pinned = false, prepare, args = [] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'slicc-extension-'));
   const tls = await certificate(dir);
   const site = await pages(tls);
@@ -35,6 +35,14 @@ export async function launch({ pinned = false, args = [] } = {}) {
     `MAP ims-na1.adobelogin.com 127.0.0.1:${adobe.port}`,
   ].join(', ');
   const copy = await copies(['extension/', 'test/integration/fixture-extension/']);
+  if (prepare) {
+    try {
+      await prepare(copy.paths);
+    } catch (error) {
+      await copy.remove();
+      throw error;
+    }
+  }
   const chrome = await start({
     roots: [['/', 'test/integration/page/']],
     coverage: process.env.SLICC_COVERAGE ? undefined : [],
