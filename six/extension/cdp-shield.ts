@@ -1736,7 +1736,7 @@ export class TabShield {
   }
 
   private async prove(tree: unknown): Promise<void> {
-    for (const context of this.worlds.visible()) {
+    for (const context of this.worlds.bindingContexts()) {
       const unique = str(context['uniqueId']);
       const frame = this.documents.frameOf(context, tree);
       const current = this.documents.current(
@@ -1797,7 +1797,7 @@ export class TabShield {
     return this.documents.bind(
       method,
       params,
-      this.worlds.visible(),
+      this.worlds.bindingContexts(),
       tree['frameTree'],
       str(root?.['id']) ?? this.mainFrameId
     );

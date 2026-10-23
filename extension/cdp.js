@@ -1231,7 +1231,7 @@ class Connection {
   }
 
   async prove(tabId, tab, tree) {
-    for (const context of tab.worlds.visible()) {
+    for (const context of tab.worlds.bindingContexts()) {
       const frame = frameIn(tree, context.auxData?.frameId);
       const current = tab.documents.current(tab.documents.contexts.get(context.id), tree);
       if (
@@ -1288,7 +1288,7 @@ class Connection {
     return tab.documents.bind(
       method,
       params ?? {},
-      tab.worlds.visible(),
+      tab.worlds.bindingContexts(),
       tree?.frameTree,
       root?.id ?? tab.mainFrameId
     );

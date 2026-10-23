@@ -1100,6 +1100,15 @@ export class Worlds {
       .map(([, entry]) => entry.context);
   }
 
+  bindingContexts() {
+    return [...this.ids.values()]
+      .map((entry) => entry.context)
+      .filter(
+        (context) =>
+          typeof context?.uniqueId === 'string' && this.uniques.get(context.uniqueId) === false
+      );
+  }
+
   named(name) {
     return typeof name === 'string' && this.names.has(name);
   }
