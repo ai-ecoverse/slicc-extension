@@ -251,6 +251,8 @@ function user(api) {
         'Page.getNavigationHistory',
         'Target.setAutoAttach',
         'Runtime.enable',
+        'Page.enable',
+        'Page.setLifecycleEventsEnabled',
       ].includes(sent.method)
   );
 }
@@ -428,6 +430,15 @@ test('flatten true keeps the session on the attaching port and forwards its even
   });
   assert.deepEqual(again.result, { sessionId: '8.1' });
   assert.equal(api.attached.length, 1);
+  assert.deepEqual(
+    api.sent.filter(
+      (sent) => sent.method === 'Page.enable' || sent.method === 'Page.setLifecycleEventsEnabled'
+    ),
+    [
+      { tabId: 8, method: 'Page.enable', params: {} },
+      { tabId: 8, method: 'Page.setLifecycleEventsEnabled', params: { enabled: true } },
+    ]
+  );
   const evaluated = await command(cdp, connection, {
     id: 3,
     method: 'Runtime.evaluate',
@@ -457,6 +468,21 @@ test('flatten true keeps the session on the attaching port and forwards its even
     sessionId: '8',
   });
   assert.match(stolen.error, /No tab attached for sessionId: 8/);
+  api.fire(8, 'Page.loadEventFired', { name: 'load' });
+  await cdp.settled();
+  assert.equal(
+    connection.posted.some((message) => message.method === 'Page.loadEventFired'),
+    false
+  );
+  await command(cdp, connection, { id: 40, method: 'Page.enable', sessionId: '8' });
+  api.fire(8, 'Page.loadEventFired', { name: 'load' });
+  await cdp.settled();
+  assert.deepEqual(connection.posted.at(-1), {
+    method: 'Page.loadEventFired',
+    params: { name: 'load' },
+    sessionId: '8',
+  });
+  await command(cdp, connection, { id: 41, method: 'Page.enable', sessionId: '8.1' });
   api.fire(8, 'Page.loadEventFired', { name: 'load' });
   await cdp.settled();
   assert.deepEqual(connection.posted.slice(-2), [

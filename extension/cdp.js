@@ -758,6 +758,7 @@ class Connection {
         worlds: new Worlds(),
         documents: new DocumentBindings(),
         pendingFrames: new Set(),
+        startedFrames: new Set(),
         page: new Set(),
         lifecycle: new Set(),
         pageObserved: false,
@@ -1647,7 +1648,12 @@ class Connection {
     tab.documents.frame(frame);
     tab.pendingFrames.delete(textOf(frame.id));
     tab.pendingFrames.delete('');
-    if (!frame.parentId) tab.pendingFrames.clear();
+    tab.startedFrames.delete(textOf(frame.id));
+    tab.startedFrames.delete('');
+    if (!frame.parentId) {
+      tab.pendingFrames.clear();
+      tab.startedFrames.clear();
+    }
     const url = textOf(frame.url);
     const isProtected =
       this.protectedOrigin(textOf(frame.securityOrigin)) || urlProtected(guard, url);
@@ -1710,25 +1716,37 @@ class Connection {
     }
   }
 
-  watch(tabId, tab, method, p) {
-    if (
-      [
-        'Page.frameStartedLoading',
-        'Page.frameStartedNavigating',
-        'Page.frameRequestedNavigation',
-        'Page.frameScheduledNavigation',
-      ].includes(method)
-    ) {
-      tab.pendingFrames.add(textOf(p.frameId));
+  navigation(tab, method, p) {
+    const id = textOf(p.frameId);
+    if (['Page.frameStartedLoading', 'Page.frameStartedNavigating'].includes(method)) {
+      tab.startedFrames.add(id);
+      tab.pendingFrames.add(id);
+    }
+    if (['Page.frameRequestedNavigation', 'Page.frameScheduledNavigation'].includes(method)) {
+      tab.pendingFrames.add(id);
     }
     if (
       method === 'Page.lifecycleEvent' &&
       p.name === 'init' &&
       p.frameId === tab.mainFrameId &&
       p.loaderId !== tab.documents.frames.get(p.frameId)?.loaderId
-    )
-      tab.pendingFrames.add(p.frameId);
-    if (method === 'Page.navigatedWithinDocument') tab.pendingFrames.delete(textOf(p.frameId));
+    ) {
+      tab.pendingFrames.add(id);
+      tab.startedFrames.add(id);
+    }
+    if (
+      ['Page.frameStoppedLoading', 'Page.frameDetached', 'Page.navigatedWithinDocument'].includes(
+        method
+      ) ||
+      (method === 'Page.frameClearedScheduledNavigation' && !tab.startedFrames.has(id))
+    ) {
+      tab.pendingFrames.delete(id);
+      tab.startedFrames.delete(id);
+    }
+  }
+
+  watch(tabId, tab, method, p) {
+    this.navigation(tab, method, p);
     if (this.headsToProtected(method, p)) return true;
     if (method === 'Page.frameNavigated') return this.watchFrame(tabId, tab, p.frame ?? {});
     if (method === 'Runtime.executionContextCreated') {

@@ -1392,6 +1392,7 @@ export class TabShield {
   private readonly worlds = new Worlds();
   private readonly documents = new DocumentBindings();
   private readonly pendingFrames = new Set<string>();
+  private readonly startedFrames = new Set<string>();
   private pageObserved = false;
   private clientFetch: ClientFetch | null = null;
   private seal: Sealed | undefined;
@@ -2222,30 +2223,43 @@ export class TabShield {
   }
 
   private navigation(method: string, params: CDPPayload): void {
-    if (
-      [
-        'Page.frameStartedLoading',
-        'Page.frameStartedNavigating',
-        'Page.frameRequestedNavigation',
-        'Page.frameScheduledNavigation',
-      ].includes(method)
-    )
-      this.pendingFrames.add(str(params['frameId']) ?? '');
+    const id = str(params['frameId']) ?? '';
+    if (['Page.frameStartedLoading', 'Page.frameStartedNavigating'].includes(method)) {
+      this.startedFrames.add(id);
+      this.pendingFrames.add(id);
+    }
+    if (['Page.frameRequestedNavigation', 'Page.frameScheduledNavigation'].includes(method)) {
+      this.pendingFrames.add(id);
+    }
     if (
       method === 'Page.lifecycleEvent' &&
       params['name'] === 'init' &&
       params['frameId'] === this.mainFrameId &&
       params['loaderId'] !== this.documents.frames.get(this.mainFrameId)?.loaderId
-    )
-      this.pendingFrames.add(this.mainFrameId);
-    if (method === 'Page.navigatedWithinDocument')
-      this.pendingFrames.delete(str(params['frameId']) ?? '');
+    ) {
+      this.pendingFrames.add(id);
+      this.startedFrames.add(id);
+    }
+    if (
+      ['Page.frameStoppedLoading', 'Page.frameDetached', 'Page.navigatedWithinDocument'].includes(
+        method
+      ) ||
+      (method === 'Page.frameClearedScheduledNavigation' && !this.startedFrames.has(id))
+    ) {
+      this.pendingFrames.delete(id);
+      this.startedFrames.delete(id);
+    }
     if (method !== 'Page.frameNavigated' || !isObj(params['frame'])) return;
     const frame = params['frame'];
     this.documents.frame(frame);
     this.pendingFrames.delete(str(frame['id']) ?? '');
     this.pendingFrames.delete('');
-    if (frame['parentId'] === undefined) this.pendingFrames.clear();
+    this.startedFrames.delete(str(frame['id']) ?? '');
+    this.startedFrames.delete('');
+    if (frame['parentId'] === undefined) {
+      this.pendingFrames.clear();
+      this.startedFrames.clear();
+    }
   }
 
   private watchCommit(method: string, params: CDPPayload): boolean {

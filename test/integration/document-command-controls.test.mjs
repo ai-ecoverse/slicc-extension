@@ -21,16 +21,19 @@ for (const transport of ['seven', 'six-bridge']) {
       const out = {};
       const first = `https://ordinary.test/doc?n=${n}`;
       const second = `${first}-next`;
-      const { targetId } = await h.send('Target.createTarget', { url: first });
-      const { sessionId: s } = await h.send('Target.attachToTarget', { targetId, flatten: true });
+      const { targetId } = await h.cdp.send('Target.createTarget', { url: first });
+      const { sessionId: s } = await h.cdp.send('Target.attachToTarget', {
+        targetId,
+        flatten: true,
+      });
       await h.until(async () => (await h.evaluate(s, 'document.readyState')) === 'complete');
       await h.evaluate(
         s,
         'document.body.insertAdjacentHTML("beforeend", "<button id=grokButton>control</button>")'
       );
-      await h.send('DOM.enable', {}, s);
-      const { root } = await h.send('DOM.getDocument', { depth: 0 }, s);
-      const frameTree = await h.send('Page.getFrameTree', {}, s);
+      await h.cdp.send('DOM.enable', {}, s);
+      const { root } = await h.cdp.send('DOM.getDocument', { depth: 0 }, s);
+      const frameTree = await h.cdp.send('Page.getFrameTree', {}, s);
       out.replacement = await h.attempt(
         'Page.setDocumentContent',
         {
@@ -39,7 +42,7 @@ for (const transport of ['seven', 'six-bridge']) {
         },
         s
       );
-      const compiled = await h.send(
+      const compiled = await h.cdp.send(
         'Runtime.compileScript',
         {
           expression: 'globalThis.__grokRunScript = true',
@@ -53,30 +56,34 @@ for (const transport of ['seven', 'six-bridge']) {
         s,
         '!document.getElementById("grokReplacement") && !globalThis.__grokRunScript'
       );
-      const one = await h.send(
+      const one = await h.cdp.send(
         'DOM.querySelector',
         { nodeId: root.nodeId, selector: '#grokButton' },
         s
       );
-      const all = await h.send(
+      const all = await h.cdp.send(
         'DOM.querySelectorAll',
         { nodeId: root.nodeId, selector: '#grokButton' },
         s
       );
-      const search = await h.send('DOM.performSearch', { query: '#grokButton' }, s);
-      const searched = await h.send(
+      const search = await h.cdp.send('DOM.performSearch', { query: '#grokButton' }, s);
+      const searched = await h.cdp.send(
         'DOM.getSearchResults',
         { searchId: search.searchId, fromIndex: 0, toIndex: search.resultCount },
         s
       );
-      const object = await h.send(
+      const object = await h.cdp.send(
         'Runtime.evaluate',
         { expression: 'document.getElementById("grokButton")' },
         s
       );
-      const requested = await h.send('DOM.requestNode', { objectId: object.result.objectId }, s);
-      const described = await h.send('DOM.describeNode', { nodeId: one.nodeId }, s);
-      const pushed = await h.send(
+      const requested = await h.cdp.send(
+        'DOM.requestNode',
+        { objectId: object.result.objectId },
+        s
+      );
+      const described = await h.cdp.send('DOM.describeNode', { nodeId: one.nodeId }, s);
+      const pushed = await h.cdp.send(
         'DOM.pushNodesByBackendIdsToFrontend',
         { backendNodeIds: [described.node.backendNodeId] },
         s
@@ -100,10 +107,10 @@ for (const transport of ['seven', 'six-bridge']) {
           out.nodes.push({ method, nodeId, answer: await h.attempt(method, { nodeId }, s) });
         }
       }
-      await h.send('Page.enable', {}, s);
-      await h.send('Page.disable', {}, s);
+      await h.cdp.send('Page.enable', {}, s);
+      await h.cdp.send('Page.disable', {}, s);
       const start = h.events.length;
-      await h.send(
+      await h.cdp.send(
         'Fetch.enable',
         { patterns: [{ urlPattern: second, resourceType: 'Document', requestStage: 'Request' }] },
         s
@@ -124,7 +131,7 @@ for (const transport of ['seven', 'six-bridge']) {
         { type: 'keyDown', key: 'x', text: 'x' },
         s
       );
-      await h.send('Fetch.continueRequest', { requestId: paused.params.requestId }, s);
+      await h.cdp.send('Fetch.continueRequest', { requestId: paused.params.requestId }, s);
       out.navigation = await navigating;
       await h.until(
         async () =>
@@ -139,9 +146,9 @@ for (const transport of ['seven', 'six-bridge']) {
       out.hiddenPageEvents = h.events
         .slice(start)
         .filter((e) => e.sessionId === s && e.method.startsWith('Page.')).length;
-      await h.send('Page.enable', {}, s);
+      await h.cdp.send('Page.enable', {}, s);
       const enabled = h.events.length;
-      await h.send('Page.navigate', { url: `${first}-enabled` }, s);
+      await h.cdp.send('Page.navigate', { url: `${first}-enabled` }, s);
       await h.until(() =>
         h.events.slice(enabled).some((e) => e.sessionId === s && e.method === 'Page.frameNavigated')
       );
@@ -154,7 +161,51 @@ for (const transport of ['seven', 'six-bridge']) {
         { searchId: search.searchId, fromIndex: 0, toIndex: 1 },
         s
       );
-      await h.send('Target.closeTarget', { targetId });
+      const enabledUrl = `${first}-enabled`;
+      await h.until(
+        async () =>
+          (await h.evaluate(s, 'document.readyState === "complete" ? location.href : ""')) ===
+          enabledUrl
+      );
+      out.cancellations = [];
+      for (const [kind, expression, terminal] of [
+        [
+          '204',
+          'location.href="https://upstream.test/empty"; "issued"',
+          'Page.frameStoppedLoading',
+        ],
+        [
+          'removed-frame',
+          'globalThis.__grokRemoved=false; const f=document.createElement("iframe"); f.src="https://upstream.test/noise?size=100000"; document.body.append(f); setTimeout(()=>{f.remove();globalThis.__grokRemoved=true},5); "issued"',
+          'Page.frameDetached',
+        ],
+      ]) {
+        const start = h.events.length;
+        const control = await h.attempt(
+          'Input.dispatchMouseEvent',
+          { type: 'mouseMoved', x: 10, y: 10 },
+          s
+        );
+        await h.evaluate(s, expression);
+        const ended = await h.until(() =>
+          h.events.slice(start).some((e) => e.sessionId === s && e.method === terminal)
+        );
+        const recovered = await h.until(async () => {
+          const href = await h.evaluate(
+            s,
+            'document.readyState === "complete" ? location.href : ""'
+          );
+          if (href !== enabledUrl) return undefined;
+          const input = await h.attempt(
+            'Input.dispatchMouseEvent',
+            { type: 'mouseMoved', x: 10, y: 10 },
+            s
+          );
+          return input.error === undefined ? { href, input } : undefined;
+        });
+        out.cancellations.push({ kind, control, ended, recovered });
+      }
+      await h.cdp.send('Target.closeTarget', { targetId });
       return out;
     }, n);
     console.log('document-command controls', JSON.stringify({ transport, ...out }));
@@ -170,5 +221,12 @@ for (const transport of ['seven', 'six-bridge']) {
     assert.ok(out.visiblePageEvents > 0);
     assert.match(out.staleNode.error ?? '', /slicc: refused:/);
     assert.match(out.staleSearch.error ?? '', /slicc: refused:/);
+    assert.equal(out.cancellations.length, 2);
+    for (const row of out.cancellations) {
+      assert.equal(row.control.error, undefined, JSON.stringify(row));
+      assert.equal(row.ended, true, JSON.stringify(row));
+      assert.ok(row.recovered, JSON.stringify(row));
+      assert.equal(row.recovered.input.error, undefined, JSON.stringify(row));
+    }
   });
 }
