@@ -34,6 +34,50 @@ import {
   refuseUnparseableDestination,
 } from './protected-origins.js';
 
+const ERROR_PAGE = 'chrome-error://chromewebdata/';
+const BROWSER_LEVEL = new Set([
+  'Browser.getVersion',
+  'Browser.getBrowserCommandLine',
+  'Browser.getHistograms',
+  'Browser.getHistogram',
+  'Browser.getWindowForTarget',
+  'Browser.getWindowBounds',
+  'Browser.setWindowBounds',
+  'Browser.setDockTile',
+  'Target.getTargets',
+  'Target.getBrowserContexts',
+  'Target.setDiscoverTargets',
+]);
+
+function unfragmented(url: string): string {
+  const at = url.indexOf('#');
+  return at < 0 ? url : url.slice(0, at);
+}
+
+function contentResult(method: string): boolean {
+  return (
+    sealedRead(method) ||
+    method.startsWith('DOM.') ||
+    method.startsWith('CSS.') ||
+    method.startsWith('Accessibility.') ||
+    method.startsWith('Runtime.') ||
+    method === 'Page.captureScreenshot' ||
+    method === 'Page.printToPDF' ||
+    method === 'Page.getFrameTree' ||
+    method === 'Page.getResourceTree' ||
+    method === 'Page.getNavigationHistory' ||
+    method === 'Debugger.getScriptSource' ||
+    method === 'Network.getResponseBody' ||
+    method === 'Network.getRequestPostData' ||
+    method === 'Network.getResponseBodyForInterception' ||
+    method === 'Network.streamResourceContent' ||
+    method === 'IO.read' ||
+    method === 'IO.resolveBlob' ||
+    method === 'Fetch.getResponseBody' ||
+    method === 'Fetch.takeResponseBodyAsStream'
+  );
+}
+
 const ORIGIN_KEYS = new Set([
   'origin',
   'securityOrigin',
@@ -1126,7 +1170,10 @@ export class TabShield {
   constructor(
     private readonly send: Send,
     private readonly onBlocked: () => void,
-    private readonly failedDocuments = new Bounded<true>(200)
+    private readonly failedDocuments = new Bounded<true>(200),
+    private readonly readTab: () => Promise<ChromeTab | undefined> = async () => undefined,
+    private readonly lookupTab: (tabId: number) => Promise<ChromeTab | undefined> = async () =>
+      undefined
   ) {}
 
   get blocked(): boolean {
@@ -1194,6 +1241,7 @@ export class TabShield {
   ): Promise<CDPPayload> {
     const input = method === 'Runtime.addBinding' ? scopedBinding(params ?? {}) : (params ?? {});
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
+    await this.gate(method, input);
     await this.admit(method, input);
     if (method === 'Runtime.enable' || method === 'Runtime.disable') return {};
     const about = method === 'Page.navigate' ? aboutUrl(input['url']) : undefined;
@@ -1210,6 +1258,7 @@ export class TabShield {
     }
     const reroute = this.pendingReroute(method, input, pauseId);
     const seal = await this.sealFor(method, input);
+    await this.gate(method, input);
     let result: CDPPayload;
     try {
       result = await forward(
@@ -1226,6 +1275,7 @@ export class TabShield {
     }
     if (reroute !== undefined) await this.settleReroute(pauseId, reroute);
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
+    await this.checkReturn(method);
     return this.after(method, await this.unseal(seal, method, result ?? {}), input);
   }
 
@@ -1459,6 +1509,112 @@ export class TabShield {
       return { frameId, loaderId: now['loaderId'], isDownload: false };
     }
     refuse(ABOUT_STUCK);
+  }
+
+  private async gate(method: string, params: CDPPayload): Promise<void> {
+    if (BROWSER_LEVEL.has(method)) return;
+    if (FETCH_SETTLES.has(method)) {
+      this.admitSettle(params);
+      return;
+    }
+    const tab = await this.readLive();
+    const confirmed = await this.confirmedError(tab);
+    this.refuseShown(confirmed ? this.failedView(tab) : tab, await this.openerState(tab));
+    if (tab.status === 'loading') await this.protectedHistory();
+  }
+
+  private async readLive(): Promise<ChromeTab> {
+    let tab: ChromeTab | undefined;
+    try {
+      tab = await this.readTab();
+    } catch {
+      refuse(PROTECTED_RULES.refusal);
+    }
+    if (!tab) refuse(PROTECTED_RULES.refusal);
+    return tab;
+  }
+
+  private async openerState(
+    tab: ChromeTab
+  ): Promise<'protected' | 'unprotected' | 'unknown' | undefined> {
+    if (typeof tab.openerTabId !== 'number') return undefined;
+    try {
+      const opener = await this.lookupTab(tab.openerTabId);
+      if (!opener) return 'unknown';
+      const openerUrl = isProtectedTarget(opener.url ?? '', false, 'unknown');
+      const openerPending = isProtectedUrl(opener.pendingUrl);
+      return openerUrl || openerPending ? 'protected' : 'unprotected';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  private failedAt(url: string): boolean {
+    if (!url) return false;
+    return this.failedDocuments.has(unfragmented(url));
+  }
+
+  private failedView(tab: ChromeTab): ChromeTab {
+    if (!this.failedAt(tab.url ?? '')) return tab;
+    const pendingUrl = this.failedAt(tab.pendingUrl ?? '') ? '' : tab.pendingUrl;
+    return { ...tab, url: ERROR_PAGE, title: '', pendingUrl };
+  }
+
+  private refuseShown(
+    tab: ChromeTab,
+    opener: 'protected' | 'unprotected' | 'unknown' | undefined
+  ): void {
+    const url = tab.url ?? '';
+    const pending = tab.pendingUrl ?? '';
+    if (pending !== '' && pending !== url && isProtectedUrl(pending))
+      refuse(PROTECTED_RULES.refusal);
+    if (isProtectedUrl(url) || isProtectedTarget(url, false, opener))
+      refuse(PROTECTED_RULES.refusal);
+  }
+
+  private admitSettle(params: CDPPayload | undefined): void {
+    const stored = this.pausedUrls.get(str(params?.['requestId']) ?? '') ?? '';
+    if (stored !== '' && urlProtected(stored)) refuse(PROTECTED_RULES.refusal);
+    const next = str(params?.['url']);
+    if (next !== undefined && urlProtected(next)) refuse(PROTECTED_RULES.refusal);
+  }
+
+  private async confirmedError(tab: ChromeTab): Promise<boolean> {
+    const url = tab.url ?? '';
+    const pending = tab.pendingUrl ?? '';
+    if (!this.failedAt(url) || tab.status === 'loading' || (pending !== '' && pending !== url)) {
+      return false;
+    }
+    const tree = await this.send('Page.getFrameTree', {}).catch(() => undefined);
+    const root = tree?.['frameTree'];
+    const frame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
+    if (!isObj(frame) || str(frame['url']) !== ERROR_PAGE) return false;
+    const unreachable = str(frame['unreachableUrl']);
+    return unreachable !== undefined && unfragmented(unreachable) === unfragmented(url);
+  }
+
+  private async protectedHistory(): Promise<void> {
+    const history = await this.send('Page.getNavigationHistory', {}).catch(() =>
+      refuse(PROTECTED_RULES.refusal)
+    );
+    const entries = Array.isArray(history['entries']) ? history['entries'] : [];
+    const index = history['currentIndex'];
+    const entry = typeof index === 'number' ? entries[index] : undefined;
+    if (isObj(entry) && urlProtected(str(entry['url']) ?? '')) refuse(PROTECTED_RULES.refusal);
+  }
+
+  private async checkReturn(method: string): Promise<void> {
+    if (contentResult(method) && !FETCH_SETTLES.has(method)) await this.committed();
+  }
+
+  private async committed(): Promise<void> {
+    const tab = await this.readLive();
+    if (await this.confirmedError(tab)) return;
+    this.refuseShown({ ...tab, pendingUrl: '' }, await this.openerState(tab));
+    const url = tab.url ?? '';
+    if (PROTECTED_RULES.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
+    if (tab.pendingUrl && tab.pendingUrl !== url) return;
+    await this.protectedHistory();
   }
 
   private async admit(method: string, params: CDPPayload): Promise<void> {

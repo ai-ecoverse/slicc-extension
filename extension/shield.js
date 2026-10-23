@@ -1217,6 +1217,30 @@ export function unknownFrame(frame) {
   }
 }
 
+export function contentResult(method) {
+  return (
+    sealedRead(method) ||
+    method.startsWith('DOM.') ||
+    method.startsWith('CSS.') ||
+    method.startsWith('Accessibility.') ||
+    method.startsWith('Runtime.') ||
+    method === 'Page.captureScreenshot' ||
+    method === 'Page.printToPDF' ||
+    method === 'Page.getFrameTree' ||
+    method === 'Page.getResourceTree' ||
+    method === 'Page.getNavigationHistory' ||
+    method === 'Debugger.getScriptSource' ||
+    method === 'Network.getResponseBody' ||
+    method === 'Network.getRequestPostData' ||
+    method === 'Network.getResponseBodyForInterception' ||
+    method === 'Network.streamResourceContent' ||
+    method === 'IO.read' ||
+    method === 'IO.resolveBlob' ||
+    method === 'Fetch.getResponseBody' ||
+    method === 'Fetch.takeResponseBodyAsStream'
+  );
+}
+
 export function sealedRead(method) {
   return REALM_READS.has(method) || SEALED_DOMAINS.some((domain) => method.startsWith(domain));
 }
