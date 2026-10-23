@@ -1525,7 +1525,10 @@ export class TabShield {
       );
     } catch (err) {
       this.reroutes.delete(pauseId);
-      if (settles && !/Invalid InterceptionId/i.test(String(err))) {
+      const dropped =
+        settles && /Invalid InterceptionId|not found|No such request/i.test(String(err));
+      if (dropped) refuse(PAUSE_REFUSAL);
+      if (settles) {
         this.forwarded.set(pauseId, true);
         if (read !== undefined) this.bodyReads.set(pauseId, read);
       }

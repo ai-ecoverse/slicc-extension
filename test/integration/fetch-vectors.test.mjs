@@ -16,6 +16,7 @@ const destinations = {
   seven: 'https://seven.sliccy.ai',
   vault: 'https://vault.sliccy.ai',
 };
+const challenged = { seven: destinations.control, 'six-bridge': 'https://challenged.test' };
 const twoPixels =
   'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAAAAADRSSBWAAAAC0lEQVR4nGNgYAAAAAMAAbitOmMAAAAASUVORK5CYII=';
 
@@ -30,9 +31,13 @@ const probes = {
     `new Promise((resolve) => { const i = new Image(); i.onload = () => resolve('width ' + i.naturalWidth); i.onerror = () => resolve('error'); i.src = ${JSON.stringify(url)}; })`,
 };
 
-async function client(t) {
-  const page = await chrome.visit(t, slicc);
-  await page.evaluate(install);
+const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
+const leader = 'https://www.sliccy.ai/?slicc=leader';
+const transports = ['seven', 'six-bridge'];
+
+async function client(t, transport) {
+  const page = await chrome.visit(t, transport === 'six-bridge' ? leader : slicc);
+  await page.evaluate(install, transport, extId);
   return page;
 }
 
@@ -88,27 +93,29 @@ function subresource(page, kind, dest, tag) {
   );
 }
 
-for (const kind of ['fetch', 'xhr', 'image']) {
-  test(`C5.${kind}: a page's Fetch pauses and fulfils an ordinary ${kind}, never a protected one`, async (t) => {
-    const page = await client(t);
-    const fulfilled = kind === 'image' ? 'width 2' : 'fulfilled';
-    const real = (tag) => (kind === 'image' ? 'width 1' : `real-${tag}`);
-    const control = await subresource(page, kind, destinations.control, `c-${kind}`);
-    assert.deepEqual(
-      control,
-      { seen: true, body: fulfilled, alive: 2, detached: false },
-      'control'
-    );
-    for (const name of ['seven', 'vault']) {
-      const tag = `${name}-${kind}`;
-      const guarded = await subresource(page, kind, destinations[name], tag);
+for (const transport of transports) {
+  for (const kind of ['fetch', 'xhr', 'image']) {
+    test(`${transport} C5.${kind}: a page's Fetch pauses and fulfils an ordinary ${kind}, never a protected one`, async (t) => {
+      const page = await client(t, transport);
+      const fulfilled = kind === 'image' ? 'width 2' : 'fulfilled';
+      const real = (tag) => (kind === 'image' ? 'width 1' : `real-${tag}`);
+      const control = await subresource(page, kind, destinations.control, `c-${kind}`);
       assert.deepEqual(
-        guarded,
-        { seen: false, body: real(tag), alive: 2, detached: false },
-        `${name}: never seen, real body, session alive`
+        control,
+        { seen: true, body: fulfilled, alive: 2, detached: false },
+        'control'
       );
-    }
-  });
+      for (const name of ['seven', 'vault']) {
+        const tag = `${name}-${kind}`;
+        const guarded = await subresource(page, kind, destinations[name], tag);
+        assert.deepEqual(
+          guarded,
+          { seen: false, body: real(tag), alive: 2, detached: false },
+          `${name}: never seen, real body, session alive`
+        );
+      }
+    });
+  }
 }
 
 function auth(page, dest, tag) {
@@ -160,21 +167,30 @@ function auth(page, dest, tag) {
   );
 }
 
-test('C5.auth: authRequired reaches the client for an ordinary origin, never for a protected one', async (t) => {
-  const page = await client(t);
-  assert.deepEqual(
-    await auth(page, destinations.control, 'c-auth'),
-    { alive: 2, detached: false, seen: true, pausedSeen: true, authed: true, untouched: false },
-    'control'
-  );
-  for (const name of ['seven', 'vault']) {
+for (const transport of transports) {
+  test(`${transport} C5.auth: authRequired reaches the client for an ordinary origin, never for a protected one`, async (t) => {
+    const page = await client(t, transport);
     assert.deepEqual(
-      await auth(page, destinations[name], `${name}-auth`),
-      { alive: 2, detached: false, seen: false, pausedSeen: false, authed: false, untouched: true },
-      name
+      await auth(page, challenged[transport], 'c-auth'),
+      { alive: 2, detached: false, seen: true, pausedSeen: true, authed: true, untouched: false },
+      'control'
     );
-  }
-});
+    for (const name of ['seven', 'vault']) {
+      assert.deepEqual(
+        await auth(page, destinations[name], `${name}-auth`),
+        {
+          alive: 2,
+          detached: false,
+          seen: false,
+          pausedSeen: false,
+          authed: false,
+          untouched: true,
+        },
+        name
+      );
+    }
+  });
+}
 
 function guessed(page, dest, tag) {
   return page.evaluate(
@@ -244,32 +260,34 @@ function guessed(page, dest, tag) {
   );
 }
 
-test('C5.guessed-id: a client can only answer request ids it was given', async (t) => {
-  const page = await client(t);
-  assert.deepEqual(
-    await guessed(page, destinations.control, 'c-guess'),
-    {
-      alive: 2,
-      detached: false,
-      candidates: true,
-      fulfilled: true,
-      refused: false,
-      answered: false,
-    },
-    'control'
-  );
-  for (const name of ['seven', 'vault']) {
+for (const transport of transports) {
+  test(`${transport} C5.guessed-id: a client can only answer request ids it was given`, async (t) => {
+    const page = await client(t, transport);
     assert.deepEqual(
-      await guessed(page, destinations[name], `${name}-guess`),
+      await guessed(page, destinations.control, 'c-guess'),
       {
         alive: 2,
         detached: false,
         candidates: true,
-        fulfilled: false,
-        refused: true,
-        answered: true,
+        fulfilled: true,
+        refused: false,
+        answered: false,
       },
-      name
+      'control'
     );
-  }
-});
+    for (const name of ['seven', 'vault']) {
+      assert.deepEqual(
+        await guessed(page, destinations[name], `${name}-guess`),
+        {
+          alive: 2,
+          detached: false,
+          candidates: true,
+          fulfilled: false,
+          refused: true,
+          answered: true,
+        },
+        name
+      );
+    }
+  });
+}
