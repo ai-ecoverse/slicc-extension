@@ -4,6 +4,7 @@ import {
   buildDefaultBridgeSwDeps,
   checkBridgeTabProtection,
   handleBridgePortConnect,
+  installBridgeFrontListeners,
   noteBridgeMainFrameResponse,
   postOpenSettingsToWelcomedLeaderPorts,
 } from './bridge-sw.js';
@@ -88,6 +89,8 @@ installDiscoveryObserver();
 installProtectedFrameTracker();
 
 installCdpProxyListeners();
+
+installBridgeFrontListeners(bridgeSwDeps);
 
 for (const event of [chrome.webRequest.onHeadersReceived, chrome.webRequest.onResponseStarted]) {
   event.addListener(noteBridgeMainFrameResponse, { urls: ['<all_urls>'], types: ['main_frame'] });

@@ -45,6 +45,7 @@ interface ChromeTab {
   status?: 'unloaded' | 'loading' | 'complete';
   pendingUrl?: string;
   openerTabId?: number;
+  active?: boolean;
 }
 
 interface ChromeTabChangeInfo {
@@ -213,6 +214,9 @@ interface ChromeAPI {
       tabs?: Array<{ id?: number }>;
     }>;
     remove(windowId: number): Promise<void>;
+    onRemoved: {
+      addListener(callback: (windowId: number) => void): void;
+    };
     getAll(): Promise<Array<{ id: number }>>;
     getCurrent(): Promise<{ id: number }>;
   };
@@ -258,6 +262,9 @@ interface ChromeAPI {
     onCreated: {
       addListener(callback: (tab: ChromeTab) => void): void;
     };
+    onActivated: {
+      addListener(callback: (info: { tabId: number; windowId: number }) => void): void;
+    };
     onUpdated: {
       addListener(
         callback: (tabId: number, changeInfo: ChromeTabChangeInfo, tab: ChromeTab) => void
@@ -270,6 +277,11 @@ interface ChromeAPI {
           removeInfo: { windowId: number; isWindowClosing: boolean }
         ) => void
       ): void;
+    };
+  };
+  webNavigation: {
+    onCreatedNavigationTarget: {
+      addListener(callback: (details: { tabId: number; sourceTabId: number }) => void): void;
     };
   };
   webRequest: {
