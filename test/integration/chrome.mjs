@@ -96,6 +96,7 @@ export async function launch({ pinned = false, prepare, args = [] } = {}) {
   }
 
   return {
+    url: chrome.url,
     site,
     cdp: chrome.cdp,
     upstream: remote,

@@ -1,3 +1,4 @@
+import { EXTENSION_BRIDGE_PORT_NAME } from '@slicc/shared-ts';
 import {
   BRIDGE_ALLOWED_ORIGINS,
   BRIDGE_DEV_ORIGINS,
@@ -121,22 +122,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) =>
   routeSwMessage(SW_MESSAGE_HANDLERS, message, sender, sendResponse)
 );
 
+const EXTERNAL_PINNED_PORTS: Readonly<Record<string, (port: ChromeRuntimePort) => void>> = {
+  'fetch-proxy.fetch': (port) => connectExternalFetchProxy(port),
+  'secrets.crud': (port) => handleSecretsCrudPort(port, portPinDeps),
+  'mount.sign-and-forward': (port) => handleMountSignAndForwardPort(port, portPinDeps),
+};
+
 chrome.runtime.onConnectExternal.addListener((port: ChromeRuntimePort) => {
-  if (port.name === 'fetch-proxy.fetch') {
-    connectExternalFetchProxy(port);
+  if (port.name === EXTENSION_BRIDGE_PORT_NAME) {
+    handleBridgePortConnect(port, bridgeSwDeps).catch((err) => {
+      console.error('[slicc-sw] CDP bridge connect failed', err);
+    });
     return;
   }
-  if (port.name === 'secrets.crud') {
-    handleSecretsCrudPort(port, portPinDeps);
+  const connect = Object.hasOwn(EXTERNAL_PINNED_PORTS, port.name)
+    ? EXTERNAL_PINNED_PORTS[port.name]
+    : undefined;
+  if (!connect || !BRIDGE_ORIGINS.includes(port.sender?.origin ?? '')) {
+    port.disconnect();
     return;
   }
-  if (port.name === 'mount.sign-and-forward') {
-    handleMountSignAndForwardPort(port, portPinDeps);
-    return;
-  }
-  handleBridgePortConnect(port, bridgeSwDeps).catch((err) => {
-    console.error('[slicc-sw] CDP bridge connect failed', err);
-  });
+  connect(port);
 });
 
 function connectExternalFetchProxy(port: ChromeRuntimePort): void {
