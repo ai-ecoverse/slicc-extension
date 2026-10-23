@@ -27,8 +27,10 @@ export async function install(kind = 'seven', extId = '') {
         for (const listener of listeners) listener(event);
       }
     });
-    const welcomed = new Promise((resolve) => {
+    const welcomed = new Promise((resolve, reject) => {
       const wait = (msg) => {
+        if (msg.kind === 'handshake.rejected')
+          reject(new Error(`bridge refused: ${msg.reason ?? 'unknown'}`));
         if (msg.kind !== 'handshake.welcome') return;
         port.onMessage.removeListener(wait);
         resolve();
