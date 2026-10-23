@@ -83,6 +83,7 @@ chrome.debugger.sendCommand = async (target, method, params) => {
     hold.params = params;
     hold.announce();
     await new Promise((resolve) => { hold.release = resolve; });
+    if (hold.abandoned) throw new Error('setup: held command abandoned before forwarding');
     hold.forwardedAt = Date.now();
   }
   try {
@@ -104,7 +105,46 @@ chrome.debugger.sendCommand = async (target, method, params) => {
   );
 }
 
+function bfcacheSetup(detail) {
+  return Object.assign(new Error(`setup: bfcache not available (${detail})`), {
+    code: 'BFCACHE_SETUP',
+  });
+}
+
+async function restoreWait(work, label, ms = 12000, retryable = true) {
+  let timer;
+  try {
+    return await Promise.race([
+      work,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const detail = `${label}: timed out after ${ms}ms`;
+          reject(retryable ? bfcacheSetup(detail) : new Error(detail));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function heldRestore(page, transport, workerSession, variant) {
+  const failures = [];
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const report = await heldRestoreAttempt(page, transport, workerSession, variant);
+      return { ...report, setupAttempts: attempt, setupFailures: failures };
+    } catch (error) {
+      if (error.code !== 'BFCACHE_SETUP') throw error;
+      failures.push({ attempt, error: error.message });
+    }
+  }
+  assert.fail(
+    `setup: bfcache not available after 3 attempts (${transport}/${variant}: ${JSON.stringify(failures)})`
+  );
+}
+
+async function heldRestoreAttempt(page, transport, workerSession, variant) {
   const tag = `${transport}-held-${variant}`;
   const key = `__sliccHistoryWrite:${tag}`;
   const method = {
@@ -180,14 +220,19 @@ async function heldRestore(page, transport, workerSession, variant) {
     params = { backendNodeId: ax.backendNodeId };
   }
   const worker = async (expression) => {
-    const answer = await chrome.cdp.send(
-      'Runtime.evaluate',
-      {
-        expression,
-        awaitPromise: true,
-        returnByValue: true,
-      },
-      workerSession
+    const answer = await restoreWait(
+      chrome.cdp.send(
+        'Runtime.evaluate',
+        {
+          expression,
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        workerSession
+      ),
+      `fixture worker ${transport}/${variant}`,
+      10000,
+      false
     );
     assert.equal(answer.exceptionDetails, undefined);
     return answer.result?.value;
@@ -220,44 +265,65 @@ async function heldRestore(page, transport, workerSession, variant) {
     ),
     true
   );
-  const direct = await chrome.cdp.send('Target.attachToTarget', {
-    targetId: tab.targetId,
-    flatten: true,
-  });
-  await chrome.cdp.send('Page.enable', {}, direct.sessionId);
+  let direct;
   let restore;
-  let timer;
-  const restored = new Promise((resolve, reject) => {
+  let established = false;
+  let off = () => {};
+  const restored = new Promise((resolve) => {
     restore = resolve;
-    timer = setTimeout(() => reject(new Error('restore event not observed')), 10000);
-  });
-  const off = chrome.cdp.on(({ method, params, sessionId: source }) => {
-    if (
-      source === direct.sessionId &&
-      method === 'Page.frameNavigated' &&
-      params.type === 'BackForwardCacheRestore'
-    ) {
-      restore({ at: Date.now(), frame: params.frame, type: params.type });
-    }
   });
   try {
-    const backIssuedAt = Date.now();
-    await chrome.cdp.send(
-      'Runtime.evaluate',
-      { expression: 'history.back()', userGesture: true },
-      direct.sessionId
+    direct = await restoreWait(
+      chrome.cdp.send('Target.attachToTarget', {
+        targetId: tab.targetId,
+        flatten: true,
+      }),
+      `${transport}/${variant}: browser attach`
     );
-    const commit = await restored;
+    await restoreWait(
+      chrome.cdp.send('Page.enable', {}, direct.sessionId),
+      `${transport}/${variant}: browser Page enable`
+    );
+    off = chrome.cdp.on(({ method, params, sessionId: source }) => {
+      if (
+        source === direct.sessionId &&
+        method === 'Page.frameNavigated' &&
+        !params.frame?.parentId &&
+        params.frame?.url?.startsWith(vault)
+      )
+        restore({ at: Date.now(), frame: params.frame, type: params.type });
+    });
+    const backIssuedAt = Date.now();
+    const commit = await restoreWait(
+      chrome.cdp
+        .send(
+          'Runtime.evaluate',
+          { expression: 'history.back()', userGesture: true },
+          direct.sessionId
+        )
+        .then(() => restored),
+      `${transport}/${variant}: restore event`
+    );
+    if (commit.type !== 'BackForwardCacheRestore') {
+      throw bfcacheSetup(`${transport}/${variant}: committed ${JSON.stringify(commit)}`);
+    }
     let document;
     const deadline = Date.now() + 5000;
     do {
-      const answer = await chrome.cdp.send(
-        'Runtime.evaluate',
-        { expression: readExpr, returnByValue: true },
-        direct.sessionId
+      const answer = await restoreWait(
+        chrome.cdp.send(
+          'Runtime.evaluate',
+          { expression: readExpr, returnByValue: true },
+          direct.sessionId
+        ),
+        `${transport}/${variant}: restored document`,
+        5000
       );
       document = JSON.parse(answer.result.value);
+      if (!document.restored) await new Promise((resolve) => setTimeout(resolve, 100));
     } while (!document.restored && Date.now() < deadline);
+    if (!document.restored)
+      throw bfcacheSetup(`${transport}/${variant}: ${JSON.stringify(document)}`);
     assert.equal(document.doc, 'protected');
     assert.equal(document.restored, true);
     assert.equal(document.tag, tag);
@@ -266,8 +332,14 @@ async function heldRestore(page, transport, workerSession, variant) {
         `globalThis.__sliccHistoryReported = {tabId:${Number(targetId)}, url:${JSON.stringify(ordinary)}, pendingUrl:${JSON.stringify(variant === 'pending' ? vault : '')}, status:"complete", missingHistory:${variant === 'history'}}; true`
       );
     }
+    established = true;
     await worker('globalThis.__sliccHistoryHold.release(); true');
-    const client = await reading;
+    const client = await restoreWait(
+      reading,
+      `product: ${transport}/${variant} held reply`,
+      10000,
+      false
+    );
     const forwarded = await worker(
       '({admittedAt:globalThis.__sliccHistoryHold.admittedAt,forwardedAt:globalThis.__sliccHistoryHold.forwardedAt,finishedAt:globalThis.__sliccHistoryHold.finishedAt,uniqueContextId:globalThis.__sliccHistoryHold.params?.uniqueContextId,result:globalThis.__sliccHistoryHold.result,error:globalThis.__sliccHistoryHold.error})'
     );
@@ -316,20 +388,25 @@ async function heldRestore(page, transport, workerSession, variant) {
             : 0,
     };
   } finally {
-    clearTimeout(timer);
     off();
     await worker(
-      'delete globalThis.__sliccHistoryReported; globalThis.__sliccHistoryHold?.release?.(); true'
+      `delete globalThis.__sliccHistoryReported; if (globalThis.__sliccHistoryHold) globalThis.__sliccHistoryHold.abandoned = ${!established}; globalThis.__sliccHistoryHold?.release?.(); true`
     );
-    await reading.catch(() => undefined);
+    await restoreWait(
+      reading.catch(() => undefined),
+      `cleanup: ${transport}/${variant} held reply`,
+      10000,
+      false
+    );
     await page.evaluate(
       (sessionId) =>
         globalThis.h.cdp.send('Target.detachFromTarget', { sessionId }).catch(() => undefined),
       sessionId
     );
-    await chrome.cdp
-      .send('Target.detachFromTarget', { sessionId: direct.sessionId })
-      .catch(() => undefined);
+    if (direct)
+      await chrome.cdp
+        .send('Target.detachFromTarget', { sessionId: direct.sessionId })
+        .catch(() => undefined);
     await chrome.cdp.send('Target.closeTarget', { targetId: tab.targetId }).catch(() => undefined);
   }
 }
@@ -447,7 +524,14 @@ async function restoredDocument(urlPrefix) {
 async function eligibility() {
   const readings = [];
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const probe = await eligibilityAttempt();
+    let probe;
+    try {
+      probe = await eligibilityAttempt();
+    } catch (error) {
+      if (error.code !== 'BFCACHE_SETUP') throw error;
+      readings.push({ attempt, error: error.message });
+      continue;
+    }
     const state = parsed({ value: probe.reading });
     if (state?.doc === 'protected' && state.restored === true) return probe;
     readings.push({ attempt, reading: probe.reading });
@@ -462,18 +546,25 @@ async function eligibilityAttempt() {
     flatten: true,
   });
   try {
-    await chrome.cdp.send(
-      'Runtime.evaluate',
-      { expression: 'history.back()', returnByValue: true },
-      sessionId
+    await restoreWait(
+      chrome.cdp.send(
+        'Runtime.evaluate',
+        { expression: 'history.back()', returnByValue: true },
+        sessionId
+      ),
+      'eligibility: history back'
     );
     const deadline = Date.now() + 8000;
     let last;
     while (Date.now() < deadline) {
-      const answer = await chrome.cdp.send(
-        'Runtime.evaluate',
-        { expression: readExpr, returnByValue: true },
-        sessionId
+      const answer = await restoreWait(
+        chrome.cdp.send(
+          'Runtime.evaluate',
+          { expression: readExpr, returnByValue: true },
+          sessionId
+        ),
+        'eligibility: restored document',
+        5000
       );
       last = answer.result?.value ?? null;
       if (typeof last === 'string' && last.includes('vault.sliccy.ai')) break;
