@@ -74,6 +74,7 @@ export function capabilities(transport) {
     discovery: transport === 'seven',
     clientExit: true,
     siteIsolationOff: true,
+    inboundDelay: true,
   };
 }
 
