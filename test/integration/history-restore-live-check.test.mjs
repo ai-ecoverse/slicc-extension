@@ -65,8 +65,16 @@ async function prepareExtension(paths) {
   await writeFile(
     backgroundPath,
     `${background}\n
+const historyTabRead = chrome.tabs.get.bind(chrome.tabs);
+chrome.tabs.get = async (tabId) => {
+  const tab = await historyTabRead(tabId);
+  const shown = globalThis.__sliccHistoryReported;
+  return shown?.tabId === tabId ? {...tab, url:shown.url, pendingUrl:shown.pendingUrl, status:shown.status} : tab;
+};
 const historySend = chrome.debugger.sendCommand.bind(chrome.debugger);
 chrome.debugger.sendCommand = async (target, method, params) => {
+  const shown = globalThis.__sliccHistoryReported;
+  if (shown?.tabId === target.tabId && shown.missingHistory && method === 'Page.getNavigationHistory') return {};
   const hold = globalThis.__sliccHistoryHold;
   const held = hold?.armed && hold.tabId === target.tabId && hold.method === method && (method !== 'Runtime.evaluate' || String(params?.expression).includes('window.__sliccDoc'));
   if (held) {
@@ -100,6 +108,8 @@ async function heldRestore(page, transport, workerSession, variant) {
   const tag = `${transport}-held-${variant}`;
   const method = {
     read: 'Runtime.evaluate',
+    pending: 'Runtime.evaluate',
+    history: 'Runtime.evaluate',
     dom: 'DOM.getDocument',
     screenshot: 'Page.captureScreenshot',
   }[variant];
@@ -212,6 +222,11 @@ async function heldRestore(page, transport, workerSession, variant) {
     assert.equal(document.doc, 'protected');
     assert.equal(document.restored, true);
     assert.equal(document.tag, tag);
+    if (variant === 'pending' || variant === 'history') {
+      await worker(
+        `globalThis.__sliccHistoryReported = {tabId:${Number(targetId)}, url:${JSON.stringify(ordinary)}, pendingUrl:${JSON.stringify(variant === 'pending' ? vault : '')}, status:"complete", missingHistory:${variant === 'history'}}; true`
+      );
+    }
     await worker('globalThis.__sliccHistoryHold.release(); true');
     const client = await reading;
     const forwarded = await worker(
@@ -241,7 +256,9 @@ async function heldRestore(page, transport, workerSession, variant) {
   } finally {
     clearTimeout(timer);
     off();
-    await worker('globalThis.__sliccHistoryHold?.release?.(); true');
+    await worker(
+      'delete globalThis.__sliccHistoryReported; globalThis.__sliccHistoryHold?.release?.(); true'
+    );
     await reading.catch(() => undefined);
     await page.evaluate(
       (sessionId) =>
@@ -619,7 +636,7 @@ test('a restored history entry is admitted only after a live tab check', {
   for (const transport of ['seven', 'six-bridge']) {
     const page = await chrome.visit(t, entry[transport]);
     await page.evaluate(install, transport, extId);
-    for (const variant of ['read', 'dom', 'screenshot']) {
+    for (const variant of ['read', 'dom', 'screenshot', 'pending', 'history']) {
       const held = await heldRestore(page, transport, workerSession, variant);
       heldReports.push(held);
       console.log(`history-check held ${JSON.stringify(held)}`);

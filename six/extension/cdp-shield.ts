@@ -1604,7 +1604,9 @@ export class TabShield {
     const entries = Array.isArray(history['entries']) ? history['entries'] : [];
     const index = history['currentIndex'];
     const entry = typeof index === 'number' ? entries[index] : undefined;
-    if (isObj(entry) && urlProtected(str(entry['url']) ?? '')) refuse(PROTECTED_RULES.refusal);
+    if (!isObj(entry) || typeof entry['url'] !== 'string' || !entry['url'])
+      refuse(PROTECTED_RULES.refusal);
+    if (urlProtected(entry['url'])) refuse(PROTECTED_RULES.refusal);
   }
 
   private async checkReturn(method: string): Promise<void> {
@@ -1615,7 +1617,7 @@ export class TabShield {
   private async committed(): Promise<void> {
     const tab = await this.readLive();
     if (await this.confirmedError(tab)) return;
-    this.refuseShown({ ...tab, pendingUrl: '' }, await this.openerState(tab));
+    this.refuseShown(tab, await this.openerState(tab));
     const url = tab.url ?? '';
     if (PROTECTED_RULES.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
     if (tab.pendingUrl && tab.pendingUrl !== url) return;

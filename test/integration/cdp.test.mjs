@@ -135,6 +135,12 @@ function fakeChrome() {
       sendCommand(target, method, params) {
         api.sent.push({ tabId: target.tabId, method, params });
         if (method === 'Page.getFrameTree') return Promise.resolve(plainTree);
+        if (method === 'Page.getNavigationHistory') {
+          return api.tabs.get(target.tabId).then((tab) => ({
+            currentIndex: 0,
+            entries: [{ id: 1, url: tab.url }],
+          }));
+        }
         return Promise.resolve({ value: 2 });
       },
       onEvent: {
@@ -191,9 +197,13 @@ function open(url = 'https://seven.sliccy.ai/play') {
 function user(api) {
   return api.sent.filter(
     (sent) =>
-      !['Fetch.enable', 'Page.getFrameTree', 'Target.setAutoAttach', 'Runtime.enable'].includes(
-        sent.method
-      )
+      ![
+        'Fetch.enable',
+        'Page.getFrameTree',
+        'Page.getNavigationHistory',
+        'Target.setAutoAttach',
+        'Runtime.enable',
+      ].includes(sent.method)
   );
 }
 
@@ -202,6 +212,51 @@ async function command(cdp, connection, message) {
   await cdp.settled();
   return connection.posted.at(-1);
 }
+
+test('seven settles retain the live committed tab check', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  await command(cdp, connection, {
+    id: 2,
+    method: 'Fetch.enable',
+    params: { patterns: [{ urlPattern: '*' }] },
+    sessionId: '8',
+  });
+  api.fire(8, 'Fetch.requestPaused', {
+    requestId: 'settle-live',
+    resourceType: 'Ping',
+    request: { url: 'https://other.test/settle-live' },
+  });
+  await cdp.settled();
+  api.locations.set(8, { url: 'https://vault.sliccy.ai/' });
+  let id = 3;
+  for (const method of [
+    'Fetch.continueRequest',
+    'Fetch.fulfillRequest',
+    'Fetch.failRequest',
+    'Fetch.continueResponse',
+    'Fetch.continueWithAuth',
+  ]) {
+    const answer = await command(cdp, connection, {
+      id: id++,
+      method,
+      params: { requestId: 'settle-live' },
+      sessionId: '8',
+    });
+    assert.equal(answer.error, refused, method);
+    assert.equal(
+      api.sent.some((row) => row.method === method),
+      false,
+      method
+    );
+  }
+  cdp.close();
+});
 
 test('protected origins follow the slicc-browsers corpus, including the vault', async () => {
   const root = new URL('../../node_modules/@ai-ecoverse/slicc-browsers/', import.meta.url);

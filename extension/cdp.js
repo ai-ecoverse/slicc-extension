@@ -1158,7 +1158,8 @@ class Connection {
   async protectedHistory(tabId) {
     const history = await this.send(tabId, 'Page.getNavigationHistory', {}).catch(() => refusal());
     const entry = history?.entries?.[history.currentIndex];
-    if (urlProtected(guard, textOf(entry?.url))) refusal();
+    if (!entry || typeof entry.url !== 'string' || !entry.url) refusal();
+    if (urlProtected(guard, entry.url)) refusal();
   }
 
   async confirmedError(tabId, tab) {
@@ -1175,15 +1176,15 @@ class Connection {
   }
 
   async admit(tabId, tab, method, params, sessionId) {
-    if (FETCH_ANSWERS.has(method)) {
-      const entry = tab?.paused.get(textOf(params?.requestId));
-      if (entry?.owner === sessionId) {
-        if (urlProtected(guard, requestUrl(entry.params))) refusal();
-        return { url: tab.pageUrl };
-      }
-    }
     const raw = await readTab(this.api, tabId);
     const view = (await this.confirmedError(tabId, raw)) ? this.view(raw) : raw;
+    if (this.held(tab, method, params, sessionId)) {
+      try {
+        return await demandTab(this.api, view);
+      } catch {
+        return demandTab(this.api, { ...view, pendingUrl: '' });
+      }
+    }
     const seen = await demandTab(this.api, view);
     if (raw.status === 'loading') await this.protectedHistory(tabId);
     return seen;
@@ -1192,7 +1193,7 @@ class Connection {
   async committed(tabId) {
     const raw = await readTab(this.api, tabId);
     if (await this.confirmedError(tabId, raw)) return;
-    await demandTab(this.api, { ...raw, pendingUrl: '' });
+    await demandTab(this.api, raw);
     const url = textOf(raw.url);
     if (protectedRules.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
     if (raw.pendingUrl && raw.pendingUrl !== url) return;
