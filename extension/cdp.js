@@ -179,7 +179,7 @@ function uiType(type) {
 
 async function readTab(api, tabId) {
   try {
-    const tab = await api.tabs.get(tabId);
+    const tab = await bounded(api.tabs.get(tabId), 2000, 'live tab');
     if (tab && typeof tab === 'object') return tab;
   } catch {
     refusal();
@@ -1245,17 +1245,25 @@ class Connection {
       if (!current && context.origin !== frame.securityOrigin && frame.url !== ERROR_PAGE) continue;
       let answer;
       try {
-        answer = await this.send(tabId, 'Runtime.evaluate', {
-          expression: '({})',
-          uniqueContextId: context.uniqueId,
-          objectGroup: 'slicc:document-binding',
-        });
+        answer = await bounded(
+          this.send(tabId, 'Runtime.evaluate', {
+            expression: '({})',
+            uniqueContextId: context.uniqueId,
+            objectGroup: 'slicc:document-binding',
+          }),
+          2000,
+          'context probe'
+        );
       } catch (error) {
         if (!current) continue;
         throw error;
       }
       if (!current) {
-        const checked = await this.send(tabId, 'Page.getFrameTree', {});
+        const checked = await bounded(
+          this.send(tabId, 'Page.getFrameTree', {}),
+          2000,
+          'context frame'
+        );
         if (frameIn(checked?.frameTree, frame.id)?.loaderId !== frame.loaderId) continue;
         tab.documents.frame(frame);
         tab.documents.context(context);
@@ -1269,7 +1277,11 @@ class Connection {
   async bind(tabId, tab, method, params) {
     if (method.startsWith('Input.') && tab.pendingFrames.size > 0) refusal();
     if (!sealedRead(method) && !method.startsWith('Runtime.')) return { params };
-    const tree = await this.send(tabId, 'Page.getFrameTree', {}).catch(() => refusal());
+    const tree = await bounded(
+      this.send(tabId, 'Page.getFrameTree', {}),
+      2000,
+      'binding frame'
+    ).catch(() => refusal());
     const root = frameIn(tree?.frameTree);
     if (anyProtected(root?.url) || anyProtected(root?.securityOrigin)) refusal();
     await this.prove(tabId, tab, tree?.frameTree);

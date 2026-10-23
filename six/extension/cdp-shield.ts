@@ -1355,6 +1355,14 @@ interface ClientFetch {
 
 type Sealed = { visible: Set<string>; sealed: Set<string>; nodes: Set<unknown> };
 
+function shieldProbe(work: Promise<CDPPayload>): Promise<CDPPayload> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<CDPPayload>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(PROTECTED_RULES.refusal)), 2000);
+  });
+  return Promise.race([work, late]).finally(() => clearTimeout(timer));
+}
+
 export class TabShield {
   private readonly requests = new Bounded<boolean>(5000);
   private readonly held = new Bounded<ShieldEvent[]>(500);
@@ -1747,17 +1755,19 @@ export class TabShield {
         continue;
       let answer: CDPPayload;
       try {
-        answer = await this.send('Runtime.evaluate', {
-          expression: '({})',
-          uniqueContextId: unique,
-          objectGroup: 'slicc:document-binding',
-        });
+        answer = await shieldProbe(
+          this.send('Runtime.evaluate', {
+            expression: '({})',
+            uniqueContextId: unique,
+            objectGroup: 'slicc:document-binding',
+          })
+        );
       } catch (error) {
         if (!current) continue;
         throw error;
       }
       if (!current) {
-        const checked = await this.send('Page.getFrameTree', {});
+        const checked = await shieldProbe(this.send('Page.getFrameTree', {}));
         if (frameIn(checked['frameTree'], str(frame['id']))?.['loaderId'] !== frame['loaderId'])
           continue;
         this.documents.frame(frame);
@@ -1777,7 +1787,7 @@ export class TabShield {
     if (method.startsWith('Input.') && this.pendingFrames.size > 0) refuse(PROTECTED_RULES.refusal);
     if (!sealedRead(method) && !method.startsWith('Runtime.'))
       return { params, document: undefined };
-    const tree = await this.send('Page.getFrameTree', {}).catch(() =>
+    const tree = await shieldProbe(this.send('Page.getFrameTree', {})).catch(() =>
       refuse(PROTECTED_RULES.refusal)
     );
     const root = frameIn(tree['frameTree'], undefined);
@@ -1865,7 +1875,7 @@ export class TabShield {
   private async confirmedError(tab: ChromeTab): Promise<boolean> {
     const url = tab.url ?? '';
     if (!this.failedAt(url)) return false;
-    const tree = await this.send('Page.getFrameTree', {}).catch(() => undefined);
+    const tree = await shieldProbe(this.send('Page.getFrameTree', {})).catch(() => undefined);
     const root = tree?.['frameTree'];
     const frame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
     if (!isObj(frame) || str(frame['url']) !== ERROR_PAGE) return false;
