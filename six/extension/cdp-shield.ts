@@ -458,7 +458,6 @@ class DocumentBindings {
   }
 }
 
-
 function isObj(value: unknown): value is CDPPayload {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

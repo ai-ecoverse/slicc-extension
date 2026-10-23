@@ -12,6 +12,7 @@ import { install } from '../client.mjs';
 import { copies } from '../copies.mjs';
 import { extId } from '../extension-page.mjs';
 import { certificate } from '../servers.mjs';
+import { extraDiagnostic } from './extra-diagnostic.mjs';
 import {
   capabilities,
   carrier,
@@ -91,6 +92,10 @@ async function evaluate(cdp, sessionId, expression) {
 async function browser(extra = []) {
   const rules = hosts.map((host) => `MAP ${host} 127.0.0.1:${fixture.port}`).join(', ');
   const copy = await copies(['extension/']);
+  await extraDiagnostic(copy.paths).catch(async (error) => {
+    await copy.remove();
+    throw error;
+  });
   const chrome = await launch({
     roots: [['/', 'test/integration/page/']],
     coverage: [],
@@ -278,7 +283,7 @@ async function browser(extra = []) {
     observer,
     guarded,
     extraTrace: async () =>
-      workerEval(cdp, await workerSession(), 'globalThis.__sliccExtraTrace ?? []'),
+      evaluate(cdp, await workerSession(), 'globalThis.__sliccExtraTrace ?? []'),
     async close() {
       await chrome.close();
       await copy.remove();
