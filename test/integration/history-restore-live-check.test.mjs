@@ -106,15 +106,21 @@ chrome.debugger.sendCommand = async (target, method, params) => {
 
 async function heldRestore(page, transport, workerSession, variant) {
   const tag = `${transport}-held-${variant}`;
+  const key = `__sliccHistoryWrite:${tag}`;
   const method = {
     read: 'Runtime.evaluate',
+    write: 'Runtime.evaluate',
     pending: 'Runtime.evaluate',
     history: 'Runtime.evaluate',
+    ax: 'DOM.resolveNode',
     dom: 'DOM.getDocument',
     screenshot: 'Page.captureScreenshot',
   }[variant];
-  const expression = readExpr;
-  const params = method === 'Runtime.evaluate' ? { expression, returnByValue: true } : {};
+  const expression =
+    variant === 'write'
+      ? `localStorage.setItem(${JSON.stringify(key)}, "written"); ${readExpr}`
+      : readExpr;
+  let params = method === 'Runtime.evaluate' ? { expression, returnByValue: true } : {};
   const tab = await historyTab(tag);
   const targetId = await clientTab(page, `${ordinary}?n=${tag}`);
   const { sessionId } = await page.evaluate(
@@ -140,6 +146,39 @@ async function heldRestore(page, transport, workerSession, variant) {
     );
   }
   assert.equal(JSON.parse(control).doc, 'ordinary');
+  let ax;
+  const axMethods = [
+    'DOM.resolveNode',
+    'DOM.getBoxModel',
+    'DOM.scrollIntoViewIfNeeded',
+    'DOM.focus',
+    'DOM.describeNode',
+  ];
+  if (variant === 'ax') {
+    ax = await page.evaluate(
+      async ([sessionId, methods]) => {
+        const created = await globalThis.h.evaluate(
+          sessionId,
+          'document.body.innerHTML = "<button>AX binding control</button>"; true'
+        );
+        if (created !== true) throw new Error(JSON.stringify(created));
+        const tree = await globalThis.h.cdp.send('Accessibility.getFullAXTree', {}, sessionId);
+        const backendNodeId = tree.nodes.find(
+          (node) => node.role?.value === 'button' && node.name?.value === 'AX binding control'
+        )?.backendDOMNodeId;
+        if (typeof backendNodeId !== 'number' || backendNodeId <= 0)
+          throw new Error('AX button backend id missing');
+        const controls = [];
+        for (const method of methods) {
+          await globalThis.h.cdp.send(method, { backendNodeId }, sessionId);
+          controls.push(method);
+        }
+        return { backendNodeId, controls };
+      },
+      [sessionId, axMethods]
+    );
+    params = { backendNodeId: ax.backendNodeId };
+  }
   const worker = async (expression) => {
     const answer = await chrome.cdp.send(
       'Runtime.evaluate',
@@ -230,9 +269,30 @@ async function heldRestore(page, transport, workerSession, variant) {
     await worker('globalThis.__sliccHistoryHold.release(); true');
     const client = await reading;
     const forwarded = await worker(
-      '({admittedAt:globalThis.__sliccHistoryHold.admittedAt,forwardedAt:globalThis.__sliccHistoryHold.forwardedAt,finishedAt:globalThis.__sliccHistoryHold.finishedAt,result:globalThis.__sliccHistoryHold.result,error:globalThis.__sliccHistoryHold.error})'
+      '({admittedAt:globalThis.__sliccHistoryHold.admittedAt,forwardedAt:globalThis.__sliccHistoryHold.forwardedAt,finishedAt:globalThis.__sliccHistoryHold.finishedAt,uniqueContextId:globalThis.__sliccHistoryHold.params?.uniqueContextId,result:globalThis.__sliccHistoryHold.result,error:globalThis.__sliccHistoryHold.error})'
     );
+    const storage = await chrome.cdp.send(
+      'Runtime.evaluate',
+      { expression: `localStorage.getItem(${JSON.stringify(key)})`, returnByValue: true },
+      direct.sessionId
+    );
+    assert.equal(storage.exceptionDetails, undefined);
+    if (ax) {
+      ax.restored = await page.evaluate(
+        async ([sessionId, backendNodeId, methods]) => {
+          const answers = [];
+          for (const method of methods)
+            answers.push({
+              method,
+              ...(await globalThis.h.attempt(method, { backendNodeId }, sessionId)),
+            });
+          return answers;
+        },
+        [sessionId, ax.backendNodeId, axMethods]
+      );
+    }
     return {
+      ax,
       transport,
       variant,
       method,
@@ -244,6 +304,8 @@ async function heldRestore(page, transport, workerSession, variant) {
       document,
       client: { ...client, parsed: parsed(client) },
       forwarded,
+      sideEffectAbsent: storage.result.value === null,
+      marker: storage.result.value,
       protectedReads:
         method === 'Runtime.evaluate'
           ? parsed(client)?.doc === 'protected'
@@ -510,6 +572,7 @@ async function blockedHop(tabId) {
     targetId: String(tabId),
     flatten: true,
   });
+  await h.evaluate(sessionId, readExpr);
   const read = () =>
     h.cdp
       .send('Runtime.evaluate', { expression: readExpr, returnByValue: true }, sessionId)
@@ -636,7 +699,7 @@ test('a restored history entry is admitted only after a live tab check', {
   for (const transport of ['seven', 'six-bridge']) {
     const page = await chrome.visit(t, entry[transport]);
     await page.evaluate(install, transport, extId);
-    for (const variant of ['read', 'dom', 'screenshot', 'pending', 'history']) {
+    for (const variant of ['read', 'write', 'ax', 'dom', 'screenshot', 'pending', 'history']) {
       const held = await heldRestore(page, transport, workerSession, variant);
       heldReports.push(held);
       console.log(`history-check held ${JSON.stringify(held)}`);
@@ -706,6 +769,29 @@ test('a restored history entry is admitted only after a live tab check', {
     await t.test(report.transport, () => {
       for (const held of heldReports.filter((row) => row.transport === report.transport)) {
         assert.equal(held.protectedReads, 0, JSON.stringify(held));
+        assert.equal(held.sideEffectAbsent, true, JSON.stringify(held));
+        if (held.variant === 'ax') {
+          assert.deepEqual(held.ax.controls, [
+            'DOM.resolveNode',
+            'DOM.getBoxModel',
+            'DOM.scrollIntoViewIfNeeded',
+            'DOM.focus',
+            'DOM.describeNode',
+          ]);
+          assert.equal(held.ax.restored.length, held.ax.controls.length);
+          for (const answer of held.ax.restored) {
+            assert.match(answer.error ?? '', /slicc: refused:/, JSON.stringify(answer));
+            assert.equal(answer.result, undefined, JSON.stringify(answer));
+          }
+        }
+        if (held.variant === 'write') {
+          assert.ok(held.forwarded.uniqueContextId, JSON.stringify(held));
+          assert.equal(
+            parsed({ value: held.forwarded.result?.result?.value })?.doc === 'protected',
+            false,
+            JSON.stringify(held)
+          );
+        }
       }
       const leaks = report.rows.filter((row) => row.doc === 'protected');
       if (leaks.length > 0) {
