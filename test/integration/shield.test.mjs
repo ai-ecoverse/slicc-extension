@@ -815,192 +815,211 @@ test('S7 createTarget refuses blob: and view-source: URLs over seven and the vau
   }
 });
 
-test('C5 two sessions with Fetch on one tab both see an ordinary request in turn; a protected request reaches neither', async (t) => {
-  const page = await client(t);
-  const answer = await page.evaluate(async (ordinary) => {
-    const { targetId, sessionId } = await h.open(`${ordinary}/start`);
-    const second = (await h.cdp.send('Target.attachToTarget', { targetId, flatten: true }))
-      .sessionId;
-    const seen = [];
-    const off = h.cdp.on((e) => {
-      if (e.method !== 'Fetch.requestPaused') return;
-      seen.push([e.sessionId === sessionId ? 'first' : 'second', e.params.request.url]);
-      h.attempt('Fetch.continueRequest', { requestId: e.params.requestId }, e.sessionId);
-    });
-    await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/data*' }] }, sessionId);
-    await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/data*' }] }, second);
-    const plain = await h.evaluate(
-      sessionId,
-      `fetch('${ordinary}/data?n=plain').then((r) => r.status, () => 'error')`
-    );
-    const guarded = await h.evaluate(
-      sessionId,
-      "fetch('https://vault.sliccy.ai/data?n=vault', { mode: 'no-cors' }).then((r) => r.type, () => 'error')"
-    );
-    off();
-    await h.close(targetId);
-    return { plain, guarded, seen };
-  }, ordinary);
-  assert.equal(answer.plain, 200);
-  assert.deepEqual(
-    answer.seen.filter(([, url]) => url.includes('n=plain')).map(([who]) => who),
-    ['first', 'second'],
-    'the request reaches each session in attach order'
-  );
-  assert.deepEqual(
-    answer.seen.filter(([, url]) => url.includes('vault')),
-    [],
-    'the protected request is continued by the backend'
-  );
-  assert.notEqual(answer.guarded, 'error');
-});
-
-test('C5 Network events and bodies of protected requests never reach the client; ordinary ones do', async (t) => {
-  const page = await client(t);
-  const answer = await page.evaluate(async (ordinary) => {
-    const { targetId, sessionId } = await h.open(`${ordinary}/start`);
-    await h.cdp.send('Network.enable', {}, sessionId);
-    const mark = h.events.length;
-    await h.evaluate(
-      sessionId,
-      `fetch('${ordinary}/hello?n=plain').then((r) => r.text(), () => 'error')`
-    );
-    await h.evaluate(
-      sessionId,
-      "fetch('https://vault.sliccy.ai/secret?n=vault', { mode: 'no-cors' }).then(() => 'ok', () => 'error')"
-    );
-    await h.sleep(500);
-    const net = h.events.slice(mark).filter((e) => e.method.startsWith('Network.'));
-    const plain = net.find(
-      (e) => e.method === 'Network.requestWillBeSent' && e.params.request.url.includes('n=plain')
-    );
-    const body = plain
-      ? await h.attempt('Network.getResponseBody', { requestId: plain.params.requestId }, sessionId)
-      : { error: 'no plain request' };
-    const unseen = await h.attempt(
-      'Network.getResponseBody',
-      { requestId: 'never-seen' },
-      sessionId
-    );
-    await h.close(targetId);
-    return {
-      plain: Boolean(plain),
-      body,
-      unseen,
-      leaked: net.filter((e) => JSON.stringify(e).includes('vault.sliccy.ai')).length,
-    };
-  }, ordinary);
-  assert.equal(answer.plain, true, 'the ordinary request is visible');
-  assert.equal(answer.body.error, undefined, 'its body can be read');
-  assert.match(answer.unseen.error, /^slicc: refused: /);
-  assert.equal(answer.leaked, 0, 'no Network event mentions the vault');
-});
-
-test('C5 an answered pause cannot be answered again, and a pause Chrome dropped cannot be answered', async (t) => {
-  const page = await client(t);
-  const answer = await page.evaluate(async (ordinary) => {
-    const { targetId, sessionId } = await h.open(`${ordinary}/start`);
-    const paused = [];
-    const off = h.cdp.on((e) => {
-      if (e.method === 'Fetch.requestPaused' && e.sessionId === sessionId) paused.push(e.params);
-    });
-    await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/data*' }] }, sessionId);
-    const pausedFor = (n) =>
-      h.until(async () => paused.find((p) => p.request.url.includes(`n=${n}`)));
-    const fetchIn = (n) =>
-      h.evaluate(
+for (const transport of transports) {
+  const oneSession =
+    transport === 'six-bridge' &&
+    "six's bridge answers a repeat Target.attachToTarget on a tab with the same refcounted session, so one tab never holds two sessions";
+  test(`${transport} C5 two sessions with Fetch on one tab both see an ordinary request in turn; a protected request reaches neither`, {
+    skip: oneSession,
+  }, async (t) => {
+    const page = await client(t, transport);
+    const answer = await page.evaluate(async (ordinary) => {
+      const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+      const second = (await h.cdp.send('Target.attachToTarget', { targetId, flatten: true }))
+        .sessionId;
+      const seen = [];
+      const off = h.cdp.on((e) => {
+        if (e.method !== 'Fetch.requestPaused') return;
+        seen.push([e.sessionId === sessionId ? 'first' : 'second', e.params.request.url]);
+        h.attempt('Fetch.continueRequest', { requestId: e.params.requestId }, e.sessionId);
+      });
+      await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/data*' }] }, sessionId);
+      await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/data*' }] }, second);
+      const plain = await h.evaluate(
         sessionId,
-        `window.__r${n} = fetch('${ordinary}/data?n=${n}').then((r) => r.text(), () => 'error'); true`
+        `fetch('${ordinary}/data?n=plain').then((r) => r.status, () => 'error')`
       );
-    const result = (n) => h.evaluate(sessionId, `window.__r${n}`);
-    await fetchIn('continue');
-    const first = await pausedFor('continue');
-    const control = await h.attempt(
-      'Fetch.continueRequest',
-      { requestId: first.requestId },
-      sessionId
+      const guarded = await h.evaluate(
+        sessionId,
+        "fetch('https://vault.sliccy.ai/data?n=vault', { mode: 'no-cors' }).then((r) => r.type, () => 'error')"
+      );
+      off();
+      await h.close(targetId);
+      return { plain, guarded, seen };
+    }, ordinary);
+    assert.equal(answer.plain, 200);
+    assert.deepEqual(
+      answer.seen.filter(([, url]) => url.includes('n=plain')).map(([who]) => who),
+      ['first', 'second'],
+      'the request reaches each session in attach order'
     );
-    const again = await h.attempt(
-      'Fetch.continueRequest',
-      { requestId: first.requestId },
-      sessionId
+    assert.deepEqual(
+      answer.seen.filter(([, url]) => url.includes('vault')),
+      [],
+      'the protected request is continued by the backend'
     );
-    const thenFulfill = await h.attempt(
-      'Fetch.fulfillRequest',
-      { requestId: first.requestId, responseCode: 200, body: btoa('late') },
-      sessionId
+    assert.notEqual(answer.guarded, 'error');
+  });
+}
+
+for (const transport of transports) {
+  test(`${transport} C5 Network events and bodies of protected requests never reach the client; ordinary ones do`, async (t) => {
+    const page = await client(t, transport);
+    const answer = await page.evaluate(async (ordinary) => {
+      const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+      await h.cdp.send('Network.enable', {}, sessionId);
+      const mark = h.events.length;
+      await h.evaluate(
+        sessionId,
+        `fetch('${ordinary}/hello?n=plain').then((r) => r.text(), () => 'error')`
+      );
+      await h.evaluate(
+        sessionId,
+        "fetch('https://vault.sliccy.ai/secret?n=vault', { mode: 'no-cors' }).then(() => 'ok', () => 'error')"
+      );
+      await h.sleep(500);
+      const net = h.events.slice(mark).filter((e) => e.method.startsWith('Network.'));
+      const plain = net.find(
+        (e) => e.method === 'Network.requestWillBeSent' && e.params.request.url.includes('n=plain')
+      );
+      const body = plain
+        ? await h.attempt(
+            'Network.getResponseBody',
+            { requestId: plain.params.requestId },
+            sessionId
+          )
+        : { error: 'no plain request' };
+      const unseen = await h.attempt(
+        'Network.getResponseBody',
+        { requestId: 'never-seen' },
+        sessionId
+      );
+      await h.close(targetId);
+      return {
+        plain: Boolean(plain),
+        body,
+        unseen,
+        leaked: net.filter((e) => JSON.stringify(e).includes('vault.sliccy.ai')).length,
+      };
+    }, ordinary);
+    assert.equal(answer.plain, true, 'the ordinary request is visible');
+    assert.equal(answer.body.error, undefined, 'its body can be read');
+    assert.match(answer.unseen.error, /^slicc: refused: /);
+    assert.equal(answer.leaked, 0, 'no Network event mentions the vault');
+  });
+}
+
+for (const transport of transports) {
+  test(`${transport} C5 an answered pause cannot be answered again, and a pause Chrome dropped cannot be answered`, async (t) => {
+    const page = await client(t, transport);
+    const answer = await page.evaluate(async (ordinary) => {
+      const { targetId, sessionId } = await h.open(`${ordinary}/start`);
+      const paused = [];
+      const off = h.cdp.on((e) => {
+        if (e.method === 'Fetch.requestPaused' && e.sessionId === sessionId) paused.push(e.params);
+      });
+      await h.cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/data*' }] }, sessionId);
+      const pausedFor = (n) =>
+        h.until(async () => paused.find((p) => p.request.url.includes(`n=${n}`)));
+      const fetchIn = (n) =>
+        h.evaluate(
+          sessionId,
+          `window.__r${n} = fetch('${ordinary}/data?n=${n}').then((r) => r.text(), () => 'error'); true`
+        );
+      const result = (n) => h.evaluate(sessionId, `window.__r${n}`);
+      await fetchIn('continue');
+      const first = await pausedFor('continue');
+      const control = await h.attempt(
+        'Fetch.continueRequest',
+        { requestId: first.requestId },
+        sessionId
+      );
+      const again = await h.attempt(
+        'Fetch.continueRequest',
+        { requestId: first.requestId },
+        sessionId
+      );
+      const thenFulfill = await h.attempt(
+        'Fetch.fulfillRequest',
+        { requestId: first.requestId, responseCode: 200, body: btoa('late') },
+        sessionId
+      );
+      const continued = await result('continue');
+      await fetchIn('fulfill');
+      const second = await pausedFor('fulfill');
+      const fulfilled = await h.attempt(
+        'Fetch.fulfillRequest',
+        {
+          requestId: second.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'access-control-allow-origin', value: '*' }],
+          body: btoa('fulfilled-once'),
+        },
+        sessionId
+      );
+      const refulfilled = await h.attempt(
+        'Fetch.fulfillRequest',
+        { requestId: second.requestId, responseCode: 200, body: btoa('twice') },
+        sessionId
+      );
+      const failed = await h.attempt(
+        'Fetch.failRequest',
+        { requestId: second.requestId, errorReason: 'Failed' },
+        sessionId
+      );
+      const body = await result('fulfill');
+      await h.evaluate(
+        sessionId,
+        `window.__abort = new AbortController(); window.__rdropped = fetch('${ordinary}/data?n=dropped', { signal: window.__abort.signal }).then((r) => r.text(), (e) => 'aborted'); true`
+      );
+      const third = await pausedFor('dropped');
+      await h.evaluate(sessionId, 'window.__abort.abort(); true');
+      await h.sleep(1000);
+      const dropped = await h.attempt(
+        'Fetch.continueRequest',
+        { requestId: third.requestId },
+        sessionId
+      );
+      const alive = await h.evaluate(sessionId, '1 + 1');
+      off();
+      await h.close(targetId);
+      return {
+        control,
+        again,
+        thenFulfill,
+        continued,
+        fulfilled,
+        refulfilled,
+        failed,
+        body,
+        dropped,
+        alive,
+      };
+    }, ordinary);
+    assert.equal(answer.control.error, undefined, 'control: the first continue works');
+    assert.equal(answer.continued, 'real-continue', 'control: the continued request completes');
+    assert.match(answer.again.error ?? '', /^slicc: refused: /, 'a second continue is refused');
+    assert.match(
+      answer.thenFulfill.error ?? '',
+      /^slicc: refused: /,
+      'a fulfill after continue is refused'
     );
-    const continued = await result('continue');
-    await fetchIn('fulfill');
-    const second = await pausedFor('fulfill');
-    const fulfilled = await h.attempt(
-      'Fetch.fulfillRequest',
-      {
-        requestId: second.requestId,
-        responseCode: 200,
-        responseHeaders: [{ name: 'access-control-allow-origin', value: '*' }],
-        body: btoa('fulfilled-once'),
-      },
-      sessionId
+    assert.equal(answer.fulfilled.error, undefined, 'control: the first fulfill works');
+    assert.equal(answer.body, 'fulfilled-once', 'control: the fulfilled body arrives once');
+    assert.match(
+      answer.refulfilled.error ?? '',
+      /^slicc: refused: /,
+      'a second fulfill is refused'
     );
-    const refulfilled = await h.attempt(
-      'Fetch.fulfillRequest',
-      { requestId: second.requestId, responseCode: 200, body: btoa('twice') },
-      sessionId
+    assert.match(answer.failed.error ?? '', /^slicc: refused: /, 'a fail after fulfill is refused');
+    assert.match(
+      answer.dropped.error ?? '',
+      /^slicc: refused: /,
+      'a pause Chrome dropped is refused'
     );
-    const failed = await h.attempt(
-      'Fetch.failRequest',
-      { requestId: second.requestId, errorReason: 'Failed' },
-      sessionId
-    );
-    const body = await result('fulfill');
-    await h.evaluate(
-      sessionId,
-      `window.__abort = new AbortController(); window.__rdropped = fetch('${ordinary}/data?n=dropped', { signal: window.__abort.signal }).then((r) => r.text(), (e) => 'aborted'); true`
-    );
-    const third = await pausedFor('dropped');
-    await h.evaluate(sessionId, 'window.__abort.abort(); true');
-    await h.sleep(1000);
-    const dropped = await h.attempt(
-      'Fetch.continueRequest',
-      { requestId: third.requestId },
-      sessionId
-    );
-    const alive = await h.evaluate(sessionId, '1 + 1');
-    off();
-    await h.close(targetId);
-    return {
-      control,
-      again,
-      thenFulfill,
-      continued,
-      fulfilled,
-      refulfilled,
-      failed,
-      body,
-      dropped,
-      alive,
-    };
-  }, ordinary);
-  assert.equal(answer.control.error, undefined, 'control: the first continue works');
-  assert.equal(answer.continued, 'real-continue', 'control: the continued request completes');
-  assert.match(answer.again.error ?? '', /^slicc: refused: /, 'a second continue is refused');
-  assert.match(
-    answer.thenFulfill.error ?? '',
-    /^slicc: refused: /,
-    'a fulfill after continue is refused'
-  );
-  assert.equal(answer.fulfilled.error, undefined, 'control: the first fulfill works');
-  assert.equal(answer.body, 'fulfilled-once', 'control: the fulfilled body arrives once');
-  assert.match(answer.refulfilled.error ?? '', /^slicc: refused: /, 'a second fulfill is refused');
-  assert.match(answer.failed.error ?? '', /^slicc: refused: /, 'a fail after fulfill is refused');
-  assert.match(
-    answer.dropped.error ?? '',
-    /^slicc: refused: /,
-    'a pause Chrome dropped is refused'
-  );
-  assert.equal(answer.alive, 2, 'the session still answers');
-});
+    assert.equal(answer.alive, 2, 'the session still answers');
+  });
+}
 
 const unparseable = "slicc: refused: slicc can't parse this URL, so it could be a protected page";
 
