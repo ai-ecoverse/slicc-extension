@@ -277,6 +277,8 @@ async function browser(extra = []) {
   return {
     observer,
     guarded,
+    extraTrace: async () =>
+      workerEval(cdp, await workerSession(), 'globalThis.__sliccExtraTrace ?? []'),
     async close() {
       await chrome.close();
       await copy.remove();
@@ -313,6 +315,7 @@ async function clients(transport, metadata) {
           JSON.stringify({
             vector: metadata.vector.id,
             variant: metadata.variant,
+            raw: await own.extraTrace().catch((error) => ({ error: String(error) })),
             extras: extras.map((event) => {
               const headers = event.params.headers;
               const location = headers.location ?? headers.Location;

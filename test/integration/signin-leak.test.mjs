@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
-import { bindingDiagnostic } from './binding-diagnostic.mjs';
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
 import { extId } from './extension-page.mjs';
 
 let chrome;
 before(async () => {
-  chrome = await launch({ prepare: bindingDiagnostic });
+  chrome = await launch();
 });
 after(() => chrome?.close());
 
@@ -174,36 +173,6 @@ for (const transport of transports) {
           const page = await client(t, transport);
           const n = unique(`${transport}${to}${form}${via}`);
           const run = await signIn(page, transport, n, to, form, via);
-          if (transport === 'seven' && !run.errorPage) {
-            const { targetInfos } = await chrome.cdp.send('Target.getTargets');
-            const worker = targetInfos.find(
-              (target) =>
-                target.type === 'service_worker' &&
-                target.url.startsWith(`chrome-extension://${extId}/`)
-            );
-            const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
-              targetId: worker.targetId,
-              flatten: true,
-            });
-            const trace = await chrome.cdp.send(
-              'Runtime.evaluate',
-              { expression: 'JSON.stringify(globalThis.__sliccBindingTrace)', returnByValue: true },
-              sessionId
-            );
-            console.log(
-              'binding-check ' +
-                JSON.stringify({
-                  transport,
-                  via,
-                  to,
-                  form,
-                  href: run.href,
-                  replies: run.replies,
-                  trace: trace.result?.value,
-                })
-            );
-            await chrome.cdp.send('Target.detachFromTarget', { sessionId });
-          }
           const leaks = found(run, n);
           t.diagnostic(`LEAK ${transport} ${via} ${to} ${form}: ${leaks.join(' ') || 'none'}`);
           assert.deepEqual(leaks, [], `the token leaks through ${leaks.join(' ')}`);
