@@ -307,7 +307,7 @@ class DocumentBindings {
 
   key(key: string, value: unknown): string | undefined {
     if (/^(objectId|\w+ObjectId)$/.test(key) && typeof value === 'string') return `object:${value}`;
-    if (/^(?:[a-z]+N|n)odeIds?$/.test(key) && typeof value === 'number') {
+    if (/^(?:backendDOMN|[a-z]+N|n)odeIds?$/.test(key) && typeof value === 'number') {
       return `${key.startsWith('backend') ? 'backend' : 'node'}:${value}`;
     }
     return undefined;

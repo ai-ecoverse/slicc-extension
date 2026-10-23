@@ -1351,7 +1351,7 @@ const SEALED_DOMAINS = [
   'LayerTree.',
   'Animation.',
 ];
-const NODE_KEY = /^(?:[a-z]+N|n)odeIds?$/;
+const NODE_KEY = /^(?:backendDOMN|[a-z]+N|n)odeIds?$/;
 const NODE_EVENT_KEYS = ['nodeId', 'parentId', 'parentNodeId', 'insertionPointId', 'hostId'];
 export const DEEP = 'slicc: refused: that reply nests too deeply to check for protected frames';
 const WHOLE_PAGE = new Set(['DOM.performSearch', 'DOMSnapshot.getSnapshot']);

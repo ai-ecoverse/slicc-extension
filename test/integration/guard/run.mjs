@@ -12,7 +12,6 @@ import { install } from '../client.mjs';
 import { copies } from '../copies.mjs';
 import { extId } from '../extension-page.mjs';
 import { certificate } from '../servers.mjs';
-import { extraDiagnostic } from './extra-diagnostic.mjs';
 import {
   capabilities,
   carrier,
@@ -92,10 +91,6 @@ async function evaluate(cdp, sessionId, expression) {
 async function browser(extra = []) {
   const rules = hosts.map((host) => `MAP ${host} 127.0.0.1:${fixture.port}`).join(', ');
   const copy = await copies(['extension/']);
-  await extraDiagnostic(copy.paths).catch(async (error) => {
-    await copy.remove();
-    throw error;
-  });
   const chrome = await launch({
     roots: [['/', 'test/integration/page/']],
     coverage: [],
@@ -282,8 +277,6 @@ async function browser(extra = []) {
   return {
     observer,
     guarded,
-    extraTrace: async () =>
-      evaluate(cdp, await workerSession(), 'globalThis.__sliccExtraTrace ?? []'),
     async close() {
       await chrome.close();
       await copy.remove();
@@ -308,40 +301,7 @@ async function clients(transport, metadata) {
   const fresh = metadata.leg !== 'guarded' && cachesAuth(metadata.vector);
   const own = await pooled(slot, fresh, shared);
   const made = await own.guarded(transport);
-  const close = async () => {
-    if (transport === 'six-bridge' && metadata.vector.id.startsWith('C2.redirect-secret')) {
-      const extras = made.client.events.filter(
-        (event) =>
-          event.method === 'Network.responseReceivedExtraInfo' &&
-          [301, 302, 303, 307, 308].includes(event.params.statusCode)
-      );
-      console.log(
-        'redirect-check ' +
-          JSON.stringify({
-            vector: metadata.vector.id,
-            variant: metadata.variant,
-            raw: await own.extraTrace().catch((error) => ({ error: String(error) })),
-            extras: extras.map((event) => {
-              const headers = event.params.headers;
-              const location = headers.location ?? headers.Location;
-              const origin =
-                typeof location === 'string' && URL.canParse(location)
-                  ? new URL(location).origin
-                  : '';
-              return {
-                requestId: event.params.requestId,
-                status: event.params.statusCode,
-                locationIsOrigin: location === origin,
-                origin,
-                headersTextHasOrigin: String(event.params.headersText).includes(origin),
-              };
-            }),
-          })
-      );
-    }
-    await made.close();
-  };
-  return { client: made.client, unguarded: own.observer, close };
+  return { client: made.client, unguarded: own.observer, close: made.close };
 }
 
 async function sweep(transport, variant) {
