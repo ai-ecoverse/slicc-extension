@@ -445,6 +445,17 @@ async function restoredDocument(urlPrefix) {
 }
 
 async function eligibility() {
+  const readings = [];
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const probe = await eligibilityAttempt();
+    const state = parsed({ value: probe.reading });
+    if (state?.doc === 'protected' && state.restored === true) return probe;
+    readings.push({ attempt, reading: probe.reading });
+  }
+  assert.fail(`setup: bfcache not available after 3 attempts (${JSON.stringify(readings)})`);
+}
+
+async function eligibilityAttempt() {
   const tab = await historyTab('probe');
   const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
     targetId: tab.targetId,
