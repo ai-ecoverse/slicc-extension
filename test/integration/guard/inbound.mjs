@@ -52,17 +52,28 @@ function sliccBucket(args) {
 }
 function sliccWrap(target) {
   const add = target.addListener.bind(target);
-  target.addListener = (fn, ...rest) =>
-    add((...args) => {
-      sliccRemember(args);
-      const bucket = sliccBucket(args);
-      if (!bucket) return fn(...args);
-      if (sliccRestore(args)) {
-        bucket.count += 1;
-        if (!bucket.first) bucket.first = Date.now();
-      }
-      bucket.queue.push(() => fn(...args));
-    }, ...rest);
+  const remove = target.removeListener.bind(target);
+  const has = target.hasListener.bind(target);
+  const wrapped = new WeakMap();
+  target.addListener = (fn, ...rest) => {
+    let listener = wrapped.get(fn);
+    if (!listener) {
+      listener = (...args) => {
+        sliccRemember(args);
+        const bucket = sliccBucket(args);
+        if (!bucket) return fn(...args);
+        if (sliccRestore(args)) {
+          bucket.count += 1;
+          if (!bucket.first) bucket.first = Date.now();
+        }
+        bucket.queue.push(() => fn(...args));
+      };
+      wrapped.set(fn, listener);
+    }
+    return add(listener, ...rest);
+  };
+  target.removeListener = (fn) => remove(wrapped.get(fn) ?? fn);
+  target.hasListener = (fn) => has(wrapped.get(fn) ?? fn);
 }
 sliccWrap(chrome.debugger.onEvent);
 sliccWrap(chrome.tabs.onUpdated);
