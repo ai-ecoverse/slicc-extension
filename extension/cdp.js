@@ -23,6 +23,7 @@ import {
   bodyMethod,
   boundIds,
   COOKIES,
+  contentResult,
   cookieReader,
   cookieRefused,
   cookieSetter,
@@ -1154,14 +1155,49 @@ class Connection {
     if (treeNamesProtected(tree?.frameTree, anyProtected)) refusal();
   }
 
+  async protectedHistory(tabId) {
+    const history = await this.send(tabId, 'Page.getNavigationHistory', {}).catch(() => refusal());
+    const entry = history?.entries?.[history.currentIndex];
+    if (!entry || typeof entry.url !== 'string' || !entry.url) refusal();
+    if (urlProtected(guard, entry.url)) refusal();
+  }
+
+  async confirmedError(tabId, tab) {
+    const url = textOf(tab.url);
+    if (!this.failedAt(tabId, url)) return false;
+    const tree = await this.send(tabId, 'Page.getFrameTree', {}).catch(() => undefined);
+    const frame = tree?.frameTree?.frame;
+    return (
+      frame?.url === ERROR_PAGE && unfragmented(textOf(frame.unreachableUrl)) === unfragmented(url)
+    );
+  }
+
   async admit(tabId, tab, method, params, sessionId) {
-    const view = await this.read(tabId);
-    try {
-      return await demandTab(this.api, view);
-    } catch (error) {
-      if (!this.held(tab, method, params, sessionId)) throw error;
-      return demandTab(this.api, { ...view, pendingUrl: '' });
+    const raw = await readTab(this.api, tabId);
+    const view = (await this.confirmedError(tabId, raw)) ? this.view(raw) : raw;
+    if (this.held(tab, method, params, sessionId)) {
+      try {
+        return await demandTab(this.api, view);
+      } catch {
+        return demandTab(this.api, { ...view, pendingUrl: '' });
+      }
     }
+    const seen = await demandTab(this.api, view);
+    if (raw.status === 'loading' && view === raw) await this.protectedHistory(tabId);
+    return seen;
+  }
+
+  async committed(tabId) {
+    const raw = await readTab(this.api, tabId);
+    if (await this.confirmedError(tabId, raw)) {
+      await demandTab(this.api, this.view(raw));
+      return;
+    }
+    await demandTab(this.api, raw);
+    const url = textOf(raw.url);
+    if (protectedRules.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
+    if (raw.pendingUrl && raw.pendingUrl !== url) return;
+    await this.protectedHistory(tabId);
   }
 
   held(tab, method, params, sessionId) {
@@ -1234,6 +1270,7 @@ class Connection {
     if (about) return this.openBlank(tabId, params, about);
     if (method === 'Page.bringToFront') await activate(this.api, tabId);
     const seal = sealedRead(method) ? await this.seal(tabId, tab, method, params) : undefined;
+    await this.admit(tabId, tab, method, params, sessionId);
     let result = (await this.send(tabId, method, forwarded)) ?? {};
     if (seal) result = await this.unseal(tabId, tab, seal, method, result);
     if (method === 'Page.captureSnapshot') snapshotChecked(result);
@@ -1243,7 +1280,14 @@ class Connection {
     if (method === 'IO.resolveBlob' && typeof result.uuid === 'string') {
       this.openStream(`blob:${result.uuid}`);
     }
-    return this.readResult(tab, method, params, result);
+    const opened = this.readResult(tab, method, params, result);
+    await this.checkReturn(tabId, sessionId, method);
+    return opened;
+  }
+
+  async checkReturn(tabId, sessionId, method) {
+    if (this.state.cut.has(sessionId)) refusal();
+    if (contentResult(method) && !FETCH_ANSWERS.has(method)) await this.committed(tabId);
   }
 
   readResult(tab, method, params, result) {

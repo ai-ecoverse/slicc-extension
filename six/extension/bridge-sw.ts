@@ -405,7 +405,9 @@ async function ensureTabShield(tabId: number, deps: BridgeSwDeps): Promise<void>
       cutProtectedTab(tabId);
       deps.detachDebugger(tabId).catch(() => {});
     },
-    failuresOf(tabId)
+    failuresOf(tabId),
+    () => deps.getTab(tabId),
+    (id) => deps.getTab(id)
   );
   tabShields.set(tabId, shield);
   try {
