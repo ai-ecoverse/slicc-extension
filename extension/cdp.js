@@ -1236,7 +1236,7 @@ class Connection {
       const current = tab.documents.current(tab.documents.contexts.get(context.id), tree);
       if (
         typeof context.uniqueId !== 'string' ||
-        tab.documents.proven.has(context.uniqueId) ||
+        (tab.documents.proven.has(context.uniqueId) && current) ||
         !frame ||
         anyProtected(frame.url) ||
         anyProtected(frame.securityOrigin)

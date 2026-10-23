@@ -295,6 +295,11 @@ class DocumentBindings {
     }
   }
 
+  frameOf(context: CDPPayload, tree: unknown): CDPPayload | undefined {
+    const aux = isObj(context['auxData']) ? context['auxData'] : {};
+    return frameIn(tree, str(aux['frameId']));
+  }
+
   current(document: DocumentRef | undefined, tree: unknown): boolean {
     if (!document) return false;
     return frameIn(tree, document.frameId)?.['loaderId'] === document.loaderId;
@@ -1725,15 +1730,14 @@ export class TabShield {
   private async prove(tree: unknown): Promise<void> {
     for (const context of this.worlds.visible()) {
       const unique = str(context['uniqueId']);
-      const aux = isObj(context['auxData']) ? context['auxData'] : {};
-      const frame = frameIn(tree, str(aux['frameId']));
+      const frame = this.documents.frameOf(context, tree);
       const current = this.documents.current(
         this.documents.contexts.get(context['id'] as number),
         tree
       );
       if (
         unique === undefined ||
-        this.documents.proven.has(unique) ||
+        (this.documents.proven.has(unique) && current) ||
         !frame ||
         urlProtected(str(frame['url']) ?? '') ||
         urlProtected(str(frame['securityOrigin']) ?? '')

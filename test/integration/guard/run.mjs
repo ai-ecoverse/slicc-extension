@@ -301,7 +301,43 @@ async function clients(transport, metadata) {
   const fresh = metadata.leg !== 'guarded' && cachesAuth(metadata.vector);
   const own = await pooled(slot, fresh, shared);
   const made = await own.guarded(transport);
-  return { client: made.client, unguarded: own.observer, close: made.close };
+  const close = async () => {
+    if (
+      transport === 'six-bridge' &&
+      metadata.leg === 'guarded' &&
+      metadata.vector.id.startsWith('C2.redirect-secret')
+    ) {
+      const extras = made.client.events.filter(
+        (event) =>
+          event.method === 'Network.responseReceivedExtraInfo' &&
+          [301, 302, 303, 307, 308].includes(event.params.statusCode)
+      );
+      console.log(
+        'redirect-check ' +
+          JSON.stringify({
+            vector: metadata.vector.id,
+            variant: metadata.variant,
+            extras: extras.map((event) => {
+              const headers = event.params.headers;
+              const location = headers.location ?? headers.Location;
+              const origin =
+                typeof location === 'string' && URL.canParse(location)
+                  ? new URL(location).origin
+                  : '';
+              return {
+                requestId: event.params.requestId,
+                status: event.params.statusCode,
+                locationIsOrigin: location === origin,
+                origin,
+                headersTextHasOrigin: String(event.params.headersText).includes(origin),
+              };
+            }),
+          })
+      );
+    }
+    await made.close();
+  };
+  return { client: made.client, unguarded: own.observer, close };
 }
 
 async function sweep(transport, variant) {
