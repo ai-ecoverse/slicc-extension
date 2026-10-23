@@ -56,6 +56,16 @@ async function frames(page) {
   return second - first;
 }
 
+async function rendering(page) {
+  const first = await page.evaluate(() => globalThis.painted());
+  for (let i = 0; i < 50; i++) {
+    await sleep(200);
+    const now = await page.evaluate(() => globalThis.painted());
+    if (now > first) return now - first;
+  }
+  return 0;
+}
+
 function placement(sw, url) {
   return sw(`(async () => {
     const [tab] = await chrome.tabs.query({ url: ${JSON.stringify(url)} });
@@ -81,7 +91,7 @@ async function front(sw, page, url, label) {
     'visible',
     `${label}: seven's document stays visible`
   );
-  const advanced = await frames(page);
+  const advanced = await rendering(page);
   assert.ok(advanced > 0, `${label}: seven keeps rendering (${advanced} frames)`);
 }
 
@@ -209,5 +219,108 @@ for (const transport of ['seven', 'six-bridge']) {
         `${transport}: after ${method} a hidden seven stops rendering`
       );
     }
+  });
+}
+
+async function landed(sw, target) {
+  for (let i = 0; i < 50; i++) {
+    const found = await sw(
+      `chrome.tabs.query({}).then((tabs) => tabs.find((tab) => (tab.url || tab.pendingUrl) === ${JSON.stringify(target)})?.id ?? null)`
+    );
+    if (found !== null) return found;
+    await sleep(200);
+  }
+  throw new Error(`${target} never opened`);
+}
+
+const popups = [
+  ['window.open', (target) => `(window.open(${JSON.stringify(target)}), true)`],
+  [
+    'a target=_blank link',
+    (target) =>
+      `(() => { const a = document.createElement('a'); a.href = ${JSON.stringify(target)}; a.target = '_blank'; document.body.append(a); a.click(); return true; })()`,
+  ],
+  ['a popup window', (target) => `(window.open(${JSON.stringify(target)}, '', 'popup'), true)`],
+  [
+    'a popup window as large as seven',
+    (target) =>
+      `(window.open(${JSON.stringify(target)}, '', 'popup,left=0,top=0,width=' + screen.availWidth + ',height=' + screen.availHeight), true)`,
+  ],
+];
+
+for (const transport of ['seven', 'six-bridge']) {
+  test(`${transport}: a driven page's popups and target=_blank links open behind seven's tab`, async (t) => {
+    const url = `${entry[transport]}${entry[transport].includes('?') ? '&' : '?'}run=${Date.now()}`;
+    const page = await chrome.visit(t, url);
+    await page.evaluate(install, transport, extId);
+    const sw = await worker();
+    const opened = [];
+    t.after(() =>
+      sw(
+        `Promise.allSettled(${JSON.stringify(opened.map(Number))}.map((id) => chrome.tabs.remove(id))).then(() => true)`
+      )
+    );
+    const seven = await placement(sw, url);
+    await raise(sw, seven.tabId);
+    await front(sw, page, url, `${transport} control`);
+    const tab = await ok(page, 'Target.createTarget', { url: 'about:blank' });
+    opened.push(tab.targetId);
+    const { sessionId } = await ok(page, 'Target.attachToTarget', {
+      targetId: tab.targetId,
+      flatten: true,
+    });
+    await ok(page, 'Page.enable', {}, sessionId, transport);
+    await page.evaluate((sessionId, target) => h.land(sessionId, target), sessionId, ordinary);
+    await front(sw, page, url, `${transport} driven`);
+    for (const [index, [label, source]] of popups.entries()) {
+      const target = `${ordinary}landing?popup=${index}`;
+      const answer = await page.evaluate(
+        (sessionId, expression) => h.evaluate(sessionId, expression),
+        sessionId,
+        source(target)
+      );
+      assert.equal(answer, true, `${transport} ${label}: ${JSON.stringify(answer)}`);
+      opened.push(await landed(sw, target));
+      await front(sw, page, url, `${transport} ${label}`);
+    }
+  });
+}
+
+for (const transport of ['seven', 'six-bridge']) {
+  test(`${transport}: a client cannot minimize seven's window, only a window seven is not in`, async (t) => {
+    const url = `${entry[transport]}${entry[transport].includes('?') ? '&' : '?'}run=${Date.now()}`;
+    const page = await chrome.visit(t, url);
+    await page.evaluate(install, transport, extId);
+    const sw = await worker();
+    const opened = [];
+    t.after(() =>
+      sw(
+        `Promise.allSettled(${JSON.stringify(opened.map(Number))}.map((id) => chrome.tabs.remove(id))).then(() => true)`
+      )
+    );
+    const seven = await placement(sw, url);
+    await raise(sw, seven.tabId);
+    await front(sw, page, url, `${transport} control`);
+    const own = await sw(`chrome.tabs.get(${seven.tabId}).then((tab) => tab.windowId)`);
+    const tab = await ok(page, 'Target.createTarget', { url: 'about:blank' });
+    opened.push(tab.targetId);
+    const found = await drive(page, 'Browser.getWindowForTarget', { targetId: tab.targetId });
+    if (found.result)
+      assert.equal(found.result.windowId, own, `${transport}: the tab is in seven's window`);
+    const answer = await drive(page, 'Browser.setWindowBounds', {
+      windowId: own,
+      bounds: { windowState: 'minimized' },
+    });
+    assert.ok(answer.error, `${transport}: minimizing seven's window is refused`);
+    await front(sw, page, url, `${transport} minimizing seven's window`);
+    if (transport !== 'six-bridge') return;
+    const win = await ok(page, 'Target.createTarget', { url: 'about:blank', newWindow: true });
+    opened.push(win.targetId);
+    const { windowId } = await ok(page, 'Browser.getWindowForTarget', { targetId: win.targetId });
+    assert.notEqual(windowId, own);
+    await ok(page, 'Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    const state = await sw(`chrome.windows.get(${windowId}).then((w) => w.state)`);
+    assert.equal(state, 'minimized', `${transport}: a window seven is not in still minimizes`);
+    await front(sw, page, url, `${transport} minimized other window`);
   });
 }
