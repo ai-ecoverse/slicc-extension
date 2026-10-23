@@ -16,6 +16,7 @@ const destinations = {
   seven: 'https://seven.sliccy.ai',
   vault: 'https://vault.sliccy.ai',
 };
+const challenged = { seven: destinations.control, 'six-bridge': 'https://challenged.test' };
 const twoPixels =
   'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAAAAADRSSBWAAAAC0lEQVR4nGNgYAAAAAMAAbitOmMAAAAASUVORK5CYII=';
 
@@ -170,7 +171,7 @@ for (const transport of transports) {
   test(`${transport} C5.auth: authRequired reaches the client for an ordinary origin, never for a protected one`, async (t) => {
     const page = await client(t, transport);
     assert.deepEqual(
-      await auth(page, destinations.control, 'c-auth'),
+      await auth(page, challenged[transport], 'c-auth'),
       { alive: 2, detached: false, seen: true, pausedSeen: true, authed: true, untouched: false },
       'control'
     );
