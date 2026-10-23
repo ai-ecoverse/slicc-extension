@@ -312,6 +312,16 @@ for (const transport of ['seven', 'six-bridge']) {
       bounds: { windowState: 'minimized' },
     });
     assert.ok(answer.error, `${transport}: minimizing seven's window is refused`);
+    assert.notEqual(
+      answer.error,
+      'Browser.setWindowBounds timed out',
+      `${transport}: the refusal is an answer, not a stall`
+    );
+    if (transport === 'six-bridge')
+      assert.equal(
+        answer.error,
+        "slicc: refused: minimizing the window that holds SLICC's tab would hide it"
+      );
     await front(sw, page, url, `${transport} minimizing seven's window`);
     if (transport !== 'six-bridge') return;
     const win = await ok(page, 'Target.createTarget', { url: 'about:blank', newWindow: true });
