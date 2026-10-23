@@ -523,6 +523,7 @@ async function blockedHop(tabId) {
     targetId: String(tabId),
     flatten: true,
   });
+  await h.evaluate(sessionId, readExpr);
   const read = () =>
     h.cdp
       .send('Runtime.evaluate', { expression: readExpr, returnByValue: true }, sessionId)
