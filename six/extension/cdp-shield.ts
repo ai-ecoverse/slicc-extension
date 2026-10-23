@@ -61,6 +61,9 @@ function contentResult(method: string): boolean {
     method.startsWith('CSS.') ||
     method.startsWith('Accessibility.') ||
     method.startsWith('Runtime.') ||
+    method === 'Page.captureSnapshot' ||
+    method === 'Page.getResourceContent' ||
+    method === 'Page.searchInResource' ||
     method === 'Page.captureScreenshot' ||
     method === 'Page.printToPDF' ||
     method === 'Page.getFrameTree' ||
@@ -1275,8 +1278,9 @@ export class TabShield {
     }
     if (reroute !== undefined) await this.settleReroute(pauseId, reroute);
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
+    const opened = await this.after(method, await this.unseal(seal, method, result ?? {}), input);
     await this.checkReturn(method);
-    return this.after(method, await this.unseal(seal, method, result ?? {}), input);
+    return opened;
   }
 
   private frameHidden(frame: CDPPayload): boolean {
@@ -1604,6 +1608,7 @@ export class TabShield {
   }
 
   private async checkReturn(method: string): Promise<void> {
+    if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     if (contentResult(method) && !FETCH_SETTLES.has(method)) await this.committed();
   }
 

@@ -1271,7 +1271,6 @@ class Connection {
     const seal = sealedRead(method) ? await this.seal(tabId, tab, method, params) : undefined;
     await this.admit(tabId, tab, method, params, sessionId);
     let result = (await this.send(tabId, method, forwarded)) ?? {};
-    await this.checkReturn(tabId, sessionId, method);
     if (seal) result = await this.unseal(tabId, tab, seal, method, result);
     if (method === 'Page.captureSnapshot') snapshotChecked(result);
     await this.learn(tabId, tab, method, result);
@@ -1280,7 +1279,9 @@ class Connection {
     if (method === 'IO.resolveBlob' && typeof result.uuid === 'string') {
       this.openStream(`blob:${result.uuid}`);
     }
-    return this.readResult(tab, method, params, result);
+    const opened = this.readResult(tab, method, params, result);
+    await this.checkReturn(tabId, sessionId, method);
+    return opened;
   }
 
   async checkReturn(tabId, sessionId, method) {

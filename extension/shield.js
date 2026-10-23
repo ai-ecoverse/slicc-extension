@@ -1224,6 +1224,9 @@ export function contentResult(method) {
     method.startsWith('CSS.') ||
     method.startsWith('Accessibility.') ||
     method.startsWith('Runtime.') ||
+    method === 'Page.captureSnapshot' ||
+    method === 'Page.getResourceContent' ||
+    method === 'Page.searchInResource' ||
     method === 'Page.captureScreenshot' ||
     method === 'Page.printToPDF' ||
     method === 'Page.getFrameTree' ||
