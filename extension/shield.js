@@ -54,6 +54,8 @@ const COOKIE_READERS = new Set([
 ]);
 
 const OUTRIGHT = new Map([
+  ['Page.setDocumentContent', 'unbound document replacement is not supported'],
+  ['Runtime.runScript', 'script execution without a unique context binding is not supported'],
   [
     'Target.exposeDevToolsProtocol',
     'Target.exposeDevToolsProtocol would give a page the whole browser',
@@ -1190,6 +1192,7 @@ export class DocumentBindings {
   }
 
   key(key, value) {
+    if (key === 'searchId' && typeof value === 'string') return `search:${value}`;
     if (OBJECT_KEY.test(key) && typeof value === 'string') return `object:${value}`;
     if (NODE_KEY.test(key) && typeof value === 'number') {
       return `${key.startsWith('backend') ? 'backend' : 'node'}:${value}`;
@@ -1283,12 +1286,19 @@ export class DocumentBindings {
       ].includes(method)
     ) {
       const backendNodeId = this.backends.get(params.nodeId);
-      if (backendNodeId === undefined) throw new Error(UNSEEN_CONTEXT);
-      const { nodeId, ...rest } = params;
-      params = { ...rest, backendNodeId };
+      if (backendNodeId !== undefined) {
+        const { nodeId, ...rest } = params;
+        params = { ...rest, backendNodeId };
+      }
     }
     const root = frameIn(tree);
-    let document = root && { frameId: root.id, loaderId: root.loaderId };
+    const owner = Object.entries(params)
+      .flatMap(([key, value]) => {
+        const values = Array.isArray(value) ? value : [value];
+        return values.map((entry) => this.handles.get(this.key(key, entry)));
+      })
+      .find(Boolean);
+    let document = owner ?? (root && { frameId: root.id, loaderId: root.loaderId });
     if (params.objectId) document = this.namespaces.get(this.namespace(params.objectId));
     const keyed = method === 'Runtime.evaluate' || method === 'Runtime.callFunctionOn';
     const numbered = [

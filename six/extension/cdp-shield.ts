@@ -156,6 +156,8 @@ const FETCH_SETTLES = new Set([
 ]);
 
 const REFUSED_METHODS = new Map<string, string>([
+  ['Page.setDocumentContent', 'unbound document replacement is not supported'],
+  ['Runtime.runScript', 'script execution without a unique context binding is not supported'],
   [
     'Target.exposeDevToolsProtocol',
     'Target.exposeDevToolsProtocol would give a page the whole browser',
@@ -306,6 +308,7 @@ class DocumentBindings {
   }
 
   key(key: string, value: unknown): string | undefined {
+    if (key === 'searchId' && typeof value === 'string') return `search:${value}`;
     if (/^(objectId|\w+ObjectId)$/.test(key) && typeof value === 'string') return `object:${value}`;
     if (/^(?:backendDOMN|[a-z]+N|n)odeIds?$/.test(key) && typeof value === 'number') {
       return `${key.startsWith('backend') ? 'backend' : 'node'}:${value}`;
@@ -412,15 +415,24 @@ class DocumentBindings {
       ].includes(method)
     ) {
       const backendNodeId = this.backends.get(params['nodeId'] as number);
-      if (backendNodeId === undefined) refuse(UNSEEN_CONTEXT);
-      const { nodeId, ...rest } = params;
-      params = { ...rest, backendNodeId };
+      if (backendNodeId !== undefined) {
+        const { nodeId, ...rest } = params;
+        params = { ...rest, backendNodeId };
+      }
     }
     const root = frameIn(tree, undefined);
-    let document = root && {
-      frameId: str(root['id']) ?? '',
-      loaderId: str(root['loaderId']) ?? '',
-    };
+    const owner = Object.entries(params)
+      .flatMap(([key, value]) => {
+        const values = Array.isArray(value) ? value : [value];
+        return values.map((entry) => this.handles.get(this.key(key, entry) ?? ''));
+      })
+      .find((entry): entry is DocumentRef => entry !== undefined);
+    let document =
+      owner ??
+      (root && {
+        frameId: str(root['id']) ?? '',
+        loaderId: str(root['loaderId']) ?? '',
+      });
     if (params['objectId'])
       document = this.namespaces.get(this.namespace(params['objectId']) ?? '');
     const keyed = method === 'Runtime.evaluate' || method === 'Runtime.callFunctionOn';
@@ -1380,6 +1392,7 @@ export class TabShield {
   private readonly worlds = new Worlds();
   private readonly documents = new DocumentBindings();
   private readonly pendingFrames = new Set<string>();
+  private pageObserved = false;
   private clientFetch: ClientFetch | null = null;
   private seal: Sealed | undefined;
   private readonly cut = new Set<unknown>();
@@ -1411,6 +1424,14 @@ export class TabShield {
     await this.send('Network.setBypassServiceWorker', { bypass: true });
     await this.inventoryFrames();
     await this.send('Runtime.enable', {});
+    this.pageObserved = await shieldProbe(
+      this.send('Page.enable', {}).then(() =>
+        this.send('Page.setLifecycleEventsEnabled', { enabled: true })
+      )
+    ).then(
+      () => true,
+      () => false
+    );
   }
 
   private async inventoryFrames(): Promise<void> {
@@ -1439,6 +1460,11 @@ export class TabShield {
     }
   }
 
+  private inputGate(method: string): void {
+    if (method.startsWith('Input.') && (!this.pageObserved || this.pendingFrames.size > 0))
+      refuse(PROTECTED_RULES.refusal);
+  }
+
   private fetchParams(): CDPPayload {
     const client = this.clientFetch;
     const patterns = client ? client.patterns : [];
@@ -1463,7 +1489,16 @@ export class TabShield {
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
     await this.gate(method, input);
     await this.admit(method, input);
-    if (method === 'Runtime.enable' || method === 'Runtime.disable') return {};
+    if (
+      [
+        'Runtime.enable',
+        'Runtime.disable',
+        'Page.enable',
+        'Page.disable',
+        'Page.setLifecycleEventsEnabled',
+      ].includes(method)
+    )
+      return {};
     const about = method === 'Page.navigate' ? aboutUrl(input['url']) : undefined;
     if (about) return this.openBlank(input, about);
     const rewritten = this.rewrite(method, input);
@@ -1480,6 +1515,7 @@ export class TabShield {
     const seal = await this.sealFor(method, input);
     const binding = await this.bind(method, rewritten);
     await this.gate(method, input);
+    this.inputGate(method);
     let result: CDPPayload;
     try {
       result = await forward(
@@ -1783,7 +1819,8 @@ export class TabShield {
     method: string,
     params: CDPPayload
   ): Promise<{ params: CDPPayload; document: DocumentRef | undefined }> {
-    if (method.startsWith('Input.') && this.pendingFrames.size > 0) refuse(PROTECTED_RULES.refusal);
+    if (method.startsWith('Input.') && (!this.pageObserved || this.pendingFrames.size > 0))
+      refuse(PROTECTED_RULES.refusal);
     if (!sealedRead(method) && !method.startsWith('Runtime.'))
       return { params, document: undefined };
     const tree = await shieldProbe(this.send('Page.getFrameTree', {})).catch(() =>
@@ -2194,6 +2231,13 @@ export class TabShield {
       ].includes(method)
     )
       this.pendingFrames.add(str(params['frameId']) ?? '');
+    if (
+      method === 'Page.lifecycleEvent' &&
+      params['name'] === 'init' &&
+      params['frameId'] === this.mainFrameId &&
+      params['loaderId'] !== this.documents.frames.get(this.mainFrameId)?.loaderId
+    )
+      this.pendingFrames.add(this.mainFrameId);
     if (method === 'Page.navigatedWithinDocument')
       this.pendingFrames.delete(str(params['frameId']) ?? '');
     if (method !== 'Page.frameNavigated' || !isObj(params['frame'])) return;
