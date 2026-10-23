@@ -1335,7 +1335,7 @@ test('a protected iframe does not detach the tab (Codex P2)', async () => {
     params: { targetId: '8', flatten: true },
   });
   api.fire(8, 'Page.frameNavigated', {
-    frame: { id: 'main-frame-1', url: 'https://other.test/', securityOrigin: 'https://other.test' },
+    frame: { ...plainTree.frameTree.frame, securityOrigin: 'https://other.test' },
   });
   await cdp.settled();
   api.fire(8, 'Runtime.executionContextCreated', {

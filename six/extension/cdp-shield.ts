@@ -1789,7 +1789,7 @@ export class TabShield {
       params,
       this.worlds.visible(),
       tree['frameTree'],
-      this.mainFrameId
+      str(root?.['id']) ?? this.mainFrameId
     );
   }
 

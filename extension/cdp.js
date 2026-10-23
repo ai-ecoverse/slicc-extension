@@ -1278,7 +1278,7 @@ class Connection {
       params ?? {},
       tab.worlds.visible(),
       tree?.frameTree,
-      tab.mainFrameId
+      root?.id ?? tab.mainFrameId
     );
   }
 

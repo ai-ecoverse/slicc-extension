@@ -302,11 +302,7 @@ async function clients(transport, metadata) {
   const own = await pooled(slot, fresh, shared);
   const made = await own.guarded(transport);
   const close = async () => {
-    if (
-      transport === 'six-bridge' &&
-      metadata.leg === 'guarded' &&
-      metadata.vector.id.startsWith('C2.redirect-secret')
-    ) {
+    if (transport === 'six-bridge' && metadata.vector.id.startsWith('C2.redirect-secret')) {
       const extras = made.client.events.filter(
         (event) =>
           event.method === 'Network.responseReceivedExtraInfo' &&
