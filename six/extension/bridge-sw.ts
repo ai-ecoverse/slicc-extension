@@ -200,6 +200,7 @@ export interface BridgeSwDeps {
   ) => Promise<BridgeChromeWindowInfo>;
   removeTab: (tabId: number) => Promise<void>;
   activateTab: (tabId: number) => Promise<void>;
+  showTab: (tabId: number) => Promise<void>;
   allowedOrigins?: readonly string[];
   tabHasProtectedFrame?: (tabId: number) => Promise<boolean>;
   onLeaderJoinUrl?: (joinUrl: string | null) => void;
@@ -261,9 +262,69 @@ interface PortState {
   emit: (tabId: number, method: string, params?: CDPPayload) => void;
   announce: (method: string, params: CDPPayload) => void;
   cut: Set<string>;
+  leaderTabId: number | undefined;
 }
 
 const welcomedLeaderPorts = new Map<ChromeRuntimePort, string>();
+const fronts = new Map<number, { current: number; previous?: number }>();
+
+export function noteBridgeTabActivated(info: { tabId: number; windowId: number }): void {
+  fronts.set(info.windowId, { current: info.tabId, previous: fronts.get(info.windowId)?.current });
+}
+
+export function noteBridgeWindowRemoved(windowId: number): void {
+  fronts.delete(windowId);
+}
+
+function frontBefore(windowId: number, tabId: number): number | undefined {
+  const seen = fronts.get(windowId);
+  return seen?.current === tabId ? seen.previous : seen?.current;
+}
+
+async function seedFronts(deps: BridgeSwDeps): Promise<void> {
+  for (const tab of await deps.queryTabs()) {
+    if (tab.active && typeof tab.id === 'number' && typeof tab.windowId === 'number') {
+      if (!fronts.has(tab.windowId)) fronts.set(tab.windowId, { current: tab.id });
+    }
+  }
+}
+
+export function noteBridgeTabOpened(
+  tabId: number | undefined,
+  openerId: number | undefined,
+  deps: BridgeSwDeps
+): void {
+  for (const state of liveBridgePortStates.values()) {
+    keepLeaderFront(state, tabId, openerId, deps).catch(() => {});
+  }
+}
+
+export function installBridgeFrontListeners(deps: BridgeSwDeps): void {
+  chrome.tabs.onActivated.addListener(noteBridgeTabActivated);
+  chrome.windows.onRemoved.addListener(noteBridgeWindowRemoved);
+  chrome.tabs.onCreated.addListener((tab) => noteBridgeTabOpened(tab.id, tab.openerTabId, deps));
+  chrome.webNavigation.onCreatedNavigationTarget.addListener((details) =>
+    noteBridgeTabOpened(details.tabId, details.sourceTabId, deps)
+  );
+}
+
+async function keepLeaderFront(
+  state: PortState,
+  tabId: number | undefined,
+  openerId: number | undefined,
+  deps: BridgeSwDeps
+): Promise<void> {
+  const leader = state.leaderTabId;
+  if (leader === undefined || tabId === undefined || openerId === undefined) return;
+  if (!state.ownedTabs.has(openerId) && ![...state.sessionToTab.values()].includes(openerId)) {
+    return;
+  }
+  const [opened, client] = await Promise.all([deps.getTab(tabId), deps.getTab(leader)]);
+  const windowId = client?.windowId;
+  if (!opened?.active || windowId === undefined || frontBefore(windowId, tabId) !== leader) return;
+  if (opened.windowId === windowId) await deps.showTab(leader);
+  else await deps.updateWindow(windowId, { focused: true });
+}
 const liveBridgePortStates = new Map<ChromeRuntimePort, PortState>();
 
 function invalidatePortDebuggerAttachment(state: PortState, tabId: number): void {
@@ -628,6 +689,9 @@ export function buildDefaultBridgeSwDeps(overrides?: Partial<BridgeSwDeps>): Bri
       return chromeWindowInfoFromChrome(updated, `chrome.windows.update(${windowId})`, -1);
     },
     removeTab: (tabId) => chrome.tabs.remove(tabId),
+    showTab: async (tabId) => {
+      await chrome.tabs.update(tabId, { active: true });
+    },
     activateTab: async (tabId) => {
       try {
         const tab = await chrome.tabs.update(tabId, { active: true });
@@ -658,6 +722,7 @@ export async function handleBridgePortConnect(
     emit: () => {},
     announce: () => {},
     cut: new Set(),
+    leaderTabId: port.sender?.tab?.id,
   };
 
   let pinned = false;
@@ -718,6 +783,7 @@ export async function handleBridgePortConnect(
   }
 
   pinned = true;
+  await seedFronts(deps).catch(() => {});
   for (const raw of earlyQueue) runMessage(raw);
   earlyQueue.length = 0;
 }
@@ -879,7 +945,9 @@ async function dispatchCdpCommand(
     return cdpGetWindowForTarget(params ?? {}, deps);
   }
   if (method === 'Browser.getWindowBounds') return cdpGetWindowBounds(params ?? {}, deps);
-  if (method === 'Browser.setWindowBounds') return cdpSetWindowBounds(params ?? {}, deps);
+  if (method === 'Browser.setWindowBounds') {
+    return cdpSetWindowBounds(params ?? {}, state, deps);
+  }
 
   const tabId = attachedTab(method, sessionId, state);
 
@@ -1118,7 +1186,14 @@ async function cdpGetWindowBounds(
   return { bounds: chromeWindowToCdpBounds(win) };
 }
 
-async function cdpSetWindowBounds(params: CDPPayload, deps: BridgeSwDeps): Promise<CDPPayload> {
+export const MINIMIZE_REFUSAL =
+  "slicc: refused: minimizing the window that holds SLICC's tab would hide it";
+
+async function cdpSetWindowBounds(
+  params: CDPPayload,
+  portState: PortState,
+  deps: BridgeSwDeps
+): Promise<CDPPayload> {
   const windowId = params['windowId'];
   if (typeof windowId !== 'number') {
     throw new Error(`Invalid windowId: ${String(windowId)}`);
@@ -1126,6 +1201,10 @@ async function cdpSetWindowBounds(params: CDPPayload, deps: BridgeSwDeps): Promi
   const rawBounds = readCdpBoundsFields(params['bounds']);
   const state = readOptionalWindowState(rawBounds['windowState'] ?? rawBounds['state']);
   const props: BridgeWindowUpdateProps = {};
+  if (state === 'minimized' && portState.leaderTabId !== undefined) {
+    const leader = await deps.getTab(portState.leaderTabId);
+    if (leader?.windowId === windowId) throw new Error(MINIMIZE_REFUSAL);
+  }
   if (state && state !== 'normal') {
     props.state = state;
   } else {

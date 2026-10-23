@@ -188,7 +188,24 @@ async function readTab(api, tabId) {
 }
 
 const sources = new Map();
+const fronts = new Map();
 const tracked = new WeakSet();
+
+function frontBefore(windowId, tabId) {
+  const seen = fronts.get(windowId);
+  return seen?.current === tabId ? seen.previous : seen?.current;
+}
+
+function seedFronts(api) {
+  api.tabs
+    .query({ active: true })
+    .then((tabs) => {
+      for (const tab of tabs) {
+        if (!fronts.has(tab.windowId)) fronts.set(tab.windowId, { current: tab.id });
+      }
+    })
+    .catch(() => undefined);
+}
 
 function trackSources(api) {
   if (tracked.has(api)) return;
@@ -199,6 +216,10 @@ function trackSources(api) {
     }
   });
   api.tabs.onRemoved?.addListener((tabId) => sources.delete(tabId));
+  api.tabs.onActivated?.addListener(({ tabId, windowId }) => {
+    fronts.set(windowId, { current: tabId, previous: fronts.get(windowId)?.current });
+  });
+  api.windows?.onRemoved?.addListener((windowId) => fronts.delete(windowId));
 }
 
 function openerIdOf(tab) {
@@ -358,6 +379,7 @@ class Connection {
     this.port = port;
     this.api = api;
     trackSources(api);
+    seedFronts(api);
     this.state = {
       sessions: new Map(),
       tabs: new Map(),
@@ -1816,7 +1838,18 @@ class Connection {
     });
   }
 
+  async keepFront(tabId, openerId) {
+    const own = this.port.sender?.tab?.id;
+    if (typeof tabId !== 'number' || typeof own !== 'number') return;
+    if (!this.state.tabs.has(openerId) && !this.state.ownedTabs.has(openerId)) return;
+    const [opened, client] = await Promise.all([this.api.tabs.get(tabId), this.api.tabs.get(own)]);
+    if (!opened.active || frontBefore(client.windowId, tabId) !== own) return;
+    if (opened.windowId === client.windowId) await this.api.tabs.update(own, { active: true });
+    else await this.api.windows.update(client.windowId, { focused: true });
+  }
+
   onSource(details) {
+    void this.keepFront(details?.tabId, details?.sourceTabId).catch(() => undefined);
     if (!this.state.discover || !this.state.seen.has(details?.tabId)) return;
     void this.api.tabs
       .get(details.tabId)
@@ -1825,6 +1858,7 @@ class Connection {
   }
 
   onCreated(tab) {
+    void this.keepFront(tab?.id, tab?.openerTabId).catch(() => undefined);
     void this.announce(tab, true).catch(() => undefined);
   }
 
