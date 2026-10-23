@@ -780,6 +780,9 @@ test('a child about: frame whose origin cannot be read is treated as protected',
         },
       });
     }
+    if (method === 'Page.getNavigationHistory') {
+      return Promise.resolve({ currentIndex: 0, entries: [{ url: 'https://other.test/' }] });
+    }
     return Promise.resolve({});
   };
   const attached = await command(cdp, connection, {

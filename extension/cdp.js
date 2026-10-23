@@ -1164,10 +1164,7 @@ class Connection {
 
   async confirmedError(tabId, tab) {
     const url = textOf(tab.url);
-    const pending = textOf(tab.pendingUrl);
-    if (!this.failedAt(tabId, url) || tab.status === 'loading' || (pending && pending !== url)) {
-      return false;
-    }
+    if (!this.failedAt(tabId, url)) return false;
     const tree = await this.send(tabId, 'Page.getFrameTree', {}).catch(() => undefined);
     const frame = tree?.frameTree?.frame;
     return (
@@ -1186,13 +1183,16 @@ class Connection {
       }
     }
     const seen = await demandTab(this.api, view);
-    if (raw.status === 'loading') await this.protectedHistory(tabId);
+    if (raw.status === 'loading' && view === raw) await this.protectedHistory(tabId);
     return seen;
   }
 
   async committed(tabId) {
     const raw = await readTab(this.api, tabId);
-    if (await this.confirmedError(tabId, raw)) return;
+    if (await this.confirmedError(tabId, raw)) {
+      await demandTab(this.api, this.view(raw));
+      return;
+    }
     await demandTab(this.api, raw);
     const url = textOf(raw.url);
     if (protectedRules.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;

@@ -1524,7 +1524,7 @@ export class TabShield {
     const tab = await this.readLive();
     const confirmed = await this.confirmedError(tab);
     this.refuseShown(confirmed ? this.failedView(tab) : tab, await this.openerState(tab));
-    if (tab.status === 'loading') await this.protectedHistory();
+    if (tab.status === 'loading' && !confirmed) await this.protectedHistory();
   }
 
   private async readLive(): Promise<ChromeTab> {
@@ -1585,10 +1585,7 @@ export class TabShield {
 
   private async confirmedError(tab: ChromeTab): Promise<boolean> {
     const url = tab.url ?? '';
-    const pending = tab.pendingUrl ?? '';
-    if (!this.failedAt(url) || tab.status === 'loading' || (pending !== '' && pending !== url)) {
-      return false;
-    }
+    if (!this.failedAt(url)) return false;
     const tree = await this.send('Page.getFrameTree', {}).catch(() => undefined);
     const root = tree?.['frameTree'];
     const frame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
@@ -1616,7 +1613,10 @@ export class TabShield {
 
   private async committed(): Promise<void> {
     const tab = await this.readLive();
-    if (await this.confirmedError(tab)) return;
+    if (await this.confirmedError(tab)) {
+      this.refuseShown(this.failedView(tab), await this.openerState(tab));
+      return;
+    }
     this.refuseShown(tab, await this.openerState(tab));
     const url = tab.url ?? '';
     if (PROTECTED_RULES.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
