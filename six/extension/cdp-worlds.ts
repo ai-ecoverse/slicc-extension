@@ -165,6 +165,16 @@ export class Worlds {
       .map(([, entry]) => entry.context as CDPPayload);
   }
 
+  bindingContexts(): CDPPayload[] {
+    return [...this.ids.values()]
+      .map((entry) => entry.context)
+      .filter(
+        (context): context is CDPPayload =>
+          typeof context?.['uniqueId'] === 'string' &&
+          this.uniques.get(context['uniqueId']) === false
+      );
+  }
+
   private verdict(selector: Selector): string | undefined {
     if (selector.kind === 'deep') return UNSEEN_CONTEXT;
     if (selector.kind === 'name') {

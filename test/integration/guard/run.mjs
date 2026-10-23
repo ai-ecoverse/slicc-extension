@@ -23,6 +23,7 @@ import {
   until,
   waitEvent,
 } from './guard.mjs';
+import { armInbound, inboundDelay, workerEval } from './inbound.mjs';
 
 const set = JSON.parse(
   await readFile(
@@ -91,6 +92,10 @@ async function evaluate(cdp, sessionId, expression) {
 async function browser(extra = []) {
   const rules = hosts.map((host) => `MAP ${host} 127.0.0.1:${fixture.port}`).join(', ');
   const copy = await copies(['extension/']);
+  await armInbound(copy.paths).catch(async (error) => {
+    await copy.remove();
+    throw error;
+  });
   const chrome = await launch({
     roots: [['/', 'test/integration/page/']],
     coverage: [],
@@ -269,6 +274,16 @@ async function browser(extra = []) {
         throw error;
       },
       waitEvent: (predicate, ms = 10000) => waitEvent(events, predicate, ms),
+      inboundDelay: inboundDelay({
+        evaluate: async (expression) => {
+          try {
+            return await workerEval(cdp, await workerSession(), expression);
+          } catch {
+            worker = undefined;
+            return workerEval(cdp, await workerSession(), expression);
+          }
+        },
+      }),
       close,
     };
     return { client, close };

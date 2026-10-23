@@ -36,7 +36,11 @@ function port(name, url, id = extensionId) {
   };
 }
 
-const plainTree = { frameTree: { frame: { id: 'MAIN', url: 'https://other.test/' } } };
+const plainTree = {
+  frameTree: {
+    frame: { id: 'MAIN', loaderId: 'doc-MAIN-https://other.test/', url: 'https://other.test/' },
+  },
+};
 
 function fakeChrome() {
   const eventListeners = new Set();
@@ -183,6 +187,48 @@ function fakeChrome() {
       for (const listener of detachListeners) listener({ tabId }, 'target_closed');
     },
   };
+  let send = api.debugger.sendCommand;
+  api.probes = new Set();
+  let mainFrame = plainTree.frameTree.frame;
+  const wrapped = async (target, method, params) => {
+    if (method === 'Runtime.evaluate' && params?.objectGroup === 'slicc:document-binding') {
+      api.sent.push({ tabId: target.tabId, method, params });
+      const objectId = '123.9999.0';
+      api.probes.add(objectId);
+      return { result: { type: 'object', objectId } };
+    }
+    if (method === 'Runtime.releaseObject' && api.probes.has(params?.objectId)) {
+      api.sent.push({ tabId: target.tabId, method, params });
+      return {};
+    }
+    const answer = await send(target, method, params);
+    if (method === 'Page.getFrameTree' && answer?.frameTree) {
+      const pending = [answer.frameTree];
+      while (pending.length > 0) {
+        const node = pending.pop();
+        if (node?.frame) node.frame.loaderId ??= `doc-${node.frame.id}-${node.frame.url}`;
+        if (node?.childFrames) pending.push(...node.childFrames);
+      }
+      mainFrame = answer.frameTree.frame;
+    }
+    if (method === 'Runtime.enable') {
+      api.fire(target.tabId, 'Runtime.executionContextCreated', {
+        context: {
+          id: 9999,
+          uniqueId: 'fake-main',
+          origin: 'https://other.test',
+          auxData: { frameId: mainFrame.id, isDefault: true },
+        },
+      });
+    }
+    return answer;
+  };
+  Object.defineProperty(api.debugger, 'sendCommand', {
+    get: () => wrapped,
+    set: (next) => {
+      send = next;
+    },
+  });
   return api;
 }
 
@@ -197,12 +243,16 @@ function open(url = 'https://seven.sliccy.ai/play') {
 function user(api) {
   return api.sent.filter(
     (sent) =>
+      sent.params?.objectGroup !== 'slicc:document-binding' &&
+      !(sent.method === 'Runtime.releaseObject' && api.probes.has(sent.params?.objectId)) &&
       ![
         'Fetch.enable',
         'Page.getFrameTree',
         'Page.getNavigationHistory',
         'Target.setAutoAttach',
         'Runtime.enable',
+        'Page.enable',
+        'Page.setLifecycleEventsEnabled',
       ].includes(sent.method)
   );
 }
@@ -380,6 +430,15 @@ test('flatten true keeps the session on the attaching port and forwards its even
   });
   assert.deepEqual(again.result, { sessionId: '8.1' });
   assert.equal(api.attached.length, 1);
+  assert.deepEqual(
+    api.sent.filter(
+      (sent) => sent.method === 'Page.enable' || sent.method === 'Page.setLifecycleEventsEnabled'
+    ),
+    [
+      { tabId: 8, method: 'Page.enable', params: {} },
+      { tabId: 8, method: 'Page.setLifecycleEventsEnabled', params: { enabled: true } },
+    ]
+  );
   const evaluated = await command(cdp, connection, {
     id: 3,
     method: 'Runtime.evaluate',
@@ -388,7 +447,11 @@ test('flatten true keeps the session on the attaching port and forwards its even
   });
   assert.deepEqual(evaluated.result, { value: 2 });
   assert.deepEqual(user(api), [
-    { tabId: 8, method: 'Runtime.evaluate', params: { expression: '1+1' } },
+    {
+      tabId: 8,
+      method: 'Runtime.evaluate',
+      params: { expression: '1+1', uniqueContextId: 'fake-main' },
+    },
   ]);
   assert.deepEqual(api.sent[0], {
     tabId: 8,
@@ -405,6 +468,21 @@ test('flatten true keeps the session on the attaching port and forwards its even
     sessionId: '8',
   });
   assert.match(stolen.error, /No tab attached for sessionId: 8/);
+  api.fire(8, 'Page.loadEventFired', { name: 'load' });
+  await cdp.settled();
+  assert.equal(
+    connection.posted.some((message) => message.method === 'Page.loadEventFired'),
+    false
+  );
+  await command(cdp, connection, { id: 40, method: 'Page.enable', sessionId: '8' });
+  api.fire(8, 'Page.loadEventFired', { name: 'load' });
+  await cdp.settled();
+  assert.deepEqual(connection.posted.at(-1), {
+    method: 'Page.loadEventFired',
+    params: { name: 'load' },
+    sessionId: '8',
+  });
+  await command(cdp, connection, { id: 41, method: 'Page.enable', sessionId: '8.1' });
   api.fire(8, 'Page.loadEventFired', { name: 'load' });
   await cdp.settled();
   assert.deepEqual(connection.posted.slice(-2), [
@@ -1283,7 +1361,7 @@ test('a protected iframe does not detach the tab (Codex P2)', async () => {
     params: { targetId: '8', flatten: true },
   });
   api.fire(8, 'Page.frameNavigated', {
-    frame: { id: 'main-frame-1', url: 'https://other.test/', securityOrigin: 'https://other.test' },
+    frame: { ...plainTree.frameTree.frame, securityOrigin: 'https://other.test' },
   });
   await cdp.settled();
   api.fire(8, 'Runtime.executionContextCreated', {

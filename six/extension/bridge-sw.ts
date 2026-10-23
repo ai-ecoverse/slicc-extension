@@ -255,6 +255,8 @@ interface PortState {
   attachRefCounts: Map<number, number>;
   ownedTabs: Set<number>;
   runtimeTabs: Set<number>;
+  pageSessions: Set<string>;
+  lifecycleSessions: Set<string>;
   unsubscribeEvents: (() => void) | null;
   emit: (tabId: number, method: string, params?: CDPPayload) => void;
   announce: (method: string, params: CDPPayload) => void;
@@ -268,7 +270,11 @@ function invalidatePortDebuggerAttachment(state: PortState, tabId: number): void
   state.ownedTabs.delete(tabId);
   state.attachRefCounts.delete(tabId);
   for (const [sessionId, attachedTabId] of state.sessionToTab) {
-    if (attachedTabId === tabId) state.sessionToTab.delete(sessionId);
+    if (attachedTabId === tabId) {
+      state.sessionToTab.delete(sessionId);
+      state.pageSessions.delete(sessionId);
+      state.lifecycleSessions.delete(sessionId);
+    }
   }
   state.runtimeTabs.delete(tabId);
 }
@@ -646,6 +652,8 @@ export async function handleBridgePortConnect(
     attachRefCounts: new Map(),
     ownedTabs: new Set(),
     runtimeTabs: new Set(),
+    pageSessions: new Set(),
+    lifecycleSessions: new Set(),
     unsubscribeEvents: null,
     emit: () => {},
     announce: () => {},
@@ -686,6 +694,8 @@ export async function handleBridgePortConnect(
     state.ownedTabs.clear();
     state.sessionToTab.clear();
     state.runtimeTabs.clear();
+    state.pageSessions.clear();
+    state.lifecycleSessions.clear();
     state.attachRefCounts.clear();
     for (const tabId of usedTabs) releaseTabShield(tabId, deps).catch(() => {});
   });
@@ -755,7 +765,11 @@ async function handleBridgeMessage(
     state.emit = (tabId, method, params) => {
       let sessionId: string | undefined;
       for (const [sid, tid] of state.sessionToTab) {
-        if (tid === tabId) {
+        if (
+          tid === tabId &&
+          (!method.startsWith('Page.') || state.pageSessions.has(sid)) &&
+          (method !== 'Page.lifecycleEvent' || state.lifecycleSessions.has(sid))
+        ) {
           sessionId = sid;
           break;
         }
@@ -878,7 +892,23 @@ async function dispatchCdpCommand(
     deps.sendDebuggerCommand(tabId, m, await deps.maybeUnmaskCdpFrame(tabId, m, p))
   );
   switchRuntime(method, tabId, state, shield);
+  switchPage(method, params, sessionId, state);
   return result;
+}
+
+function switchPage(
+  method: string,
+  params: CDPPayload | undefined,
+  sessionId: string | undefined,
+  state: PortState
+): void {
+  if (sessionId === undefined) return;
+  if (method === 'Page.enable') state.pageSessions.add(sessionId);
+  if (method === 'Page.disable') state.pageSessions.delete(sessionId);
+  if (method === 'Page.setLifecycleEventsEnabled') {
+    if (params?.['enabled'] === true) state.lifecycleSessions.add(sessionId);
+    else state.lifecycleSessions.delete(sessionId);
+  }
 }
 
 function switchRuntime(method: string, tabId: number, state: PortState, shield: TabShield): void {
@@ -986,7 +1016,11 @@ async function cdpDetachFromTarget(
 
   state.attachRefCounts.delete(tabId);
   for (const [sid, attachedTabId] of state.sessionToTab) {
-    if (attachedTabId === tabId) state.sessionToTab.delete(sid);
+    if (attachedTabId === tabId) {
+      state.sessionToTab.delete(sid);
+      state.pageSessions.delete(sid);
+      state.lifecycleSessions.delete(sid);
+    }
   }
   state.runtimeTabs.delete(tabId);
   if (state.ownedTabs.has(tabId)) {
@@ -1163,7 +1197,11 @@ async function cdpCloseTarget(
 ): Promise<BridgeTargetCloseResult> {
   const tabId = await guardedTab(params, deps);
   for (const [sid, tid] of state.sessionToTab) {
-    if (tid === tabId) state.sessionToTab.delete(sid);
+    if (tid === tabId) {
+      state.sessionToTab.delete(sid);
+      state.pageSessions.delete(sid);
+      state.lifecycleSessions.delete(sid);
+    }
   }
   state.runtimeTabs.delete(tabId);
   state.attachRefCounts.delete(tabId);
