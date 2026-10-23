@@ -14,6 +14,38 @@ const readExpr =
   'JSON.stringify({doc:window.__sliccDoc??null,href:location.href,tag:new URL(location.href).searchParams.get("n"),observedAt:Date.now(),restoredAt:window.__sliccRestoredAt??0,restored:window.__sliccRestored===true,type:(performance.getEntriesByType("navigation")[0]||{}).type||"",reasons:(performance.getEntriesByType("navigation")[0]||{}).notRestoredReasons||null})';
 
 let chrome;
+const raced = [];
+
+const NAVIGATED = /Inspected target navigated or closed|Execution context was destroyed/;
+
+async function pageEvaluate(sessionId, params, label, ms = 5000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try {
+      return await chrome.cdp.send('Runtime.evaluate', params, sessionId);
+    } catch (error) {
+      if (!NAVIGATED.test(String(error?.message ?? error)) || Date.now() >= deadline) throw error;
+      raced.push(label);
+      console.log(`history-check raced ${label}: ${error.message}`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
+async function historyBack(sessionId, params, label) {
+  try {
+    return await chrome.cdp.send(
+      'Runtime.evaluate',
+      { expression: 'history.back()', ...params },
+      sessionId
+    );
+  } catch (error) {
+    if (!NAVIGATED.test(String(error?.message ?? error))) throw error;
+    raced.push(label);
+    console.log(`history-check raced ${label}: ${error.message}`);
+    return {};
+  }
+}
 
 async function prepareExtension(paths) {
   const { readFile, writeFile } = await import('node:fs/promises');
@@ -295,13 +327,9 @@ async function heldRestoreAttempt(page, transport, workerSession, variant) {
     });
     const backIssuedAt = Date.now();
     const commit = await restoreWait(
-      chrome.cdp
-        .send(
-          'Runtime.evaluate',
-          { expression: 'history.back()', userGesture: true },
-          direct.sessionId
-        )
-        .then(() => restored),
+      historyBack(direct.sessionId, { userGesture: true }, 'held: history back').then(
+        () => restored
+      ),
       `${transport}/${variant}: restore event`
     );
     if (commit.type !== 'BackForwardCacheRestore') {
@@ -311,10 +339,10 @@ async function heldRestoreAttempt(page, transport, workerSession, variant) {
     const deadline = Date.now() + 5000;
     do {
       const answer = await restoreWait(
-        chrome.cdp.send(
-          'Runtime.evaluate',
+        pageEvaluate(
+          direct.sessionId,
           { expression: readExpr, returnByValue: true },
-          direct.sessionId
+          'held: restored document'
         ),
         `${transport}/${variant}: restored document`,
         5000
@@ -343,10 +371,10 @@ async function heldRestoreAttempt(page, transport, workerSession, variant) {
     const forwarded = await worker(
       '({admittedAt:globalThis.__sliccHistoryHold.admittedAt,forwardedAt:globalThis.__sliccHistoryHold.forwardedAt,finishedAt:globalThis.__sliccHistoryHold.finishedAt,uniqueContextId:globalThis.__sliccHistoryHold.params?.uniqueContextId,result:globalThis.__sliccHistoryHold.result,error:globalThis.__sliccHistoryHold.error})'
     );
-    const storage = await chrome.cdp.send(
-      'Runtime.evaluate',
+    const storage = await pageEvaluate(
+      direct.sessionId,
       { expression: `localStorage.getItem(${JSON.stringify(key)})`, returnByValue: true },
-      direct.sessionId
+      'held: storage'
     );
     assert.equal(storage.exceptionDetails, undefined);
     if (ax) {
@@ -415,10 +443,10 @@ async function settled(sessionId, prefix) {
   const deadline = Date.now() + 15000;
   let last = '';
   while (Date.now() < deadline) {
-    const answer = await chrome.cdp.send(
-      'Runtime.evaluate',
+    const answer = await pageEvaluate(
+      sessionId,
       { expression: 'document.readyState + "\\n" + location.href', returnByValue: true },
-      sessionId
+      `settled: ${prefix}`
     );
     last = answer.result?.value ?? '';
     const [state, href] = String(last).split('\n');
@@ -547,21 +575,17 @@ async function eligibilityAttempt() {
   });
   try {
     await restoreWait(
-      chrome.cdp.send(
-        'Runtime.evaluate',
-        { expression: 'history.back()', returnByValue: true },
-        sessionId
-      ),
+      historyBack(sessionId, { returnByValue: true }, 'eligibility: history back'),
       'eligibility: history back'
     );
     const deadline = Date.now() + 8000;
     let last;
     while (Date.now() < deadline) {
       const answer = await restoreWait(
-        chrome.cdp.send(
-          'Runtime.evaluate',
+        pageEvaluate(
+          sessionId,
           { expression: readExpr, returnByValue: true },
-          sessionId
+          'eligibility: restored document'
         ),
         'eligibility: restored document',
         5000
@@ -818,8 +842,6 @@ test('a restored history entry is admitted only after a live tab check', {
       }
     });
     t.after(stopObserving);
-    const tab = await historyTab(transport);
-    const extensionTab = await clientTab(page, `${ordinary}?n=${transport}`);
     if (transport === 'six-bridge') {
       const hopTab = await historyTab('six-bridge-hop');
       const hopExtensionTab = await clientTab(page, `${ordinary}?n=six-bridge-hop`);
@@ -842,20 +864,40 @@ test('a restored history entry is admitted only after a live tab check', {
         .send('Target.closeTarget', { targetId: hopTab.targetId })
         .catch(() => undefined);
     }
-    const run = await page.evaluate(burst, extensionTab);
-    console.log(`history-check burst ${transport} ${JSON.stringify(run)}`);
-    await page.evaluate(
-      (sessionId) =>
-        globalThis.h.cdp.send('Target.detachFromTarget', { sessionId }).catch(() => undefined),
-      run.sessionId
-    );
-    const direct = await restoredDocument(vault);
+    const failed = [];
+    let tab;
+    let run;
+    let direct;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      tab = await historyTab(transport);
+      const extensionTab = await clientTab(page, `${ordinary}?n=${transport}`);
+      run = await page.evaluate(burst, extensionTab);
+      console.log(`history-check burst ${transport} ${JSON.stringify(run)}`);
+      await page.evaluate(
+        (sessionId) =>
+          globalThis.h.cdp.send('Target.detachFromTarget', { sessionId }).catch(() => undefined),
+        run.sessionId
+      );
+      direct = await restoredDocument(vault);
+      if (!direct.setup) break;
+      failed.push({ attempt, run, detail: direct.detail });
+      await chrome.cdp
+        .send('Target.closeTarget', { targetId: tab.targetId })
+        .catch(() => undefined);
+    }
     if (direct.setup) {
-      assert.fail(`setup: the restored document was not established (${direct.detail})`);
+      assert.fail(
+        `setup: the restored document was not established after 3 attempts (${JSON.stringify(failed.map(({ attempt, detail }) => ({ attempt, detail })))})`
+      );
     }
     const autopsy = { url: direct.url, value: direct.value, parsed: direct.parsed };
     reports.push({
       ...summarize(transport, run, autopsy),
+      retries: failed.map(({ attempt, run, detail }) => ({
+        attempt,
+        detail,
+        ...summarize(transport, run),
+      })),
       browserTargetId: tab.targetId,
       browserEvents: browserEvents.filter((event) => event.targetId === tab.targetId),
     });
@@ -906,6 +948,11 @@ test('a restored history entry is admitted only after a live tab check', {
       assert.equal(report.before?.doc, 'ordinary');
       assert.equal(report.before?.tag, report.transport);
       assert.equal(report.protectedReads, 0, `${report.transport}: ${JSON.stringify(leaks)}`);
+      for (const retry of report.retries) {
+        const missed = retry.rows.filter((row) => row.doc === 'protected');
+        assert.equal(retry.before?.doc, 'ordinary', JSON.stringify(retry));
+        assert.equal(retry.protectedReads, 0, `${report.transport}: ${JSON.stringify(missed)}`);
+      }
       assert.equal(report.autopsy?.parsed?.doc, 'protected');
       assert.equal(report.autopsy?.parsed?.tag, report.transport);
       assert.equal(report.autopsy?.parsed?.restored, true);
@@ -927,6 +974,7 @@ test('a restored history entry is admitted only after a live tab check', {
     assert.equal(hop.protectedReads, 0, detail);
   }
   assert.equal(version?.product?.startsWith('Chrome/'), true);
+  t.diagnostic(`history-check raced ${JSON.stringify(raced)}`);
 });
 
 after(() => chrome?.close());
