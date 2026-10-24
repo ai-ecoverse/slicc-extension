@@ -24,12 +24,14 @@ const shots = [
   ['jpeg', { format: 'jpeg', quality: 80 }, '800x600'],
   ['png again', { format: 'png' }, '800x600'],
   ['png once more', { format: 'png' }, '800x600'],
+  ['jpeg again', { format: 'jpeg', quality: 80 }, '800x600'],
 ];
 
 async function capture(page, params) {
   return page.evaluate(
     async ({ params, BUDGET }) => {
       const { sessionId } = globalThis.__shot;
+      await h.sleep(1000);
       const started = performance.now();
       const shot = await Promise.race([
         h.attempt('Page.captureScreenshot', params, sessionId),
@@ -120,14 +122,14 @@ for (const transport of Object.keys(entry)) {
       );
       const stopped = await h.attempt('Page.stopScreencast', {}, sessionId);
       return {
-        started: started.error,
-        stopped: stopped.error,
+        started: started.error ?? null,
+        stopped: stopped.error ?? null,
         frame: Boolean(frame?.params?.data),
       };
     }, BUDGET);
     assert.deepEqual(
       cast,
-      { started: undefined, stopped: undefined, frame: true },
+      { started: null, stopped: null, frame: true },
       `${transport}: the client's own screencast still starts, streams and stops`
     );
     await page.evaluate(() => h.close(globalThis.__shot.targetId));
