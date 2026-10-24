@@ -78,6 +78,7 @@ import {
   withoutSetCookie,
   wrapsAbout,
 } from './shield.js';
+import { Wake } from './wake.js';
 
 const guard = strictGuard(protectedOrigins(protectedRules), protectedRules);
 const prefix = initScriptPrefix(protectedRules);
@@ -792,6 +793,7 @@ class Connection {
         hops: new Map(),
         reroutes: new Map(),
         paused: new Map(),
+        wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
       this.state.tabs.set(tabId, tab);
       try {
@@ -1384,7 +1386,8 @@ class Connection {
     const binding = await this.bind(tabId, tab, method, forwarded);
     await this.admit(tabId, tab, method, params, sessionId);
     this.inputGate(tab, method);
-    let result = (await this.send(tabId, method, binding.params)) ?? {};
+    let result =
+      (await tab.wake.command(method, binding.params, (m, p) => this.send(tabId, m, p))) ?? {};
     await this.returned(tabId, sessionId, method);
     if (seal) result = await this.unseal(tabId, tab, seal, method, result);
     tab.documents.learn(result, binding.document);
@@ -1818,6 +1821,7 @@ class Connection {
       this.watchChild(tabId, method, p);
       return;
     }
+    if (tab.wake.hides(method, p)) return;
     if (this.hop(tabId, tab, method, p)) return;
     if (this.watch(tabId, tab, method, p)) return;
     if (profiled(method) && tab.worlds.foreign) return;
