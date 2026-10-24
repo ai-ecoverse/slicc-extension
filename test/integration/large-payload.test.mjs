@@ -5,7 +5,7 @@ import { install } from './client.mjs';
 import { extId } from './extension-page.mjs';
 
 let chrome;
-let worker;
+let probe;
 before(async () => {
   chrome = await launch();
 });
@@ -25,31 +25,36 @@ async function client(t, transport) {
   return page;
 }
 
-async function inWorker(expression) {
-  if (!worker) {
-    const { targetInfos } = await chrome.cdp.send('Target.getTargets');
-    const target = targetInfos.find(
-      (info) =>
-        info.type === 'service_worker' && info.url === `chrome-extension://${extId}/background.js`
-    );
-    assert.ok(target, 'the extension service worker runs');
-    ({ sessionId: worker } = await chrome.cdp.send('Target.attachToTarget', {
-      targetId: target.targetId,
-      flatten: true,
-    }));
-  }
+async function reopen(page, transport) {
+  await page.goto(entry[transport]);
+  await page.until(
+    (href) =>
+      document.readyState === 'complete' &&
+      location.href === href &&
+      'sliccExtension' in globalThis,
+    entry[transport]
+  );
+  await page.evaluate(install, transport, extId);
+  return page;
+}
+
+const WORKER = `chrome-extension://${extId}/background.js`;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function inSession(sessionId, expression) {
   const answer = await chrome.cdp.send(
     'Runtime.evaluate',
     { expression, returnByValue: true },
-    worker
+    sessionId
   );
-  assert.equal(answer.exceptionDetails, undefined);
+  if (answer.exceptionDetails) throw new Error(answer.exceptionDetails.exception?.description);
   return answer.result?.value;
 }
 
-const TIMED = `(() => {
-  if (!globalThis.__sliccCaptures) {
-    globalThis.__sliccCaptures = [];
+const HOOK = `(() => {
+  if (typeof chrome?.debugger?.sendCommand !== 'function') return null;
+  if (!globalThis.__sliccProbe) {
+    const captures = [];
     const send = chrome.debugger.sendCommand.bind(chrome.debugger);
     chrome.debugger.sendCommand = async (target, method, params) => {
       if (method !== 'Page.captureScreenshot') return send(target, method, params);
@@ -57,12 +62,90 @@ const TIMED = `(() => {
       try {
         return await send(target, method, params);
       } finally {
-        globalThis.__sliccCaptures.push(performance.now() - started);
+        captures.push(performance.now() - started);
       }
     };
+    globalThis.__sliccProbe = { id: crypto.randomUUID(), captures };
   }
-  return globalThis.__sliccCaptures.length;
+  return { id: globalThis.__sliccProbe.id, mark: globalThis.__sliccProbe.captures.length };
 })()`;
+
+async function workers() {
+  const { targetInfos } = await chrome.cdp.send('Target.getTargets');
+  return targetInfos.filter((info) => info.type === 'service_worker' && info.url === WORKER);
+}
+
+async function hook(page) {
+  for (let i = 0; i < 100; i++) {
+    const live = await workers();
+    if (live.length === 0) await page.evaluate(() => h.attempt('Target.getTargets'));
+    if (live.length === 1) {
+      const { targetId } = live[0];
+      if (probe?.targetId !== targetId) {
+        const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
+          targetId,
+          flatten: true,
+        });
+        probe = { targetId, sessionId };
+      }
+      const hooked = await inSession(probe.sessionId, HOOK).catch(() => {
+        probe = undefined;
+        return null;
+      });
+      if (hooked) return { ...probe, ...hooked };
+    }
+    await sleep(100);
+  }
+  assert.fail('the extension service worker never offered chrome.debugger');
+}
+
+async function captured(hooked) {
+  const id = JSON.stringify(hooked.id);
+  return inSession(
+    hooked.sessionId,
+    `globalThis.__sliccProbe?.id === ${id} ? globalThis.__sliccProbe.captures.slice(${hooked.mark}) : null`
+  ).catch(() => null);
+}
+
+async function stop(page) {
+  await page.send('Page.navigate', { url: 'about:blank' });
+  await page.send('ServiceWorker.enable');
+  await page.send('ServiceWorker.stopAllWorkers');
+  await page.send('ServiceWorker.disable');
+  for (let i = 0; i < 100 && (await workers()).length > 0; i++) await sleep(100);
+}
+
+async function screenshot(t, transport, restart) {
+  let page;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    page = page ? await reopen(page, transport) : await client(t, transport);
+    const n = `shot${++serial}${Date.now()}`;
+    const hooked = await hook(page);
+    if (restart && attempt === 0) await stop(page);
+    const run = await page
+      .evaluate(
+        async ({ n, NOISE }) => {
+          const { targetId, sessionId } = await h.open(`https://ordinary.test/doc?n=${n}`);
+          await h.attempt(
+            'Emulation.setDeviceMetricsOverride',
+            { width: 1600, height: 1600, deviceScaleFactor: 1, mobile: false },
+            sessionId
+          );
+          await h.evaluate(sessionId, NOISE);
+          const started = performance.now();
+          const shot = await h.attempt('Page.captureScreenshot', { format: 'png' }, sessionId);
+          const ms = performance.now() - started;
+          await h.close(targetId);
+          return { ms, size: shot.result?.data?.length ?? 0, error: shot.error };
+        },
+        { n, NOISE }
+      )
+      .catch((error) => ({ ms: 0, size: 0, error: String(error) }));
+    const captures = await captured(hooked);
+    if (captures) return { run, captures, restarts: attempt };
+  }
+  assert.fail('the extension service worker restarted during every capture');
+}
 
 const NOISE = `(() => {
   const c = document.createElement('canvas');
@@ -84,38 +167,22 @@ const NOISE = `(() => {
 })()`;
 
 for (const transport of transports) {
-  test(`${transport}: a large noisy PNG screenshot reaches the client within ${BUDGET} ms of Chrome's capture`, async (t) => {
-    const page = await client(t, transport);
-    const n = `shot${++serial}${Date.now()}`;
-    const mark = await inWorker(TIMED);
-    const run = await page.evaluate(
-      async ({ n, NOISE }) => {
-        const { targetId, sessionId } = await h.open(`https://ordinary.test/doc?n=${n}`);
-        await h.attempt(
-          'Emulation.setDeviceMetricsOverride',
-          { width: 1600, height: 1600, deviceScaleFactor: 1, mobile: false },
-          sessionId
-        );
-        await h.evaluate(sessionId, NOISE);
-        const started = performance.now();
-        const shot = await h.attempt('Page.captureScreenshot', { format: 'png' }, sessionId);
-        const ms = performance.now() - started;
-        await h.close(targetId);
-        return { ms, size: shot.result?.data?.length ?? 0, error: shot.error };
-      },
-      { n, NOISE }
-    );
-    const captures = await inWorker(`globalThis.__sliccCaptures.slice(${mark})`);
-    const capture = captures.reduce((sum, ms) => sum + ms, 0);
-    const relay = run.ms - capture;
-    t.diagnostic(
-      `${transport} screenshot ${run.size} chars in ${Math.round(run.ms)} ms, Chrome's capture ${Math.round(capture)} ms, relay ${Math.round(relay)} ms`
-    );
-    assert.equal(run.error, undefined);
-    assert.equal(captures.length, 1, `one capture reached Chrome: ${captures.length}`);
-    assert.ok(run.size > 4_000_000, `the screenshot is large: ${run.size}`);
-    assert.ok(relay < BUDGET, `the screenshot's relay took ${Math.round(relay)} ms`);
-  });
+  for (const restart of [false, true]) {
+    const after = restart ? ' after its service worker restarts' : '';
+    test(`${transport}: a large noisy PNG screenshot reaches the client within ${BUDGET} ms of Chrome's capture${after}`, async (t) => {
+      const { run, captures, restarts } = await screenshot(t, transport, restart);
+      const capture = captures.reduce((sum, ms) => sum + ms, 0);
+      const relay = run.ms - capture;
+      t.diagnostic(
+        `${transport} screenshot ${run.size} chars in ${Math.round(run.ms)} ms, Chrome's capture ${Math.round(capture)} ms, relay ${Math.round(relay)} ms, ${restarts} restarts`
+      );
+      if (restart) assert.ok(restarts > 0, 'the service worker restarted after the hook');
+      assert.equal(run.error, undefined);
+      assert.equal(captures.length, 1, `one capture reached Chrome: ${captures.length}`);
+      assert.ok(run.size > 4_000_000, `the screenshot is large: ${run.size}`);
+      assert.ok(relay < BUDGET, `the screenshot's relay took ${Math.round(relay)} ms`);
+    });
+  }
 
   test(`${transport}: a large binary response body reaches the client within ${BUDGET} ms`, async (t) => {
     const page = await client(t, transport);
