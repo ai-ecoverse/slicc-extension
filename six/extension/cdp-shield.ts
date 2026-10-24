@@ -13,6 +13,7 @@ import {
   unknownFrame,
   wholePage,
 } from './cdp-frames.js';
+import { Wake } from './cdp-wake.js';
 import {
   ABOUT_WORLD,
   extensionOrigin,
@@ -1399,6 +1400,7 @@ export class TabShield {
   private readonly cut = new Set<unknown>();
   private mainFrameId = '';
   private blockedFlag = false;
+  private readonly wake: Wake;
 
   constructor(
     private readonly send: Send,
@@ -1407,7 +1409,9 @@ export class TabShield {
     private readonly readTab: () => Promise<ChromeTab | undefined> = async () => undefined,
     private readonly lookupTab: (tabId: number) => Promise<ChromeTab | undefined> = async () =>
       undefined
-  ) {}
+  ) {
+    this.wake = new Wake(send);
+  }
 
   get blocked(): boolean {
     return this.blockedFlag;
@@ -1519,9 +1523,10 @@ export class TabShield {
     this.inputGate(method);
     let result: CDPPayload;
     try {
-      result = await forward(
+      result = await this.wake.command(
         method,
-        params === undefined && binding.params === input ? undefined : binding.params
+        params === undefined && binding.params === input ? undefined : binding.params,
+        forward
       );
     } catch (err) {
       this.reroutes.delete(pauseId);
@@ -2128,6 +2133,7 @@ export class TabShield {
     }
     if (method === 'Fetch.requestPaused') return this.onPaused(p);
     if (method === 'Fetch.authRequired') return this.onAuth(p);
+    if (this.wake.hides(method, p)) return [];
     this.track(p);
     if (this.watchCommit(method, p)) return [];
     if (profiled(method) && this.worlds.foreign) return [];
