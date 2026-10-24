@@ -44,7 +44,7 @@
     "esbuild@0.28.2": true
   },
   "dependencies": {
-    "@ai-ecoverse/cherry": "6.250.1"
+    "@ai-ecoverse/cherry": "6.256.4"
   },
   "slicc": {
     "unitSources": [
