@@ -53,6 +53,7 @@ let fixture;
 let spki;
 const pool = [];
 const unisolated = [];
+const live = [];
 const sharing = [
   '--disable-site-isolation-trials',
   '--disable-features=IsolateOrigins,site-per-process',
@@ -73,6 +74,7 @@ async function tearDown() {
   );
   pool.length = 0;
   unisolated.length = 0;
+  live.length = 0;
   await fixture?.close();
   if (dir) await rm(dir, { recursive: true, force: true });
 }
@@ -315,8 +317,22 @@ async function clients(transport, metadata) {
   const shared = (metadata.vector.requires ?? []).includes('siteIsolationOff');
   const fresh = metadata.leg !== 'guarded' && cachesAuth(metadata.vector);
   const own = await pooled(slot, fresh, shared);
+  if (metadata.leg === 'guarded') await live[slot]?.();
   const made = await own.guarded(transport);
+  live[slot] = made.close;
   return { client: made.client, unguarded: own.observer, close: made.close };
+}
+
+export async function secondClient(transport, leg) {
+  await setUp();
+  try {
+    const metadata = { slot: 0, vector: {} };
+    await clients(transport, metadata);
+    const renewed = await clients(transport, { ...metadata, leg });
+    return await renewed.client.send('Target.getTargets');
+  } finally {
+    await tearDown();
+  }
 }
 
 async function sweep(transport, variant) {
