@@ -31,6 +31,7 @@ import {
   DocumentBindings,
   dropProtectedCookies,
   EXTENSION_FRAME,
+  errorPageRead,
   extensionOrigin,
   foreignFrame,
   frameIn,
@@ -1172,6 +1173,7 @@ class Connection {
       if (known === true) refusal();
       if (known !== false) throw new Error(UNSEEN);
     }
+    await this.checkContent(tabId, method, params);
     if (ERROR_PAGE_READS.has(method)) await this.checkErrorPage(tabId);
     if (
       (method === 'IO.read' || method === 'IO.close') &&
@@ -1191,6 +1193,44 @@ class Connection {
       entry.read = method;
     }
     if (FETCH_ANSWERS.has(method)) entry.claimed = true;
+  }
+
+  async checkContent(tabId, method, params = {}) {
+    if (method === 'IO.read' && this.state.streams.get(textOf(params.handle))?.page === false)
+      return;
+    const reads = errorPageRead(method);
+    if (!reads && typeof params.frameId !== 'string') return;
+    const tree = await bounded(
+      this.send(tabId, 'Page.getFrameTree', {}),
+      2000,
+      'content frame'
+    ).catch(() => refusal());
+    const root = frameIn(tree?.frameTree);
+    if (
+      !root ||
+      typeof root.id !== 'string' ||
+      !root.id ||
+      typeof root.url !== 'string' ||
+      !root.url ||
+      typeof root.securityOrigin !== 'string'
+    )
+      refusal();
+    if (typeof params.frameId === 'string' && !frameIn(tree?.frameTree, params.frameId)) refusal();
+    if (!reads) return;
+    if (
+      anyProtected(root.url) ||
+      anyProtected(root.securityOrigin) ||
+      treeNamesProtected(tree?.frameTree, anyProtected, true)
+    )
+      refusal();
+    if (method.startsWith('Runtime.')) return;
+    const frames = await bounded(
+      Promise.resolve().then(() => this.api.webNavigation?.getAllFrames?.({ tabId })),
+      2000,
+      'content frames'
+    ).catch(() => refusal());
+    if (!Array.isArray(frames) || frames.length === 0) refusal();
+    if (frames.some((frame) => frame.errorOccurred === true && anyProtected(frame.url))) refusal();
   }
 
   async checkErrorPage(tabId) {
@@ -1332,9 +1372,9 @@ class Connection {
     );
   }
 
-  async returned(tabId, sessionId, method) {
+  async returned(tabId, sessionId, method, params) {
     if (this.state.cut.has(sessionId)) refusal();
-    await this.checkReturn(tabId, sessionId, method);
+    await this.checkReturn(tabId, sessionId, method, params);
   }
 
   async sessionCommand(message, params) {
@@ -1388,18 +1428,18 @@ class Connection {
     this.inputGate(tab, method);
     let result =
       (await tab.wake.command(method, binding.params, (m, p) => this.send(tabId, m, p))) ?? {};
-    await this.returned(tabId, sessionId, method);
+    await this.returned(tabId, sessionId, method, params);
     if (seal) result = await this.unseal(tabId, tab, seal, method, result);
     tab.documents.learn(result, binding.document);
     if (method === 'Page.captureSnapshot') snapshotChecked(result);
     await this.learn(tabId, tab, method, result);
     if (cookieReader(method)) result = dropProtectedCookies(guard, result);
-    if (typeof result.stream === 'string') this.openStream(result.stream);
+    if (typeof result.stream === 'string') this.openStream(result.stream, method);
     if (method === 'IO.resolveBlob' && typeof result.uuid === 'string') {
-      this.openStream(`blob:${result.uuid}`);
+      this.openStream(`blob:${result.uuid}`, method);
     }
     const opened = this.readResult(tab, method, params, result);
-    await this.checkReturn(tabId, sessionId, method);
+    await this.checkReturn(tabId, sessionId, method, params);
     return opened;
   }
 
@@ -1419,8 +1459,9 @@ class Connection {
     if (method.startsWith('Input.') && (!tab.pageObserved || tab.pendingFrames.size > 0)) refusal();
   }
 
-  async checkReturn(tabId, sessionId, method) {
+  async checkReturn(tabId, sessionId, method, params) {
     if (this.state.cut.has(sessionId)) refusal();
+    await this.checkContent(tabId, method, params);
     if (contentResult(method) && !FETCH_ANSWERS.has(method)) await this.committed(tabId);
   }
 
@@ -1433,8 +1474,10 @@ class Connection {
     return result;
   }
 
-  openStream(handle) {
-    this.state.streams.set(handle, new UrlStream(anyProtected));
+  openStream(handle, method) {
+    const stream = new UrlStream(anyProtected);
+    stream.page = !bodyMethod(method);
+    this.state.streams.set(handle, stream);
   }
 
   async learn(tabId, tab, method, result) {
@@ -1827,6 +1870,13 @@ class Connection {
     if (profiled(method) && tab.worlds.foreign) return;
     if (tab.worlds.hides(p)) return;
     if (this.frameProtected(tab, p.frameId)) return;
+    if (errorPageRead(method)) {
+      try {
+        await this.checkContent(tabId, method, p);
+      } catch {
+        return;
+      }
+    }
     if (sealedRead(method) && !(await this.sealEvent(tabId, tab, method, p))) return;
     this.deliver(tabId, tab, method, p);
   }

@@ -62,6 +62,7 @@ export async function pages(tls) {
   const probe = await readFile(new URL('page/probe.html', import.meta.url));
   const frames = await readFile(new URL('page/frames.html', import.meta.url));
   const seen = [];
+  const refusedLoads = new Map();
   const server = await listen(tls, (request, response) => {
     const { pathname, searchParams } = new URL(request.url, 'https://vault.sliccy.ai');
     seen.push({
@@ -69,6 +70,10 @@ export async function pages(tls) {
       path: pathname,
       search: searchParams.toString(),
     });
+    if (pathname.startsWith('/controller/')) {
+      request.socket.destroy();
+      return;
+    }
     if (pathname === '/linked') {
       const n = searchParams.get('n') ?? '';
       const link = [
@@ -209,6 +214,21 @@ export async function pages(tls) {
       }[searchParams.get('form') ?? 'query'];
       return response.writeHead(302, { location: to }).end();
     }
+    if (pathname === '/seal-control') {
+      return response
+        .writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        .end('<!doctype html><title>marker</title><script src="/seal-resource.js"></script>');
+    }
+    if (pathname === '/seal-resource.js') {
+      return response
+        .writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
+        .end('globalThis.__sealControl = true;');
+    }
+    if (pathname === '/refused-hop') {
+      return response
+        .writeHead(302, { location: refusedLoads.get(searchParams.get('n')) ?? '/' })
+        .end();
+    }
     if (pathname === '/redirect') {
       return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();
     }
@@ -286,7 +306,7 @@ export async function pages(tls) {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
   });
   server.upgrade(binaryEcho);
-  return { ...server, seen };
+  return { ...server, seen, refusedLoads };
 }
 
 function binaryMarker(params) {

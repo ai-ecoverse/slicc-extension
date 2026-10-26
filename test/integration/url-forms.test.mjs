@@ -3,6 +3,7 @@ import { after, before, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
 import { extId } from './extension-page.mjs';
+import { waitErrorFrame } from './frame-observer.mjs';
 
 let chrome;
 before(async () => {
@@ -433,7 +434,7 @@ for (const transport of transports) {
   });
 
   async function failedSignIn(page, n) {
-    return page.evaluate(
+    const run = await page.evaluate(
       async ({ n, errorPage }) => {
         const { targetId, sessionId } = await h.open(`https://ordinary.test/doc?n=start-${n}`);
         const tree = await h.attempt('Page.getFrameTree', {}, sessionId);
@@ -444,7 +445,9 @@ for (const transport of transports) {
         );
         const settled = await h.until(async () => {
           const href = await h.evaluate(sessionId, 'location.href');
-          return href === errorPage ? href : undefined;
+          return href === errorPage || /^slicc: refused:/.test(href?.error ?? '')
+            ? errorPage
+            : undefined;
         });
         const detach = await h.attempt('Target.detachFromTarget', { sessionId });
         await h.sleep(300);
@@ -452,6 +455,8 @@ for (const transport of transports) {
       },
       { n, errorPage }
     );
+    await waitErrorFrame(chrome, run.raw, callbacks.vault);
+    return run;
   }
 
   async function reattach(page, targetId) {
@@ -476,7 +481,7 @@ for (const transport of transports) {
     const again = await reattach(page, failed.targetId);
     assert.deepEqual(leaks(again, n), [], 'the token reaches the client');
     assert.equal(typeof again.attach.result?.sessionId, 'string', JSON.stringify(again.attach));
-    assert.equal(again.href, errorPage);
+    assert.match(again.href?.error ?? '', /^slicc: refused:/, 'reply');
   });
 
   async function loadAgain(raw, how, n) {

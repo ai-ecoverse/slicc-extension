@@ -117,6 +117,12 @@ function fakeChrome() {
         },
       },
     },
+    webNavigation: {
+      async getAllFrames({ tabId }) {
+        const tab = await api.tabs.get(tabId);
+        return [{ url: tab.url, errorOccurred: false }];
+      },
+    },
     windows: {
       create(options) {
         api.opened.push(options);
@@ -206,7 +212,12 @@ function fakeChrome() {
       const pending = [answer.frameTree];
       while (pending.length > 0) {
         const node = pending.pop();
-        if (node?.frame) node.frame.loaderId ??= `doc-${node.frame.id}-${node.frame.url}`;
+        if (node?.frame) {
+          node.frame.loaderId ??= `doc-${node.frame.id}-${node.frame.url}`;
+          node.frame.securityOrigin ??= URL.canParse(node.frame.url)
+            ? new URL(node.frame.url).origin
+            : '';
+        }
         if (node?.childFrames) pending.push(...node.childFrames);
       }
       mainFrame = answer.frameTree.frame;
@@ -764,7 +775,7 @@ test('Page.navigate to about:blank is opened by the page itself, never by the ex
     params: { url: 'about:blank', frameId: 'NOPE' },
     sessionId: '8',
   });
-  assert.equal(missing.error, 'No frame with given id found');
+  assert.match(missing.error, /^slicc: refused:/);
   assert.equal(api.sent.filter((s) => s.method === 'Page.navigate').length, 1);
   assert.equal(connection.posted.filter((m) => m.method === 'Target.detachedFromTarget').length, 0);
   cdp.close();
@@ -1249,7 +1260,11 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
       if (ready !== loaded) throw new Error(`not loaded: ${ready}`);
       await href('location.href = "https://seven.sliccy.ai/"');
       const hops = [];
-      for (let attempt = 0; attempt < 200 && hops.at(-1) !== errorPage; attempt += 1) {
+      for (
+        let attempt = 0;
+        attempt < 200 && ![errorPage, `error ${refused}`].includes(hops.at(-1));
+        attempt += 1
+      ) {
         if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 50));
         hops.push(await href('location.href'));
       }
@@ -1272,7 +1287,7 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
   assert.equal(answer.blankOk, true);
   assert.equal(answer.navigated, refused);
   assert.equal(answer.leaked, false);
-  assert.equal(answer.hops.at(-1), 'chrome-error://chromewebdata/', 'the hop fails at the request');
+  assert.equal(answer.hops.at(-1), `error ${refused}`, 'hop reads');
   assert.deepEqual(
     answer.hops.filter(
       (href) =>

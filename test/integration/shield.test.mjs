@@ -79,6 +79,7 @@ async function stayed(page, sessionId, origin) {
         detached: h.detached(sid),
         landed: typeof href === 'string' && href.startsWith(origin),
         answered: typeof href === 'string',
+        refused: /^slicc: refused:/.test(href?.error ?? ''),
       };
     },
     { sid: sessionId, origin }
@@ -100,8 +101,8 @@ for (const transport of transports) {
       const guarded = await initScriptThenNavigate(page, tag, `${origin}/landing?k=SECRET`);
       assert.deepEqual(
         await stayed(page, guarded.sessionId, origin),
-        { detached: false, landed: false, answered: true },
-        'the protected navigation fails and the session stays'
+        { detached: false, landed: false, answered: false, refused: true },
+        'navigation replies'
       );
       assert.equal(await beaconed(tag, 3000), false, 'no beacon from the protected origin');
       const leaked = await page.evaluate(() =>
@@ -124,8 +125,8 @@ for (const transport of transports) {
       const guarded = await initScriptThenNavigate(page, tag, hop(hop(`${origin}/landing`)));
       assert.deepEqual(
         await stayed(page, guarded.sessionId, origin),
-        { detached: false, landed: false, answered: true },
-        'the protected navigation fails and the session stays'
+        { detached: false, landed: false, answered: false, refused: true },
+        'navigation replies'
       );
       assert.equal(await beaconed(tag, 3000), false, 'no beacon from the protected origin');
       await page.evaluate((id) => h.close(id), guarded.targetId);

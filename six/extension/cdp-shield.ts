@@ -83,6 +83,19 @@ function contentResult(method: string): boolean {
   );
 }
 
+function errorPageRead(method: string): boolean {
+  return (
+    (contentResult(method) &&
+      !BODY_METHODS.has(method) &&
+      method !== 'Page.getNavigationHistory') ||
+    method.startsWith('Input.') ||
+    method === 'Page.createIsolatedWorld' ||
+    method === 'Page.startScreencast' ||
+    method === 'Page.screencastFrame' ||
+    method === 'Page.startScreenRecording'
+  );
+}
+
 const ORIGIN_KEYS = new Set([
   'origin',
   'securityOrigin',
@@ -789,6 +802,7 @@ function carried(joined: string, text: string, pending: Pending): string {
 }
 
 export class UrlStream {
+  page = true;
   private head = '';
   named = false;
   refused = false;
@@ -1096,13 +1110,13 @@ function answerNamesProtected(params: CDPPayload, base: string): boolean {
   );
 }
 
-export function treeNamesProtected(tree: unknown): boolean {
+export function treeNamesProtected(tree: unknown, errorOnly = false): boolean {
   const pending: unknown[] = [tree];
   while (pending.length > 0) {
     const node = pending.pop();
     if (!isObj(node)) continue;
     const frame = isObj(node['frame']) ? node['frame'] : {};
-    for (const key of ['url', 'unreachableUrl']) {
+    for (const key of errorOnly ? ['unreachableUrl'] : ['url', 'unreachableUrl']) {
       const url = str(frame[key]);
       if (url && urlProtected(url)) return true;
     }
@@ -1408,7 +1422,8 @@ export class TabShield {
     private readonly failedDocuments = new Bounded<true>(200),
     private readonly readTab: () => Promise<ChromeTab | undefined> = async () => undefined,
     private readonly lookupTab: (tabId: number) => Promise<ChromeTab | undefined> = async () =>
-      undefined
+      undefined,
+    private readonly readErrorFrames: () => Promise<boolean> = async () => true
   ) {
     this.wake = new Wake(send);
   }
@@ -1541,8 +1556,9 @@ export class TabShield {
     }
     if (reroute !== undefined) await this.settleReroute(pauseId, reroute);
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
+    await this.checkReturn(method, input);
     const opened = await this.after(method, await this.unseal(seal, method, result ?? {}), input);
-    await this.checkReturn(method);
+    await this.checkReturn(method, input);
     this.documents.learn(opened, binding.document);
     return opened;
   }
@@ -1940,8 +1956,34 @@ export class TabShield {
     if (urlProtected(entry['url'])) refuse(PROTECTED_RULES.refusal);
   }
 
-  private async checkReturn(method: string): Promise<void> {
+  private async checkContent(method: string, params: CDPPayload = {}): Promise<void> {
+    if (method === 'IO.read' && this.streams.get(str(params['handle']) ?? '')?.page === false)
+      return;
+    const reads = errorPageRead(method);
+    const frameId = str(params['frameId']);
+    if (!reads && frameId === undefined) return;
+    const tree = await shieldProbe(this.send('Page.getFrameTree', {})).catch(() =>
+      refuse(PROTECTED_RULES.refusal)
+    );
+    const root = frameIn(tree['frameTree'], undefined);
+    const url = str(root?.['url']);
+    const origin = str(root?.['securityOrigin']);
+    if (!root || !str(root['id']) || !url || origin === undefined) refuse(PROTECTED_RULES.refusal);
+    if (frameId !== undefined && !frameIn(tree['frameTree'], frameId))
+      refuse(PROTECTED_RULES.refusal);
+    if (!reads) return;
+    if (urlProtected(url) || urlProtected(origin) || treeNamesProtected(tree['frameTree'], true))
+      refuse(PROTECTED_RULES.refusal);
+    if (method.startsWith('Runtime.')) return;
+    const hidden = await shieldProbe(this.readErrorFrames().then((blocked) => ({ blocked }))).catch(
+      () => refuse(PROTECTED_RULES.refusal)
+    );
+    if (hidden['blocked'] !== false) refuse(PROTECTED_RULES.refusal);
+  }
+
+  private async checkReturn(method: string, params: CDPPayload): Promise<void> {
     if (this.blockedFlag) refuse(PROTECTED_RULES.refusal);
+    await this.checkContent(method, params);
     if (contentResult(method) && !FETCH_SETTLES.has(method)) await this.committed();
   }
 
@@ -1968,6 +2010,7 @@ export class TabShield {
     this.admitWorlds(method, params);
     this.admitRequestIds(method, params);
     if (method === 'Page.navigateToHistoryEntry') await this.admitHistory(params);
+    await this.checkContent(method, params);
     if (ERROR_PAGE_READS.has(method)) {
       const tree = await this.send('Page.getFrameTree', {});
       if (treeNamesProtected(tree['frameTree'])) refuse(PROTECTED_RULES.refusal);
@@ -2093,7 +2136,11 @@ export class TabShield {
     this.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') this.worlds.seen(result['executionContextId']);
     const stream = str(result['stream']);
-    if (stream) this.streams.set(stream, new UrlStream());
+    if (stream) {
+      const opened = new UrlStream();
+      opened.page = !BODY_METHODS.has(method);
+      this.streams.set(stream, opened);
+    }
     const resource = result['resource'];
     const resourceStream = isObj(resource) ? str(resource['stream']) : undefined;
     if (resourceStream) this.streams.set(resourceStream, new UrlStream());
@@ -2140,9 +2187,13 @@ export class TabShield {
     if (this.worlds.hides(p)) return [];
     if (this.frameProtected(str(p['frameId']) ?? '')) return [];
     if (DISCOVERY_EVENTS.has(method)) return [];
-    if (sealedRead(method)) {
-      return this.sealEvent(method, p).then((visible) =>
-        visible ? this.deliver({ method, params: p }) : []
+    if (errorPageRead(method)) {
+      return this.checkContent(method, p).then(
+        async () => {
+          if (sealedRead(method) && !(await this.sealEvent(method, p))) return [];
+          return this.deliver({ method, params: p });
+        },
+        () => []
       );
     }
     if (method.startsWith('Target.')) {

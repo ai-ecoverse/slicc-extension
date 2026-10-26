@@ -668,12 +668,12 @@ export function binaryHeadersNameProtected(binary, isProtected) {
   }
 }
 
-export function treeNamesProtected(tree, isProtected) {
+export function treeNamesProtected(tree, isProtected, errorOnly = false) {
   const pending = [tree];
   while (pending.length > 0) {
     const node = pending.pop();
     const frame = node?.frame;
-    for (const key of ['url', 'unreachableUrl']) {
+    for (const key of errorOnly ? ['unreachableUrl'] : ['url', 'unreachableUrl']) {
       if (typeof frame?.[key] === 'string' && isProtected(frame[key])) return true;
     }
     if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
@@ -1432,6 +1432,17 @@ export function contentResult(method) {
     method === 'IO.resolveBlob' ||
     method === 'Fetch.getResponseBody' ||
     method === 'Fetch.takeResponseBodyAsStream'
+  );
+}
+
+export function errorPageRead(method) {
+  return (
+    (contentResult(method) && !bodyMethod(method) && method !== 'Page.getNavigationHistory') ||
+    method.startsWith('Input.') ||
+    method === 'Page.createIsolatedWorld' ||
+    method === 'Page.startScreencast' ||
+    method === 'Page.screencastFrame' ||
+    method === 'Page.startScreenRecording'
   );
 }
 

@@ -22,7 +22,7 @@ import {
   wrapsAbout,
 } from './cdp-shield.js';
 import { EXTENSION_FRAME, foreignFrameError } from './cdp-worlds.js';
-import { tabHasProtectedFrame } from './protected-frames-sw.js';
+import { tabHasErrorFrame, tabHasProtectedFrame } from './protected-frames-sw.js';
 import {
   isProtectedTab,
   isProtectedTarget,
@@ -474,7 +474,8 @@ async function ensureTabShield(tabId: number, deps: BridgeSwDeps): Promise<void>
     },
     failuresOf(tabId),
     () => deps.getTab(tabId),
-    (id) => deps.getTab(id)
+    (id) => deps.getTab(id),
+    () => tabHasErrorFrame(tabId)
   );
   tabShields.set(tabId, shield);
   try {
