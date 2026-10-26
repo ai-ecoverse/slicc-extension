@@ -106,7 +106,7 @@ async function signIn(page, transport, n, to, form, via) {
           sessionId,
           'document.readyState === "complete" ? location.href : ""'
         );
-        if (/^slicc: refused:/.test(href?.error ?? '')) return href;
+        if (to !== 'ordinary' && /^slicc: refused:/.test(href?.error ?? '')) return href;
         return typeof href === 'string' &&
           href !== '' &&
           !href.startsWith('https://ordinary.test/doc')
@@ -179,6 +179,32 @@ async function listed(page, transport, url) {
 }
 
 for (const transport of transports) {
+  test(`${transport} ordinary settlement`, async (t) => {
+    const page = await client(t, transport);
+    await page.evaluate(() => {
+      const attempt = h.attempt;
+      const evaluate = h.evaluate;
+      let armed = false;
+      let injected = false;
+      h.attempt = (method, params, sessionId) => {
+        if (method === 'Page.navigate' && String(params?.url).includes('/signin?')) armed = true;
+        return attempt(method, params, sessionId);
+      };
+      h.evaluate = (sessionId, expression) => {
+        if (armed && !injected && expression.includes('document.readyState')) {
+          injected = true;
+          return Promise.resolve({ error: 'slicc: refused: fixture commit' });
+        }
+        return evaluate(sessionId, expression);
+      };
+      globalThis.__settlementInjected = () => injected;
+    });
+    const n = unique(`${transport}settlement`);
+    const run = await signIn(page, transport, n, 'ordinary', 'query', 'navigate');
+    assert.equal(await page.evaluate(() => globalThis.__settlementInjected()), true, 'fixture');
+    assert.equal(run.settled, landing('ordinary', 'query', n), 'settlement');
+  });
+
   for (const form of forms) {
     for (const via of ['navigate', 'script']) {
       for (const to of ['seven', 'vault']) {
