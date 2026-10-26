@@ -44,6 +44,7 @@ jobs:
         test/integration/cors.test.mjs
         test/integration/cws-verify.test.mjs
         test/integration/document-command-controls.test.mjs
+        test/integration/error-page-seal.test.mjs
         test/integration/external-ports.test.mjs
         test/integration/fetch-vectors.test.mjs
         test/integration/foreground.test.mjs
