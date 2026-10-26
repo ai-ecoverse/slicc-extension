@@ -29,6 +29,12 @@ export async function tabHasProtectedFrame(tabId: number): Promise<boolean> {
   }
 }
 
+export async function tabHasErrorFrame(tabId: number): Promise<boolean> {
+  const frames = await chrome.webNavigation.getAllFrames({ tabId });
+  if (!Array.isArray(frames) || frames.length === 0) return true;
+  return frames.some((frame) => frame.errorOccurred === true && isProtectedUrl(frame.url));
+}
+
 export function noteFrameResponse(details: {
   tabId: number;
   type: string;

@@ -250,7 +250,7 @@ async function metadata(page, client) {
     const info = await h.attempt('Target.getTargetInfo', { targetId });
     const list = await h.attempt('Target.getTargets');
     const attached = await h.attempt('Target.attachToTarget', { targetId, flatten: true });
-    const event = h.events.find(
+    const event = h.events.findLast(
       (row) =>
         row.method === 'Target.attachedToTarget' &&
         row.params.sessionId === attached.result?.sessionId

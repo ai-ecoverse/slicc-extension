@@ -280,6 +280,9 @@ interface ChromeAPI {
     };
   };
   webNavigation: {
+    getAllFrames(details: {
+      tabId: number;
+    }): Promise<Array<{ url: string; errorOccurred: boolean }> | null>;
     onCreatedNavigationTarget: {
       addListener(callback: (details: { tabId: number; sourceTabId: number }) => void): void;
     };

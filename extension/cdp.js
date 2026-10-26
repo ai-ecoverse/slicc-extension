@@ -31,6 +31,7 @@ import {
   DocumentBindings,
   dropProtectedCookies,
   EXTENSION_FRAME,
+  errorPageRead,
   extensionOrigin,
   foreignFrame,
   frameIn,
@@ -1172,6 +1173,7 @@ class Connection {
       if (known === true) refusal();
       if (known !== false) throw new Error(UNSEEN);
     }
+    await this.checkContent(tabId, method, params);
     if (ERROR_PAGE_READS.has(method)) await this.checkErrorPage(tabId);
     if (
       (method === 'IO.read' || method === 'IO.close') &&
@@ -1191,6 +1193,41 @@ class Connection {
       entry.read = method;
     }
     if (FETCH_ANSWERS.has(method)) entry.claimed = true;
+  }
+
+  async checkContent(tabId, method, params = {}) {
+    const reads = errorPageRead(method);
+    if (!reads && typeof params.frameId !== 'string') return;
+    const tree = await bounded(
+      this.send(tabId, 'Page.getFrameTree', {}),
+      2000,
+      'content frame'
+    ).catch(() => refusal());
+    const root = frameIn(tree?.frameTree);
+    if (
+      !root ||
+      typeof root.id !== 'string' ||
+      !root.id ||
+      typeof root.url !== 'string' ||
+      !root.url ||
+      typeof root.securityOrigin !== 'string'
+    )
+      refusal();
+    if (typeof params.frameId === 'string' && !frameIn(tree?.frameTree, params.frameId)) refusal();
+    if (!reads) return;
+    if (
+      anyProtected(root.url) ||
+      anyProtected(root.securityOrigin) ||
+      treeNamesProtected(tree?.frameTree, anyProtected, true)
+    )
+      refusal();
+    const frames = await bounded(
+      Promise.resolve().then(() => this.api.webNavigation?.getAllFrames?.({ tabId })),
+      2000,
+      'content frames'
+    ).catch(() => refusal());
+    if (!Array.isArray(frames) || frames.length === 0) refusal();
+    if (frames.some((frame) => frame.errorOccurred === true && anyProtected(frame.url))) refusal();
   }
 
   async checkErrorPage(tabId) {
@@ -1421,6 +1458,7 @@ class Connection {
 
   async checkReturn(tabId, sessionId, method) {
     if (this.state.cut.has(sessionId)) refusal();
+    await this.checkContent(tabId, method);
     if (contentResult(method) && !FETCH_ANSWERS.has(method)) await this.committed(tabId);
   }
 
@@ -1827,6 +1865,13 @@ class Connection {
     if (profiled(method) && tab.worlds.foreign) return;
     if (tab.worlds.hides(p)) return;
     if (this.frameProtected(tab, p.frameId)) return;
+    if (errorPageRead(method)) {
+      try {
+        await this.checkContent(tabId, method, p);
+      } catch {
+        return;
+      }
+    }
     if (sealedRead(method) && !(await this.sealEvent(tabId, tab, method, p))) return;
     this.deliver(tabId, tab, method, p);
   }
