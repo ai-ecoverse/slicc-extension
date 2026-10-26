@@ -5,6 +5,7 @@ import { pinnedManifest, readUpstreamManifest } from '../../scripts/check-live-p
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
 import { openExtensionPage } from './extension-page.mjs';
+import { waitErrorFrame } from './frame-observer.mjs';
 
 let chrome;
 before(async () => {
@@ -330,6 +331,11 @@ test('B24-1 seven: a navigation to the vault fails before it commits and the ses
       targetId: created.targetId,
       flatten: true,
     });
+    const tree = await globalThis.sliccExtension.cdp.send(
+      'Page.getFrameTree',
+      {},
+      attached.sessionId
+    );
     const href = (expression) =>
       globalThis.sliccExtension.cdp
         .send('Runtime.evaluate', { expression, returnByValue: true }, attached.sessionId)
@@ -346,16 +352,15 @@ test('B24-1 seven: a navigation to the vault fails before it commits and the ses
     if (ready !== loaded) throw new Error(`not loaded: ${ready}`);
     await href('location.href = "https://vault.sliccy.ai/"');
     const hops = [];
-    for (let i = 0; i < 200 && hops.at(-1) !== 'chrome-error://chromewebdata/'; i++) {
+    for (let i = 0; i < 200 && !/^error slicc: refused:/.test(hops.at(-1) ?? ''); i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 50));
       hops.push(await href('location.href'));
     }
-    await globalThis.sliccExtension.cdp
-      .send('Target.closeTarget', { targetId: created.targetId })
-      .catch(() => undefined);
-    return { hops };
+    return { hops, raw: tree.frameTree.frame.id, targetId: created.targetId };
   });
-  assert.equal(answer.hops.at(-1), 'chrome-error://chromewebdata/', 'the hop fails at the request');
+  await waitErrorFrame(chrome, answer.raw, 'https://vault.sliccy.ai/');
+  await extClose(page, answer.targetId);
+  assert.equal(answer.hops.at(-1), `error ${refused}`, 'reply');
   assert.deepEqual(
     answer.hops.filter(
       (href) =>
@@ -380,6 +385,7 @@ test('B24-1 seven: an ordinary request paused before a navigation to the vault c
       targetId: created.targetId,
       flatten: true,
     });
+    const tree = await cdp.send('Page.getFrameTree', {}, sessionId);
     const run = (expression) =>
       cdp.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId).then(
         (r) => r.result?.value,
@@ -407,16 +413,23 @@ test('B24-1 seven: an ordinary request paused before a navigation to the vault c
         (error) => error.message
       );
     let href = '';
-    for (let i = 0; i < 200 && href !== 'chrome-error://chromewebdata/'; i++) {
+    for (let i = 0; i < 200 && !/^error slicc: refused:/.test(href); i++) {
       if (i > 0) await sleep(50);
       href = await run('location.href');
     }
-    await cdp.send('Target.closeTarget', { targetId: created.targetId }).catch(() => undefined);
-    return { paused: paused?.params.request.url, continued, href };
+    return {
+      paused: paused?.params.request.url,
+      continued,
+      href,
+      raw: tree.frameTree.frame.id,
+      targetId: created.targetId,
+    };
   });
+  await waitErrorFrame(chrome, answer.raw, 'https://vault.sliccy.ai/held');
+  await extClose(page, answer.targetId);
   assert.equal(answer.paused, 'https://upstream.test/held?n=1', 'the ordinary beacon is paused');
   assert.equal(answer.continued, 'continued', 'the paused ordinary request is continued');
-  assert.equal(answer.href, 'chrome-error://chromewebdata/', 'the vault navigation fails');
+  assert.equal(answer.href, `error ${refused}`, 'reply');
   for (let i = 0; i < 100 && !chrome.upstream.seen.some((s) => s.path === '/held'); i++) {
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -500,6 +513,7 @@ test('B24-1 six bridge: a navigation to the vault fails before it commits and th
     }
 
     const sessionId = attached.result?.sessionId;
+    const tree = await send('Page.getFrameTree', { sessionId });
     let evaled;
     for (let i = 0; i < 40; i++) {
       evaled = await send('Runtime.evaluate', {
@@ -530,11 +544,13 @@ test('B24-1 six bridge: a navigation to the vault fails before it commits and th
     });
     const href = after.result?.result?.value ?? `error ${after.error}`;
     port.disconnect();
-    return { detached, href };
+    return { detached, href, raw: tree.result?.frameTree?.frame?.id };
   }, extId);
   assert.ok(!answer.error, `bridge test failed: ${JSON.stringify(answer)}`);
+  await waitErrorFrame(chrome, answer.raw, 'https://vault.sliccy.ai/');
+  await chrome.cdp.send('Target.closeTarget', { targetId: answer.raw });
   assert.equal(answer.detached, false, 'the session stays');
-  assert.equal(answer.href.startsWith('error'), false, `the session answers: ${answer.href}`);
+  assert.match(answer.href, /^error slicc: refused:/, 'reply');
   assert.equal(answer.href.startsWith('https://vault.sliccy.ai'), false, 'the vault never commits');
 });
 

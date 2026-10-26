@@ -462,6 +462,11 @@ async function row(chrome, page, worker, transport, variant) {
       }
       frameId = find(dom);
       assert.ok(frameId, 'child frame');
+      const parent = await page.evaluate(
+        (sessionId) => h.evaluate(sessionId, '1 + 1'),
+        client.sessionId
+      );
+      assert.equal(parent, 2, 'parent control');
     }
     const report = await probes(page, client.sessionId, errorPage, frameId, variant === 'frame');
     const info = variant === 'frame' ? undefined : await metadata(page, client);

@@ -1437,7 +1437,7 @@ export function contentResult(method) {
 
 export function errorPageRead(method) {
   return (
-    (contentResult(method) && method !== 'Page.getNavigationHistory') ||
+    (contentResult(method) && !bodyMethod(method) && method !== 'Page.getNavigationHistory') ||
     method.startsWith('Input.') ||
     method === 'Page.createIsolatedWorld' ||
     method === 'Page.startScreencast' ||

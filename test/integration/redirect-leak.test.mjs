@@ -3,6 +3,7 @@ import { after, before, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
 import { extId } from './extension-page.mjs';
+import { waitErrorFrame } from './frame-observer.mjs';
 
 let chrome;
 before(async () => {
@@ -145,10 +146,11 @@ const PROBE = `
 `;
 
 async function hop(page, n, to, how, read, form) {
-  return inPage(
+  const run = await inPage(
     page,
     `
     const { targetId, sessionId: s } = await h.open('https://ordinary.test/doc?n=start-' + args.n);
+    const initial = await h.attempt('Page.getFrameTree', {}, s);
     await record('Runtime.enable', {}, s);
     await record('Network.enable', {}, s);
     await record('Fetch.enable', { patterns: [{ urlPattern: '*/hop?*', requestStage: 'Response' }] }, s);
@@ -177,6 +179,7 @@ async function hop(page, n, to, how, read, form) {
     replies.push({ method: 'Page.navigate', answer: await going });
     await h.until(async () => {
       const href = await h.evaluate(s, 'document.readyState === "complete" ? location.href : ""');
+      if (/^slicc: refused:/.test(href?.error ?? '')) return true;
       return typeof href === 'string' && href !== '' && !href.startsWith('https://ordinary.test/doc') && (args.how !== 'refresh' || !href.includes('/hop?')) ? href : undefined;
     });
     await h.sleep(600);
@@ -188,11 +191,16 @@ async function hop(page, n, to, how, read, form) {
     await record('Target.attachToTarget', { targetId, flatten: true });
     await h.sleep(300);
     await record('Target.getTargetInfo', { targetId });
-    await h.close(targetId);
-    return { paused: Boolean(paused), href };
+    return { paused: Boolean(paused), href, targetId, raw: initial.result?.frameTree?.frame?.id };
   `,
     { n, to, how, read, form }
   );
+  try {
+    if (to !== 'ordinary' && how !== 'link') await waitErrorFrame(chrome, run.raw, callbacks[to]);
+    return run;
+  } finally {
+    await page.evaluate((targetId) => h.close(targetId), run.targetId);
+  }
 }
 
 async function loadNetwork(page, n, to, form) {
@@ -349,11 +357,7 @@ for (const transport of transports) {
             assert.deepEqual([fresh?.url, fresh?.title], [origin, origin], JSON.stringify(fresh));
             const info = reply(run, 'Target.getTargetInfo')?.result?.targetInfo;
             assert.deepEqual([info?.url, info?.title], [origin, origin], JSON.stringify(info));
-            const tree = reply(run, 'Page.getFrameTree')?.result?.frameTree;
-            const main = frames(tree)[0] ?? {};
-            assert.equal(main.url, 'chrome-error://chromewebdata/', JSON.stringify(main));
-            assert.equal(main.unreachableUrl, origin, JSON.stringify(main));
-            assert.equal(main.urlFragment, undefined, JSON.stringify(main));
+            assert.ok(refused(reply(run, 'Page.getFrameTree')), 'frame reply');
           }
         });
       }

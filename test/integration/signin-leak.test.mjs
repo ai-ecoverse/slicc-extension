@@ -3,6 +3,7 @@ import { after, before, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
 import { extId } from './extension-page.mjs';
+import { waitErrorFrame } from './frame-observer.mjs';
 
 let chrome;
 before(async () => {
@@ -79,7 +80,7 @@ function found(run, n) {
 }
 
 async function signIn(page, transport, n, to, form, via) {
-  return page.evaluate(
+  const run = await page.evaluate(
     async ({ transport, n, to, form, via, errorPage }) => {
       const replies = [];
       const record = async (method, params, sessionId) => {
@@ -90,6 +91,7 @@ async function signIn(page, transport, n, to, form, via) {
       const start = h.events.length;
       if (transport === 'seven') await record('Target.setDiscoverTargets', { discover: true });
       const { targetId, sessionId } = await h.open(`https://ordinary.test/doc?n=start-${n}`);
+      const tree = await record('Page.getFrameTree', {}, sessionId);
       await record('Runtime.enable', {}, sessionId);
       const url = `https://ordinary.test/signin?n=${n}&to=${to}&form=${form}`;
       if (via === 'navigate') await record('Page.navigate', { url }, sessionId);
@@ -104,6 +106,7 @@ async function signIn(page, transport, n, to, form, via) {
           sessionId,
           'document.readyState === "complete" ? location.href : ""'
         );
+        if (/^slicc: refused:/.test(href?.error ?? '')) return href;
         return typeof href === 'string' &&
           href !== '' &&
           !href.startsWith('https://ordinary.test/doc')
@@ -115,9 +118,10 @@ async function signIn(page, transport, n, to, form, via) {
       await record('Target.getTargets', {});
       const href = await h.evaluate(sessionId, 'location.href');
       const detached = h.detached(sessionId);
-      await h.close(targetId);
       if (transport === 'seven') await record('Target.setDiscoverTargets', { discover: false });
       return {
+        targetId,
+        raw: tree.result?.frameTree?.frame?.id,
         settled,
         href,
         detached,
@@ -128,6 +132,15 @@ async function signIn(page, transport, n, to, form, via) {
     },
     { transport, n, to, form, via, errorPage }
   );
+  try {
+    if (to !== 'ordinary') {
+      await waitErrorFrame(chrome, run.raw, callbacks[to]);
+      run.errorPage = true;
+    }
+    return run;
+  } finally {
+    await page.evaluate((targetId) => h.close(targetId), run.targetId);
+  }
 }
 
 async function listed(page, transport, url) {
@@ -178,7 +191,7 @@ for (const transport of transports) {
           assert.deepEqual(leaks, [], `the token leaks through ${leaks.join(' ')}`);
           assert.equal(run.errorPage, true, `the callback fails at the request: ${run.settled}`);
           assert.equal(run.detached, false, 'the ordinary session stays');
-          assert.equal(run.href, errorPage, 'the ordinary tab still answers');
+          assert.match(run.href?.error ?? '', /^slicc: refused:/, 'reply');
           const info = run.replies.find((r) => r.method === 'Target.getTargetInfo')?.answer.result
             ?.targetInfo;
           assert.deepEqual(
