@@ -22,7 +22,7 @@ import {
   wrapsAbout,
 } from './cdp-shield.js';
 import { EXTENSION_FRAME, foreignFrameError } from './cdp-worlds.js';
-import { tabHasErrorFrame, tabHasProtectedFrame } from './protected-frames-sw.js';
+import { tabHasProtectedFrame } from './protected-frames-sw.js';
 import {
   isProtectedTab,
   isProtectedTarget,
@@ -299,13 +299,36 @@ export function noteBridgeTabOpened(
   }
 }
 
+const FRAME_EVENTS = [
+  'onBeforeNavigate',
+  'onCommitted',
+  'onDOMContentLoaded',
+  'onCompleted',
+  'onErrorOccurred',
+  'onHistoryStateUpdated',
+  'onReferenceFragmentUpdated',
+  'onTabReplaced',
+] as const;
+
 export function installBridgeFrontListeners(deps: BridgeSwDeps): void {
   chrome.tabs.onActivated.addListener(noteBridgeTabActivated);
   chrome.windows.onRemoved.addListener(noteBridgeWindowRemoved);
   chrome.tabs.onCreated.addListener((tab) => noteBridgeTabOpened(tab.id, tab.openerTabId, deps));
-  chrome.webNavigation.onCreatedNavigationTarget.addListener((details) =>
-    noteBridgeTabOpened(details.tabId, details.sourceTabId, deps)
-  );
+  chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
+    noteBridgeTabChanged(details.tabId);
+    noteBridgeTabChanged(details.sourceTabId);
+    noteBridgeTabOpened(details.tabId, details.sourceTabId, deps);
+  });
+  for (const name of FRAME_EVENTS) chrome.webNavigation[name].addListener(noteBridgeFrames);
+}
+
+export function noteBridgeFrames(details: { tabId: number; replacedTabId?: number }): void {
+  noteBridgeTabChanged(details.tabId);
+  if (details.replacedTabId !== undefined) noteBridgeTabChanged(details.replacedTabId);
+}
+
+export function noteBridgeTabChanged(tabId: number): void {
+  tabShields.get(tabId)?.invalidate();
 }
 
 async function keepLeaderFront(
@@ -475,7 +498,7 @@ async function ensureTabShield(tabId: number, deps: BridgeSwDeps): Promise<void>
     failuresOf(tabId),
     () => deps.getTab(tabId),
     (id) => deps.getTab(id),
-    () => tabHasErrorFrame(tabId)
+    () => chrome.webNavigation.getAllFrames({ tabId })
   );
   tabShields.set(tabId, shield);
   try {

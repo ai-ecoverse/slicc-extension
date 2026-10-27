@@ -7,6 +7,7 @@ import {
   handleBridgePortConnect,
   installBridgeFrontListeners,
   noteBridgeMainFrameResponse,
+  noteBridgeTabChanged,
   postOpenSettingsToWelcomedLeaderPorts,
 } from './bridge-sw.js';
 import { handleCapturePopupMessage } from './capture-popup-sw.js';
@@ -99,6 +100,7 @@ for (const event of [chrome.webRequest.onHeadersReceived, chrome.webRequest.onRe
 
 chrome.tabs.onUpdated.addListener(
   (tabId: number, changeInfo: ChromeTabChangeInfo, tab: ChromeTab) => {
+    noteBridgeTabChanged(tabId);
     const url = changeInfo.url ?? tab.pendingUrl;
     if (!url) return;
     const bridgeDetached = checkBridgeTabProtection(tabId, url);

@@ -280,13 +280,21 @@ interface ChromeAPI {
     };
   };
   webNavigation: {
-    getAllFrames(details: {
-      tabId: number;
-    }): Promise<Array<{ url: string; errorOccurred: boolean }> | null>;
+    getAllFrames(details: { tabId: number }): Promise<unknown>;
     onCreatedNavigationTarget: {
       addListener(callback: (details: { tabId: number; sourceTabId: number }) => void): void;
     };
-  };
+  } & Record<
+    | 'onBeforeNavigate'
+    | 'onCommitted'
+    | 'onDOMContentLoaded'
+    | 'onCompleted'
+    | 'onErrorOccurred'
+    | 'onHistoryStateUpdated'
+    | 'onReferenceFragmentUpdated'
+    | 'onTabReplaced',
+    { addListener(callback: (details: { tabId: number; replacedTabId?: number }) => void): void }
+  >;
   webRequest: {
     onHeadersReceived: {
       addListener(

@@ -1435,6 +1435,53 @@ export function contentResult(method) {
   );
 }
 
+export const UNSETTLED = 'slicc: refused: navigation not settled, retry';
+
+const FRAME_CHANGES = new Set([
+  'DOM.documentUpdated',
+  'Network.loadingFailed',
+  'Page.backForwardCacheNotUsed',
+  'Page.documentOpened',
+  'Page.domContentEventFired',
+  'Page.lifecycleEvent',
+  'Page.loadEventFired',
+  'Page.navigatedWithinDocument',
+  'Runtime.executionContextCreated',
+  'Runtime.executionContextDestroyed',
+  'Runtime.executionContextsCleared',
+]);
+
+export function invalidates(method, params) {
+  return (
+    FRAME_CHANGES.has(method) ||
+    ['Page.frame', 'Target.', 'Inspector.'].some((prefix) => method.startsWith(prefix)) ||
+    (['Network.', 'Fetch.'].some((prefix) => method.startsWith(prefix)) &&
+      (params?.type === 'Document' || params?.resourceType === 'Document'))
+  );
+}
+
+export function framesKey(frames) {
+  if (!frames.some((frame) => frame?.frameId === 0)) return undefined;
+  const rows = [];
+  for (const frame of frames) {
+    if (typeof frame?.documentId !== 'string' || !frame.documentId) return undefined;
+    rows.push(
+      JSON.stringify([
+        frame.frameId,
+        frame.parentFrameId,
+        frame.documentId,
+        frame.parentDocumentId,
+        frame.documentLifecycle,
+        frame.frameType,
+        frame.processId,
+        frame.url,
+        frame.errorOccurred,
+      ])
+    );
+  }
+  return JSON.stringify(rows.sort());
+}
+
 export function errorPageRead(method) {
   return (
     (contentResult(method) && !bodyMethod(method) && method !== 'Page.getNavigationHistory') ||

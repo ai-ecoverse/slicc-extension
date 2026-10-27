@@ -41,6 +41,7 @@ jobs:
         test/integration/cached-hop.test.mjs
         test/integration/capture.test.mjs
         test/integration/cdp.test.mjs
+        test/integration/content-check-cost.test.mjs
         test/integration/cors.test.mjs
         test/integration/cws-verify.test.mjs
         test/integration/document-command-controls.test.mjs

@@ -96,6 +96,51 @@ function errorPageRead(method: string): boolean {
   );
 }
 
+const FRAME_CHANGES = new Set([
+  'DOM.documentUpdated',
+  'Network.loadingFailed',
+  'Page.backForwardCacheNotUsed',
+  'Page.documentOpened',
+  'Page.domContentEventFired',
+  'Page.lifecycleEvent',
+  'Page.loadEventFired',
+  'Page.navigatedWithinDocument',
+  'Runtime.executionContextCreated',
+  'Runtime.executionContextDestroyed',
+  'Runtime.executionContextsCleared',
+]);
+
+export function invalidates(method: string, params: CDPPayload | undefined): boolean {
+  return (
+    FRAME_CHANGES.has(method) ||
+    ['Page.frame', 'Target.', 'Inspector.'].some((prefix) => method.startsWith(prefix)) ||
+    (['Network.', 'Fetch.'].some((prefix) => method.startsWith(prefix)) &&
+      (params?.['type'] === 'Document' || params?.['resourceType'] === 'Document'))
+  );
+}
+
+export function framesKey(frames: unknown[]): string | undefined {
+  if (!frames.some((frame) => isObj(frame) && frame['frameId'] === 0)) return undefined;
+  const rows: string[] = [];
+  for (const frame of frames) {
+    if (!isObj(frame) || !str(frame['documentId'])) return undefined;
+    rows.push(
+      JSON.stringify([
+        frame['frameId'],
+        frame['parentFrameId'],
+        frame['documentId'],
+        frame['parentDocumentId'],
+        frame['documentLifecycle'],
+        frame['frameType'],
+        frame['processId'],
+        frame['url'],
+        frame['errorOccurred'],
+      ])
+    );
+  }
+  return JSON.stringify(rows.sort());
+}
+
 const ORIGIN_KEYS = new Set([
   'origin',
   'securityOrigin',
@@ -205,6 +250,7 @@ const REFUSED_METHODS = new Map<string, string>([
 
 export const COOKIES_REFUSAL = "slicc: refused: cookie is on seven's origin";
 const UNSEEN_REFUSAL = 'slicc: refused: request was not seen by the shield';
+export const UNSETTLED_REFUSAL = 'slicc: refused: navigation not settled, retry';
 const STREAM_REFUSAL = 'slicc: refused: stream handle was not opened through the shield';
 const BODY_READ_REFUSAL =
   'slicc: refused: this paused response body was already read the other way';
@@ -1389,6 +1435,13 @@ function shieldProbe(work: Promise<CDPPayload>): Promise<CDPPayload> {
   return Promise.race([work, late]).finally(() => clearTimeout(timer));
 }
 
+interface ContentTree {
+  frameTree: unknown;
+  sealed: boolean;
+  key?: string;
+  epoch?: number;
+}
+
 export class TabShield {
   private readonly requests = new Bounded<boolean>(5000);
   private readonly held = new Bounded<ShieldEvent[]>(500);
@@ -1414,6 +1467,8 @@ export class TabShield {
   private readonly cut = new Set<unknown>();
   private mainFrameId = '';
   private blockedFlag = false;
+  private epoch = 0;
+  private content: ContentTree | undefined;
   private readonly wake: Wake;
 
   constructor(
@@ -1423,13 +1478,17 @@ export class TabShield {
     private readonly readTab: () => Promise<ChromeTab | undefined> = async () => undefined,
     private readonly lookupTab: (tabId: number) => Promise<ChromeTab | undefined> = async () =>
       undefined,
-    private readonly readErrorFrames: () => Promise<boolean> = async () => true
+    private readonly readFrames: () => Promise<unknown> = async () => undefined
   ) {
     this.wake = new Wake(send);
   }
 
   get blocked(): boolean {
     return this.blockedFlag;
+  }
+
+  invalidate(): void {
+    this.epoch += 1;
   }
 
   private readyPromise: Promise<void> | null = null;
@@ -1482,7 +1541,7 @@ export class TabShield {
 
   private inputGate(method: string): void {
     if (method.startsWith('Input.') && (!this.pageObserved || this.pendingFrames.size > 0))
-      refuse(PROTECTED_RULES.refusal);
+      refuse(UNSETTLED_REFUSAL);
   }
 
   private fetchParams(): CDPPayload {
@@ -1845,11 +1904,11 @@ export class TabShield {
     params: CDPPayload
   ): Promise<{ params: CDPPayload; document: DocumentRef | undefined }> {
     if (method.startsWith('Input.') && (!this.pageObserved || this.pendingFrames.size > 0))
-      refuse(PROTECTED_RULES.refusal);
+      refuse(UNSETTLED_REFUSAL);
     if (!sealedRead(method) && !method.startsWith('Runtime.'))
       return { params, document: undefined };
     const tree = await shieldProbe(this.send('Page.getFrameTree', {})).catch(() =>
-      refuse(PROTECTED_RULES.refusal)
+      refuse(UNSETTLED_REFUSAL)
     );
     const root = frameIn(tree['frameTree'], undefined);
     if (urlProtected(str(root?.['url']) ?? '') || urlProtected(str(root?.['securityOrigin']) ?? ''))
@@ -1871,9 +1930,9 @@ export class TabShield {
       return;
     }
     const tab = await this.readLive();
-    if (method.startsWith('Input.') && tab.status === 'loading') refuse(PROTECTED_RULES.refusal);
     const confirmed = await this.confirmedError(tab);
     this.refuseShown(confirmed ? this.failedView(tab) : tab, await this.openerState(tab));
+    if (method.startsWith('Input.') && tab.status === 'loading') refuse(UNSETTLED_REFUSAL);
     if (tab.status === 'loading' && !confirmed) await this.protectedHistory();
   }
 
@@ -1946,13 +2005,13 @@ export class TabShield {
 
   private async protectedHistory(): Promise<void> {
     const history = await this.send('Page.getNavigationHistory', {}).catch(() =>
-      refuse(PROTECTED_RULES.refusal)
+      refuse(UNSETTLED_REFUSAL)
     );
     const entries = Array.isArray(history['entries']) ? history['entries'] : [];
     const index = history['currentIndex'];
     const entry = typeof index === 'number' ? entries[index] : undefined;
     if (!isObj(entry) || typeof entry['url'] !== 'string' || !entry['url'])
-      refuse(PROTECTED_RULES.refusal);
+      refuse(UNSETTLED_REFUSAL);
     if (urlProtected(entry['url'])) refuse(PROTECTED_RULES.refusal);
   }
 
@@ -1962,23 +2021,65 @@ export class TabShield {
     const reads = errorPageRead(method);
     const frameId = str(params['frameId']);
     if (!reads && frameId === undefined) return;
+    const tree =
+      reads && !method.startsWith('Runtime.')
+        ? await this.witnessed(frameId)
+        : await this.contentTree();
+    if (frameId !== undefined && !frameIn(tree.frameTree, frameId)) refuse(PROTECTED_RULES.refusal);
+    if (reads && tree.sealed) refuse(PROTECTED_RULES.refusal);
+  }
+
+  private async witnessed(frameId: string | undefined): Promise<ContentTree> {
+    const epoch = this.epoch;
+    const frames = await this.contentFrames();
+    const key = framesKey(frames);
+    const cached = this.content;
+    if (
+      key !== undefined &&
+      cached?.key === key &&
+      cached.epoch === this.epoch &&
+      (frameId === undefined || frameIn(cached.frameTree, frameId))
+    )
+      return cached;
+    const tree = await this.contentTree();
+    if (key !== undefined) {
+      const confirmed = framesKey(await this.contentFrames());
+      if (confirmed === key && epoch === this.epoch) this.content = { ...tree, key, epoch };
+    }
+    return tree;
+  }
+
+  private async contentFrames(): Promise<unknown[]> {
+    const read = await shieldProbe(
+      Promise.resolve()
+        .then(() => this.readFrames())
+        .then((frames) => ({ frames }))
+    ).catch(() => refuse(UNSETTLED_REFUSAL));
+    const frames = read['frames'];
+    if (!Array.isArray(frames) || frames.length === 0) refuse(UNSETTLED_REFUSAL);
+    if (
+      frames.some(
+        (frame) =>
+          isObj(frame) && frame['errorOccurred'] === true && urlProtected(str(frame['url']) ?? '')
+      )
+    )
+      refuse(PROTECTED_RULES.refusal);
+    return frames;
+  }
+
+  private async contentTree(): Promise<ContentTree> {
     const tree = await shieldProbe(this.send('Page.getFrameTree', {})).catch(() =>
-      refuse(PROTECTED_RULES.refusal)
+      refuse(UNSETTLED_REFUSAL)
     );
     const root = frameIn(tree['frameTree'], undefined);
     const url = str(root?.['url']);
     const origin = str(root?.['securityOrigin']);
-    if (!root || !str(root['id']) || !url || origin === undefined) refuse(PROTECTED_RULES.refusal);
-    if (frameId !== undefined && !frameIn(tree['frameTree'], frameId))
-      refuse(PROTECTED_RULES.refusal);
-    if (!reads) return;
-    if (urlProtected(url) || urlProtected(origin) || treeNamesProtected(tree['frameTree'], true))
-      refuse(PROTECTED_RULES.refusal);
-    if (method.startsWith('Runtime.')) return;
-    const hidden = await shieldProbe(this.readErrorFrames().then((blocked) => ({ blocked }))).catch(
-      () => refuse(PROTECTED_RULES.refusal)
-    );
-    if (hidden['blocked'] !== false) refuse(PROTECTED_RULES.refusal);
+    if (!root || !str(root['id']) || !url || origin === undefined) refuse(UNSETTLED_REFUSAL);
+    return {
+      frameTree: tree['frameTree'],
+      sealed:
+        urlProtected(url) || urlProtected(origin) || treeNamesProtected(tree['frameTree'], true),
+    };
   }
 
   private async checkReturn(method: string, params: CDPPayload): Promise<void> {
@@ -2167,6 +2268,7 @@ export class TabShield {
 
   onEvent(method: string, params: CDPPayload | undefined): ShieldEvent[] | Promise<ShieldEvent[]> {
     const p = params ?? {};
+    if (invalidates(method, p)) this.invalidate();
     const id = str(p['requestId']) ?? '';
     if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
       this.networkStreams.end(id);

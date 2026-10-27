@@ -36,10 +36,12 @@ import {
   foreignFrame,
   frameIn,
   frameSets,
+  framesKey,
   headersNameProtected,
   hopMatches,
   hopOf,
   initScriptPrefix,
+  invalidates,
   NetworkStreams,
   namesProtectedStorage,
   nodeSelectors,
@@ -68,6 +70,7 @@ import {
   treeNamesProtected,
   UNSEEN,
   UNSEEN_CONTEXT,
+  UNSETTLED,
   UNWATCHED,
   UrlStream,
   unknownFrame,
@@ -141,6 +144,21 @@ function textOf(value) {
 function refusal() {
   throw new Error(protectedRules.refusal);
 }
+
+function unsettled() {
+  throw new Error(UNSETTLED);
+}
+
+const FRAME_EVENTS = [
+  'onBeforeNavigate',
+  'onCommitted',
+  'onDOMContentLoaded',
+  'onCompleted',
+  'onErrorOccurred',
+  'onHistoryStateUpdated',
+  'onReferenceFragmentUpdated',
+  'onTabReplaced',
+];
 
 const RELATIVE = "slicc: refused: a relative url would open one of the extension's own pages";
 const NAVIGATES = new Set(['Page.navigate', 'Network.loadNetworkResource']);
@@ -403,6 +421,7 @@ class Connection {
     this.onCreated = this.onCreated.bind(this);
     this.onRemoved = this.onRemoved.bind(this);
     this.onSource = this.onSource.bind(this);
+    this.onFrames = this.onFrames.bind(this);
     this.shutdown = this.shutdown.bind(this);
     api.debugger.onEvent.addListener(this.onEvent);
     api.debugger.onDetach.addListener(this.onDetach);
@@ -410,6 +429,7 @@ class Connection {
     api.tabs.onCreated?.addListener(this.onCreated);
     api.tabs.onRemoved?.addListener(this.onRemoved);
     api.webNavigation?.onCreatedNavigationTarget?.addListener(this.onSource);
+    for (const name of FRAME_EVENTS) api.webNavigation?.[name]?.addListener(this.onFrames);
     port.onDisconnect.addListener(this.shutdown);
   }
 
@@ -794,6 +814,7 @@ class Connection {
         hops: new Map(),
         reroutes: new Map(),
         paused: new Map(),
+        epoch: 0,
         wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
       this.state.tabs.set(tabId, tab);
@@ -1199,12 +1220,54 @@ class Connection {
     if (method === 'IO.read' && this.state.streams.get(textOf(params.handle))?.page === false)
       return;
     const reads = errorPageRead(method);
-    if (!reads && typeof params.frameId !== 'string') return;
+    const frameId = typeof params.frameId === 'string' ? params.frameId : undefined;
+    if (!reads && frameId === undefined) return;
+    const tree =
+      reads && !method.startsWith('Runtime.')
+        ? await this.witnessed(tabId, frameId)
+        : await this.contentTree(tabId);
+    if (frameId !== undefined && !frameIn(tree.frameTree, frameId)) refusal();
+    if (reads && tree.sealed) refusal();
+  }
+
+  async witnessed(tabId, frameId) {
+    const tab = this.tabState(tabId);
+    const epoch = tab?.epoch;
+    const frames = await this.contentFrames(tabId);
+    const key = framesKey(frames);
+    const cached = tab?.content;
+    if (
+      key !== undefined &&
+      cached?.key === key &&
+      cached.epoch === tab.epoch &&
+      (frameId === undefined || frameIn(cached.frameTree, frameId))
+    )
+      return cached;
+    const tree = await this.contentTree(tabId);
+    if (tab && key !== undefined) {
+      const confirmed = framesKey(await this.contentFrames(tabId));
+      if (confirmed === key && epoch === tab.epoch) tab.content = { ...tree, key, epoch };
+    }
+    return tree;
+  }
+
+  async contentFrames(tabId) {
+    const frames = await bounded(
+      Promise.resolve().then(() => this.api.webNavigation?.getAllFrames?.({ tabId })),
+      2000,
+      'content frames'
+    ).catch(() => unsettled());
+    if (!Array.isArray(frames) || frames.length === 0) unsettled();
+    if (frames.some((frame) => frame?.errorOccurred === true && anyProtected(frame.url))) refusal();
+    return frames;
+  }
+
+  async contentTree(tabId) {
     const tree = await bounded(
       this.send(tabId, 'Page.getFrameTree', {}),
       2000,
       'content frame'
-    ).catch(() => refusal());
+    ).catch(() => unsettled());
     const root = frameIn(tree?.frameTree);
     if (
       !root ||
@@ -1214,23 +1277,14 @@ class Connection {
       !root.url ||
       typeof root.securityOrigin !== 'string'
     )
-      refusal();
-    if (typeof params.frameId === 'string' && !frameIn(tree?.frameTree, params.frameId)) refusal();
-    if (!reads) return;
-    if (
-      anyProtected(root.url) ||
-      anyProtected(root.securityOrigin) ||
-      treeNamesProtected(tree?.frameTree, anyProtected, true)
-    )
-      refusal();
-    if (method.startsWith('Runtime.')) return;
-    const frames = await bounded(
-      Promise.resolve().then(() => this.api.webNavigation?.getAllFrames?.({ tabId })),
-      2000,
-      'content frames'
-    ).catch(() => refusal());
-    if (!Array.isArray(frames) || frames.length === 0) refusal();
-    if (frames.some((frame) => frame.errorOccurred === true && anyProtected(frame.url))) refusal();
+      unsettled();
+    return {
+      frameTree: tree.frameTree,
+      sealed:
+        anyProtected(root.url) ||
+        anyProtected(root.securityOrigin) ||
+        treeNamesProtected(tree.frameTree, anyProtected, true),
+    };
   }
 
   async checkErrorPage(tabId) {
@@ -1239,9 +1293,11 @@ class Connection {
   }
 
   async protectedHistory(tabId) {
-    const history = await this.send(tabId, 'Page.getNavigationHistory', {}).catch(() => refusal());
+    const history = await this.send(tabId, 'Page.getNavigationHistory', {}).catch(() =>
+      unsettled()
+    );
     const entry = history?.entries?.[history.currentIndex];
-    if (!entry || typeof entry.url !== 'string' || !entry.url) refusal();
+    if (!entry || typeof entry.url !== 'string' || !entry.url) unsettled();
     if (urlProtected(guard, entry.url)) refusal();
   }
 
@@ -1353,13 +1409,14 @@ class Connection {
   }
 
   async bind(tabId, tab, method, params) {
-    if (method.startsWith('Input.') && (!tab.pageObserved || tab.pendingFrames.size > 0)) refusal();
+    if (method.startsWith('Input.') && (!tab.pageObserved || tab.pendingFrames.size > 0))
+      unsettled();
     if (!sealedRead(method) && !method.startsWith('Runtime.')) return { params };
     const tree = await bounded(
       this.send(tabId, 'Page.getFrameTree', {}),
       2000,
       'binding frame'
-    ).catch(() => refusal());
+    ).catch(() => unsettled());
     const root = frameIn(tree?.frameTree);
     if (anyProtected(root?.url) || anyProtected(root?.securityOrigin)) refusal();
     await this.prove(tabId, tab, tree?.frameTree);
@@ -1456,7 +1513,8 @@ class Connection {
   }
 
   inputGate(tab, method) {
-    if (method.startsWith('Input.') && (!tab.pageObserved || tab.pendingFrames.size > 0)) refusal();
+    if (method.startsWith('Input.') && (!tab.pageObserved || tab.pendingFrames.size > 0))
+      unsettled();
   }
 
   async checkReturn(tabId, sessionId, method, params) {
@@ -1840,10 +1898,16 @@ class Connection {
     return false;
   }
 
-  async onEvent(source, method, params) {
-    if (typeof source?.sessionId === 'string') return;
-    const tabId = source?.tabId;
+  touched(tabId, method, params) {
     const tab = this.tabState(tabId);
+    if (tab && invalidates(method, params)) tab.epoch += 1;
+    return tab;
+  }
+
+  async onEvent(source, method, params) {
+    const tabId = source?.tabId;
+    const tab = this.touched(tabId, method, params);
+    if (typeof source?.sessionId === 'string') return;
     if (!tab) return;
     const p = params ?? {};
     if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
@@ -1903,6 +1967,8 @@ class Connection {
   }
 
   onSource(details) {
+    this.onFrames(details);
+    this.onFrames({ tabId: details?.sourceTabId });
     void this.keepFront(details?.tabId, details?.sourceTabId).catch(() => undefined);
     if (!this.state.discover || !this.state.seen.has(details?.tabId)) return;
     void this.api.tabs
@@ -1916,10 +1982,18 @@ class Connection {
     void this.announce(tab, true).catch(() => undefined);
   }
 
+  onFrames(details) {
+    for (const tabId of [details?.tabId, details?.replacedTabId]) {
+      const tab = this.tabState(tabId);
+      if (tab) tab.epoch += 1;
+    }
+  }
+
   onUpdated(tabId, changeInfo, tab) {
     const change = changeInfo ?? {};
     const current = { id: tabId, ...(tab ?? {}) };
     const t = this.tabState(tabId);
+    if (t) t.epoch += 1;
     const same = change.url !== undefined && this.failedAt(tabId, change.url);
     if (change.url !== undefined && !same) this.state.failed.delete(tabId);
     if (t || this.state.ownedTabs.has(tabId)) {
@@ -1992,6 +2066,7 @@ class Connection {
     this.api.tabs.onCreated?.removeListener(this.onCreated);
     this.api.tabs.onRemoved?.removeListener(this.onRemoved);
     this.api.webNavigation?.onCreatedNavigationTarget?.removeListener(this.onSource);
+    for (const name of FRAME_EVENTS) this.api.webNavigation?.[name]?.removeListener(this.onFrames);
     const owned = [...this.state.ownedTabs];
     for (const tabId of [...this.state.inflight.keys()]) this.drop(tabId);
     this.state.ownedTabs.clear();
