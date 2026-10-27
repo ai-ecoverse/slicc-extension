@@ -317,6 +317,66 @@ for (const transport of transports) {
       await page.evaluate((id) => h.close(id), guarded.targetId);
     });
 
+    test(`${transport} C4 whole tab: a blocked ${target} iframe keeps main-frame Runtime.evaluate and refuses screenshots and input of the tab`, async (t) => {
+      const page = await client(t, transport);
+      const run = await page.evaluate(
+        async ({ start, origin, refusal }) => {
+          const probe = async (src, sealed) => {
+            const { targetId, sessionId } = await h.open(
+              `${start}/frame?src=${encodeURIComponent(src)}`
+            );
+            await h.attempt('Page.bringToFront', {}, sessionId);
+            const visible = await h.until(
+              async () => (await h.evaluate(sessionId, 'document.visibilityState')) === 'visible'
+            );
+            const shot = () => h.attempt('Page.captureScreenshot', { format: 'png' }, sessionId);
+            if (sealed) await h.until(async () => (await shot()).error === refusal);
+            const evaluate = await h.evaluate(sessionId, '1 + 1');
+            const screenshot = await shot();
+            const mouse = await h.attempt(
+              'Input.dispatchMouseEvent',
+              { type: 'mouseMoved', x: 20, y: 20 },
+              sessionId
+            );
+            const after = await h.evaluate(sessionId, '2 + 2');
+            await h.close(targetId);
+            return {
+              visible,
+              evaluate,
+              after,
+              screenshot: { error: screenshot.error, bytes: screenshot.result?.data?.length ?? 0 },
+              mouse: { error: mouse.error, answered: Boolean(mouse.result) },
+            };
+          };
+          return {
+            control: await probe(`${start}/inner`, false),
+            guarded: await probe(`${origin}/inner?k=SECRET`, true),
+          };
+        },
+        { start: ordinary, origin, refusal: "slicc: refused: target is on seven's origin" }
+      );
+      t.diagnostic(`${transport} ${target} whole tab: ${JSON.stringify(run)}`);
+      assert.equal(run.control.visible, true, 'control tab in front');
+      assert.equal(run.control.evaluate, 2, 'control evaluate');
+      assert.equal(run.control.screenshot.error, undefined, 'control screenshot');
+      assert.ok(run.control.screenshot.bytes > 0, 'control screenshot bytes');
+      assert.equal(run.control.mouse.error, undefined, 'control input');
+      assert.equal(run.control.mouse.answered, true, 'control input');
+      assert.equal(run.guarded.visible, true, 'guarded tab in front');
+      assert.equal(run.guarded.evaluate, 2, 'main-frame Runtime.evaluate answers');
+      assert.equal(run.guarded.after, 4, 'the session stays');
+      assert.deepEqual(
+        run.guarded.screenshot,
+        { error: "slicc: refused: target is on seven's origin", bytes: 0 },
+        'the screenshot of the tab is refused'
+      );
+      assert.deepEqual(
+        run.guarded.mouse,
+        { error: "slicc: refused: target is on seven's origin", answered: false },
+        'input to the tab is refused'
+      );
+    });
+
     test(`${transport} C5 Fetch.enable '*': ${ordinary} documents pause and fulfill, ${target} never reaches the client`, async (t) => {
       const page = await client(t, transport);
       const answer = await page.evaluate(

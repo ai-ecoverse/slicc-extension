@@ -57,6 +57,8 @@ async function prepareExtension(paths) {
     api.debugger.onDetach.addListener(this.onDetach);
     api.tabs.onUpdated?.addListener(this.onUpdated);`;
   const cdpTo = `const lag = (fn) => (...args) => { (globalThis.__sliccHistoryTrace ??= []).push({at:Date.now(),listener:fn.name,args}); const tabId = typeof args[0] === 'number' ? args[0] : args[0]?.tabId; if (!this.tabState(tabId)) return fn(...args); setTimeout(() => fn(...args), 2000); };
+    this.onFrames = lag(this.onFrames);
+    this.onSource = lag(this.onSource);
     api.debugger.onEvent.addListener(lag(this.onEvent));
     api.debugger.onDetach.addListener(this.onDetach);
     api.tabs.onUpdated?.addListener(lag(this.onUpdated));
@@ -91,7 +93,32 @@ async function prepareExtension(paths) {
   }
 }; if (tabShields.has(tabId)) setTimeout(historyUpdate, 2000); else historyUpdate(); });`
   );
-  await writeFile(sixPath, six);
+  const frameEvents = [
+    'onBeforeNavigate',
+    'onCommitted',
+    'onDOMContentLoaded',
+    'onCompleted',
+    'onErrorOccurred',
+    'onHistoryStateUpdated',
+    'onReferenceFragmentUpdated',
+    'onTabReplaced',
+  ];
+  await writeFile(
+    sixPath,
+    `for (const name of ${JSON.stringify(frameEvents)}) {
+  const event = chrome.webNavigation[name];
+  const add = event.addListener.bind(event);
+  const remove = event.removeListener.bind(event);
+  const lagged = new Map();
+  event.addListener = (fn, ...rest) => {
+    const wrapped = (details) => setTimeout(() => fn(details), 2000);
+    lagged.set(fn, wrapped);
+    return add(wrapped, ...rest);
+  };
+  event.removeListener = (fn) => remove(lagged.get(fn) ?? fn);
+}
+${six}`
+  );
   const backgroundPath = join(dir, 'background.js');
   const background = await readFile(backgroundPath, 'utf8');
   await writeFile(

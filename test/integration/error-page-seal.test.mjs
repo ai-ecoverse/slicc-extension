@@ -13,6 +13,17 @@ const entries = {
   seven: 'https://seven.sliccy.ai/',
   'six-bridge': 'https://www.sliccy.ai/?slicc=leader',
 };
+const unsettled = 'slicc: refused: navigation not settled, retry';
+const FRAME_EVENTS = [
+  'onBeforeNavigate',
+  'onCommitted',
+  'onDOMContentLoaded',
+  'onCompleted',
+  'onErrorOccurred',
+  'onHistoryStateUpdated',
+  'onReferenceFragmentUpdated',
+  'onTabReplaced',
+];
 
 async function prepareExtension(paths) {
   const cdpPath = join(paths[0], 'cdp.js');
@@ -21,17 +32,25 @@ async function prepareExtension(paths) {
   assert.ok(cdp.includes(site), 'seven listener site');
   await writeFile(
     cdpPath,
-    cdp.replace(
-      site,
-      `const lag = (fn) => (...args) => {
+    cdp
+      .replace(
+        '  async checkContent(tabId, method, params = {}) {',
+        `  async checkContent(tabId, method, params = {}) {
+    if (params.__sealProbe) globalThis.__sealProbeActive = tabId;`
+      )
+      .replace(
+        site,
+        `const lag = (fn) => (...args) => {
       const tabId = typeof args[0] === 'number' ? args[0] : args[0]?.tabId;
-      if (globalThis.__sealLagTab === tabId) setTimeout(() => fn(...args), 2000);
+      if (globalThis.__sealLagTab === tabId) setTimeout(() => fn(...args), globalThis.__sealLagMs ?? 2000);
       else fn(...args);
     };
     this.onEvent = lag(this.onEvent);
     this.onUpdated = lag(this.onUpdated);
+    this.onFrames = lag(this.onFrames);
+    this.onSource = lag(this.onSource);
     ${site}`
-    )
+      )
   );
   const sixPath = join(paths[0], 'six-sw.js');
   let six = await readFile(sixPath, 'utf8');
@@ -43,9 +62,14 @@ async function prepareExtension(paths) {
 });`;
   assert.ok(six.includes(eventSite) && six.includes(updatedSite) && six.includes(updatedEnd));
   six = six.replace(
+    '  async checkContent(method, params = {}) {',
+    `  async checkContent(method, params = {}) {
+    if (params.__sealProbe) globalThis.__sealProbeActive = globalThis.__sealFlakeFrames ?? globalThis.__sealFlakeTree;`
+  );
+  six = six.replace(
     eventSite,
     `const sealWrapped = (...args) => {
-      if (globalThis.__sealLagTab === args[0]?.tabId) setTimeout(() => wrapped(...args), 2000);
+      if (globalThis.__sealLagTab === args[0]?.tabId) setTimeout(() => wrapped(...args), globalThis.__sealLagMs ?? 2000);
       else wrapped(...args);
     };
     chrome.debugger.onEvent.addListener(sealWrapped);`
@@ -60,17 +84,49 @@ async function prepareExtension(paths) {
     `    releaseDebuggerAttachment(detachedTabId, "bridge").catch(() => {
     });
   }
-}; if (globalThis.__sealLagTab === tabId) setTimeout(sealUpdate, 2000); else sealUpdate(); });`
+}; if (globalThis.__sealLagTab === tabId) setTimeout(sealUpdate, globalThis.__sealLagMs ?? 2000); else sealUpdate(); });`
   );
-  await writeFile(sixPath, six);
+  await writeFile(
+    sixPath,
+    `for (const name of ${JSON.stringify(FRAME_EVENTS)}) {
+  const event = chrome.webNavigation[name];
+  const add = event.addListener.bind(event);
+  const remove = event.removeListener.bind(event);
+  const lagged = new Map();
+  event.addListener = (fn, ...rest) => {
+    const wrapped = (details) => {
+      if (globalThis.__sealLagTab === details?.tabId) setTimeout(() => fn(details), globalThis.__sealLagMs ?? 2000);
+      else fn(details);
+    };
+    lagged.set(fn, wrapped);
+    return add(wrapped, ...rest);
+  };
+  event.removeListener = (fn) => remove(lagged.get(fn) ?? fn);
+}
+${six}`
+  );
   const backgroundPath = join(paths[0], 'background.js');
   const background = await readFile(backgroundPath, 'utf8');
   await writeFile(
     backgroundPath,
     `${background}
 const sealSend = chrome.debugger.sendCommand.bind(chrome.debugger);
+const sealFrames = chrome.webNavigation.getAllFrames.bind(chrome.webNavigation);
 globalThis.__sealAudit = [];
+chrome.webNavigation.getAllFrames = async (details) => {
+  if (globalThis.__sealFlakeFrames === details?.tabId && globalThis.__sealProbeActive === details?.tabId) {
+    delete globalThis.__sealFlakeFrames;
+    delete globalThis.__sealProbeActive;
+    return [];
+  }
+  return sealFrames(details);
+};
 chrome.debugger.sendCommand = async (target, method, params) => {
+  if (globalThis.__sealFlakeTree === target.tabId && globalThis.__sealProbeActive === target.tabId && method === 'Page.getFrameTree') {
+    delete globalThis.__sealFlakeTree;
+    delete globalThis.__sealProbeActive;
+    throw new Error('Inspected target navigated or closed');
+  }
   const hold = globalThis.__sealHold;
   if (hold?.armed && hold.tabId === target.tabId && method === 'Page.captureScreenshot') {
     hold.armed = false;
@@ -334,6 +390,74 @@ async function recover(chrome, page, tab, client, failedUrl, mainError, hopUrl) 
   assert.equal(closed.result?.success, true, 'close');
 }
 
+async function embed(chrome, tab, failedUrl) {
+  await chrome.cdp.send(
+    'Runtime.evaluate',
+    {
+      expression: `document.body.appendChild(Object.assign(document.createElement('iframe'), {src:${JSON.stringify(failedUrl)}}))`,
+    },
+    tab.sessionId
+  );
+  const child = await until(async () => {
+    const { targetInfos } = await chrome.cdp.send('Target.getTargets');
+    return targetInfos.find((info) => info.type === 'iframe' && info.url === failedUrl);
+  });
+  const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
+    targetId: child.targetId,
+    flatten: true,
+  });
+  try {
+    await settled(chrome, { sessionId }, failedUrl, true);
+  } finally {
+    await chrome.cdp.send('Target.detachFromTarget', { sessionId });
+  }
+}
+
+async function warm(page, sessionId) {
+  return page.evaluate(async (sessionId) => {
+    const answers = [];
+    for (let i = 0; i < 10; i++) {
+      answers.push(
+        await h.attempt('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Shift' }, sessionId),
+        await h.attempt('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Shift' }, sessionId)
+      );
+    }
+    answers.push(await h.attempt('Page.captureScreenshot', { format: 'png' }, sessionId));
+    return answers.map((answer) => answer.error ?? null);
+  }, sessionId);
+}
+
+async function flaky(page, worker, client) {
+  const tabId = Number(client.targetId);
+  const rows = [];
+  for (const [arm, method, params] of [
+    ['__sealFlakeTree', 'Runtime.evaluate', { expression: 'document.title', returnByValue: true }],
+    ['__sealFlakeFrames', 'Page.captureScreenshot', { format: 'png' }],
+    ['__sealFlakeFrames', 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA' }],
+  ]) {
+    await worker.evaluate(`globalThis.${arm} = ${tabId}; true`);
+    const answer = await page.evaluate(
+      async ({ sessionId, method, params }) => {
+        const probe = crypto.randomUUID();
+        const first = await h.attempt(method, { ...params, __sealProbe: probe }, sessionId);
+        const again = await h.attempt(method, params, sessionId);
+        return {
+          probe,
+          first: { error: first.error, answered: Boolean(first.result) },
+          again: { error: again.error, answered: Boolean(again.result) },
+        };
+      },
+      { sessionId: client.sessionId, method, params }
+    );
+    rows.push({
+      method,
+      ...answer,
+      spent: await worker.evaluate(`globalThis.${arm} === undefined`),
+    });
+  }
+  return rows;
+}
+
 async function row(chrome, page, worker, transport, variant) {
   const id = `FAKE${transport.replace('-', '')}${variant}`;
   const failedUrl = `${origin}/controller/${id}`;
@@ -345,29 +469,75 @@ async function row(chrome, page, worker, transport, variant) {
   try {
     if (variant === 'history' || variant === 'lagged') await navigate(chrome, tab, failedUrl, true);
     const root = await navigate(chrome, tab, startUrl);
-    if (variant === 'frame') {
-      await chrome.cdp.send(
-        'Runtime.evaluate',
-        {
-          expression: `document.body.appendChild(Object.assign(document.createElement('iframe'), {src:${JSON.stringify(failedUrl)}}))`,
-        },
-        tab.sessionId
-      );
-      const child = await until(async () => {
-        const { targetInfos } = await chrome.cdp.send('Target.getTargets');
-        return targetInfos.find((info) => info.type === 'iframe' && info.url === failedUrl);
-      });
-      const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
-        targetId: child.targetId,
-        flatten: true,
-      });
-      try {
-        await settled(chrome, { sessionId }, failedUrl, true);
-      } finally {
-        await chrome.cdp.send('Target.detachFromTarget', { sessionId });
-      }
-    }
+    const framed = variant === 'frame' || variant === 'cached';
+    if (variant === 'frame') await embed(chrome, tab, failedUrl);
     const client = await attach(page, startUrl);
+    if (variant === 'unsettled') {
+      const rows = await flaky(page, worker, client);
+      await recover(chrome, page, tab, client, failedUrl, false, hopUrl);
+      const audit = await worker.evaluate('globalThis.__sealAudit.splice(0)');
+      for (const probe of rows) {
+        assert.deepEqual(probe.first, { error: unsettled, answered: false }, probe.method);
+        assert.equal(probe.again.error, undefined, probe.method);
+        assert.equal(probe.again.answered, true, probe.method);
+        assert.equal(probe.spent, true, probe.method);
+        assert.equal(
+          audit.filter((row) => row.probe === probe.probe).length,
+          0,
+          `${probe.method} forwarding`
+        );
+      }
+      return;
+    }
+    let lag;
+    if (variant === 'cached') {
+      await worker.evaluate(`(async () => {
+        const target = {tabId:${Number(client.targetId)}};
+        await chrome.debugger.sendCommand(target, 'Fetch.disable', {});
+        await chrome.debugger.sendCommand(target, 'Target.setAutoAttach', {autoAttach:false, waitForDebuggerOnStart:false, flatten:true});
+        return true;
+      })()`);
+      const answers = await warm(page, client.sessionId);
+      assert.deepEqual(answers, Array(answers.length).fill(null), 'warm replies');
+      await worker.evaluate(
+        `globalThis.__sealLagMs = 6000; globalThis.__sealLagTab = ${Number(client.targetId)}; true`
+      );
+      lag = Date.now();
+      await embed(chrome, tab, failedUrl);
+      const report = await page.evaluate(async (sessionId) => {
+        const parent = await h.evaluate(sessionId, '1 + 1');
+        const before = h.events.length;
+        const rows = [];
+        for (const [method, params] of [
+          ['Page.captureScreenshot', { format: 'png' }],
+          ['Input.dispatchMouseEvent', { type: 'mouseMoved', x: 20, y: 20 }],
+          ['Page.startScreencast', { format: 'jpeg', maxWidth: 16, maxHeight: 16 }],
+        ]) {
+          const probe = crypto.randomUUID();
+          const answer = await h.attempt(method, { ...params, __sealProbe: probe }, sessionId);
+          rows.push({ method, probe, error: answer.error, answered: Boolean(answer.result) });
+        }
+        await h.sleep(150);
+        const frames = h.events
+          .slice(before)
+          .filter((event) => event.method === 'Page.screencastFrame').length;
+        await h.attempt('Page.stopScreencast', {}, sessionId);
+        return { parent, rows, frames };
+      }, client.sessionId);
+      assert.ok(Date.now() - lag < 6000, 'cached reads ran inside the listener lag');
+      assert.equal(report.parent, 2, 'main frame remains readable');
+      assertSealed(report);
+      await auditRefusals(worker, report);
+      await worker.evaluate(`(async () => {
+        delete globalThis.__sealLagTab;
+        const target = {tabId:${Number(client.targetId)}};
+        await chrome.debugger.sendCommand(target, 'Fetch.enable', {patterns:[{urlPattern:'*', resourceType:'Document', requestStage:'Request'}]});
+        await chrome.debugger.sendCommand(target, 'Target.setAutoAttach', {autoAttach:true, waitForDebuggerOnStart:true, flatten:true});
+        return true;
+      })()`);
+      await recover(chrome, page, tab, client, failedUrl, false, hopUrl);
+      return;
+    }
     if (variant === 'control') {
       const controlUrl = `https://ordinary.test/seal-control?n=${transport}`;
       await page.evaluate(({ sessionId, url }) => h.land(sessionId, url), {
@@ -417,6 +587,8 @@ async function row(chrome, page, worker, transport, variant) {
       await settled(chrome, tab, failedUrl, true);
     }
     if (variant === 'lagged') {
+      const answers = await warm(page, client.sessionId);
+      assert.deepEqual(answers, Array(answers.length).fill(null), 'warm pending reply');
       await worker.evaluate(`globalThis.__sealLagTab = ${Number(client.targetId)};
         globalThis.__sealHold = {tabId:${Number(client.targetId)}, armed:true};
         globalThis.__sealEntered = new Promise((resolve) => { globalThis.__sealHold.announce = resolve; }); true`);
@@ -450,7 +622,7 @@ async function row(chrome, page, worker, transport, variant) {
       });
     }
     let frameId = root.id;
-    if (variant === 'frame') {
+    if (framed) {
       const { root: dom } = await chrome.cdp.send(
         'DOM.getDocument',
         { depth: -1, pierce: true },
@@ -468,10 +640,10 @@ async function row(chrome, page, worker, transport, variant) {
       );
       assert.equal(parent, 2, 'parent control');
     }
-    const report = await probes(page, client.sessionId, errorPage, frameId, variant === 'frame');
-    const info = variant === 'frame' ? undefined : await metadata(page, client);
+    const report = await probes(page, client.sessionId, errorPage, frameId, framed);
+    const info = framed ? undefined : await metadata(page, client);
     let scoped;
-    if (variant === 'frame') {
+    if (framed) {
       scoped = await page.evaluate(
         async ({ frameId, sessionId }) => [
           await h.attempt('Target.attachToTarget', { targetId: frameId, flatten: true }),
@@ -486,7 +658,7 @@ async function row(chrome, page, worker, transport, variant) {
     }
     const receivedClean = await cleanMessages(page, id);
     await worker.evaluate('delete globalThis.__sealLagTab; true');
-    await recover(chrome, page, tab, client, failedUrl, variant !== 'frame', hopUrl);
+    await recover(chrome, page, tab, client, failedUrl, !framed, hopUrl);
     assert.equal(await cleanMessages(page, id), true, 'recovery replies');
     if (pending) {
       assert.match(pending.error ?? '', /^slicc: refused:/, 'pending reply');
@@ -508,7 +680,7 @@ async function row(chrome, page, worker, transport, variant) {
         assert.match(answer.error ?? '', /^slicc: refused:/, 'child session');
   } finally {
     await worker.evaluate(
-      'delete globalThis.__sealLagTab; globalThis.__sealHold?.release?.(); delete globalThis.__sealHold; true'
+      'delete globalThis.__sealLagTab; delete globalThis.__sealLagMs; delete globalThis.__sealFlakeTree; delete globalThis.__sealFlakeFrames; globalThis.__sealHold?.release?.(); delete globalThis.__sealHold; true'
     );
     await chrome.cdp.send('Target.closeTarget', { targetId: tab.targetId }).catch(() => undefined);
   }
@@ -525,7 +697,15 @@ test('error page admission', { timeout: 300000 }, async (t) => {
     for (const transport of ['seven', 'six-bridge']) {
       const page = transport === 'seven' ? first : await chrome.visit(t, entries[transport]);
       if (transport !== 'seven') await page.evaluate(install, transport, extId);
-      for (const variant of ['control', 'hop', 'history', 'frame', 'lagged']) {
+      for (const variant of [
+        'control',
+        'hop',
+        'history',
+        'frame',
+        'lagged',
+        'cached',
+        'unsettled',
+      ]) {
         await t.test(`${transport} ${variant}`, { timeout: 60000 }, () =>
           row(chrome, page, sw, transport, variant)
         );

@@ -193,7 +193,7 @@ for (const transport of transports) {
       h.evaluate = (sessionId, expression) => {
         if (armed && !injected && expression.includes('document.readyState')) {
           injected = true;
-          return Promise.resolve({ error: 'slicc: refused: fixture commit' });
+          return Promise.resolve({ error: 'slicc: refused: navigation not settled, retry' });
         }
         return evaluate(sessionId, expression);
       };

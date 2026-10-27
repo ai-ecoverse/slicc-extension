@@ -16,6 +16,7 @@ after(() => chrome?.close());
 const slicc = 'https://seven.sliccy.ai/';
 const extId = 'akjjllgokmbgpbdbmafpiefnhidlmbgf';
 const refused = "slicc: refused: target is on seven's origin";
+const unsettled = 'slicc: refused: navigation not settled, retry';
 
 function extTab(page, url) {
   return openExtensionPage(page, url.slice(`chrome-extension://${extId}/`.length));
@@ -352,7 +353,11 @@ test('B24-1 seven: a navigation to the vault fails before it commits and the ses
     if (ready !== loaded) throw new Error(`not loaded: ${ready}`);
     await href('location.href = "https://vault.sliccy.ai/"');
     const hops = [];
-    for (let i = 0; i < 200 && !/^error slicc: refused:/.test(hops.at(-1) ?? ''); i++) {
+    for (
+      let i = 0;
+      i < 200 && !/^error slicc: refused: (?!navigation not settled)/.test(hops.at(-1) ?? '');
+      i++
+    ) {
       if (i > 0) await new Promise((r) => setTimeout(r, 50));
       hops.push(await href('location.href'));
     }
@@ -366,7 +371,8 @@ test('B24-1 seven: a navigation to the vault fails before it commits and the ses
       (href) =>
         href !== 'https://other.test/' &&
         href !== 'chrome-error://chromewebdata/' &&
-        href !== `error ${refused}`
+        href !== `error ${refused}` &&
+        href !== `error ${unsettled}`
     ),
     [],
     'the session stays and the vault never commits'
@@ -413,7 +419,11 @@ test('B24-1 seven: an ordinary request paused before a navigation to the vault c
         (error) => error.message
       );
     let href = '';
-    for (let i = 0; i < 200 && !/^error slicc: refused:/.test(href); i++) {
+    for (
+      let i = 0;
+      i < 200 && !/^error slicc: refused: (?!navigation not settled)/.test(href);
+      i++
+    ) {
       if (i > 0) await sleep(50);
       href = await run('location.href');
     }

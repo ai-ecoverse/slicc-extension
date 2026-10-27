@@ -1293,7 +1293,8 @@ test('a sliccy.ai page cannot open or attach to seven or the vault', async (t) =
       (href) =>
         href !== 'https://other.test/' &&
         href !== 'chrome-error://chromewebdata/' &&
-        href !== `error ${refused}`
+        href !== `error ${refused}` &&
+        href !== 'error slicc: refused: navigation not settled, retry'
     ),
     [],
     'the session stays and seven never commits'
