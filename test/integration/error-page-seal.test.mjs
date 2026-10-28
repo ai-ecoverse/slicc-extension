@@ -280,8 +280,9 @@ async function probes(page, sessionId, url, frameId, scoped = false) {
       await read('Page.captureScreenshot', { format: 'png' });
       await read('Page.getResourceContent', { frameId, url });
       await read('Page.searchInResource', { frameId, url, query: 'marker' });
+      let frameTree;
       if (!scoped) {
-        await read('Page.getFrameTree');
+        frameTree = await h.attempt('Page.getFrameTree', {}, sessionId);
         await read('Page.getResourceTree');
         await read('Page.captureSnapshot', { format: 'mhtml' });
         const pdf = await read('Page.printToPDF', { transferMode: 'ReturnAsStream' });
@@ -295,7 +296,7 @@ async function probes(page, sessionId, url, frameId, scoped = false) {
         .slice(before)
         .filter((event) => event.method === 'Page.screencastFrame').length;
       await h.attempt('Page.stopScreencast', {}, sessionId);
-      return { rows, frames };
+      return { rows, frames, frameTree };
     },
     { sessionId, url, frameId, scoped }
   );
@@ -327,6 +328,16 @@ async function cleanMessages(page, id) {
 }
 
 function assertSealed(report) {
+  if (report.frameTree) {
+    assert.equal(report.frameTree.error, undefined, 'frame metadata answers');
+    assert.equal(report.frameTree.result?.frameTree?.frame?.url, errorPage, 'error main frame');
+    const text = JSON.stringify(report.frameTree.result);
+    assert.ok(!text.includes('/controller/'), 'no protected path');
+    assert.ok(!text.includes('FAKE'), 'no fake id');
+    assert.ok(!text.includes('query-secret='), 'no protected query');
+    assert.ok(!text.includes('fragment-secret-'), 'no protected fragment');
+    assert.equal(report.frameTree.result.frameTree.frame.unreachableUrl, origin);
+  }
   for (const row of report.rows) {
     assert.match(row.error ?? '', /^slicc: refused:/, row.method);
     assert.equal(row.answered, false, row.method);

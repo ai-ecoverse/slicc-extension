@@ -628,6 +628,14 @@ export function redactProtected(value, isProtected, method) {
     if (out === source || out === keyed) out = { ...keyed };
     out[key] = next;
   }
+  if (
+    method === 'Page.getFrameTree' &&
+    ['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(value[key], isProtected))
+  ) {
+    out = { ...out };
+    delete out.name;
+    delete out.urlFragment;
+  }
   if ('urlFragment' in value && URL_KEYS.some((k) => urlNamed(value[k], isProtected))) {
     if (out === value) out = { ...value };
     delete out.urlFragment;

@@ -357,7 +357,10 @@ for (const transport of transports) {
             assert.deepEqual([fresh?.url, fresh?.title], [origin, origin], JSON.stringify(fresh));
             const info = reply(run, 'Target.getTargetInfo')?.result?.targetInfo;
             assert.deepEqual([info?.url, info?.title], [origin, origin], JSON.stringify(info));
-            assert.ok(refused(reply(run, 'Page.getFrameTree')), 'frame reply');
+            const tree = reply(run, 'Page.getFrameTree');
+            assert.equal(tree?.error, undefined, 'frame metadata answers');
+            assert.equal(tree?.result?.frameTree?.frame?.url, 'chrome-error://chromewebdata/');
+            assert.equal(tree?.result?.frameTree?.frame?.unreachableUrl, origin);
           }
         });
       }
