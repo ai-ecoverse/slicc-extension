@@ -14,7 +14,6 @@ Chrome MV3 extension that serves both six (the hosted leader tab on `www.sliccy.
 ## Six — hosted leader tab
 
 The extension manages a pinned leader tab at `https://www.sliccy.ai/?slicc=leader`. The leader tab connects via `externally_connectable` and gets:
-
 - **CDP bridge** (`slicc.cdp-bridge` port): full `chrome.debugger` pass-through with three-factor pin (origin allowlist + tab id + top frame).
 - **Fetch proxy** (`fetch-proxy.fetch` port): secret-injected fetch with S3 SigV4 and DA sign-and-forward, forbidden header restoration via session DNR rules.
 - **Secrets CRUD** (`secrets.crud` port): chrome.storage-backed secret management.
@@ -42,13 +41,13 @@ Hosts whose label is in `seven.excludedLabels` or starts with one of `seven.excl
 
 Protected origins (from slicc-browsers 1.5.0):
 
-| Origin | Content scripts | Relay fetch | CDP (content script) | CDP (bridge) | Side panel | Secrets |
-|--------|:-:|:-:|:-:|:-:|:-:|:-:|
-| www.sliccy.ai | ✓ | ✓ | ✓ (protected targets blocked) | ✓ (three-factor pin) | ✓ | ✓ |
-| seven.sliccy.ai | ✓ | ✓ | ✓ (protected targets blocked) | — | — | — |
-| vault.sliccy.ai | ✓ | ✓ | ✓ (protected targets blocked) | — | — | — |
-| Branch hosts (*.sliccy.ai) | ✓ | ✓ | ✓ (protected targets blocked) | — | — | — |
-| External sites | — | — | — | — | — | — |
+| Origin                     | Content scripts | Relay fetch |     CDP (content script)      |     CDP (bridge)     | Side panel | Secrets |
+| -------------------------- | :-------------: | :---------: | :---------------------------: | :------------------: | :--------: | :-----: |
+| www.sliccy.ai              |        ✓        |      ✓      | ✓ (protected targets blocked) | ✓ (three-factor pin) |     ✓      |    ✓    |
+| seven.sliccy.ai            |        ✓        |      ✓      | ✓ (protected targets blocked) |          —           |     —      |    —    |
+| vault.sliccy.ai            |        ✓        |      ✓      | ✓ (protected targets blocked) |          —           |     —      |    —    |
+| Branch hosts (*.sliccy.ai) |        ✓        |      ✓      | ✓ (protected targets blocked) |          —           |     —      |    —    |
+| External sites             |        —        |      —      |               —               |          —           |     —      |    —    |
 
 Both six's bridge CDP and seven's content-script CDP refuse to target protected origins. Six's pages cannot get CDP or relay access to seven's or the vault's tabs. Seven's relay keeps refusing protected targets.
 
@@ -65,7 +64,6 @@ npm run pack
 ## CI and releases
 
 `.github/workflows/ci.yml` is the only caller of [slicc-shared-web's pipeline](https://github.com/ai-ecoverse/slicc-shared-web#pipeline) (`pipeline.yml@v2.8.4`, matching the `@ai-ecoverse/slicc-shared-web` devDependency). Require `ci / integration` and `ci / review`.
-
 - **Pull requests and the merge queue:** `slicc-lint` (Biome, `typecheck` and the shared rules), then the files in `test/integration/*.test.mjs` split by timing over 4 shards, each running `npm test` (which builds first), then on a pull request the Claude and Codex reviews. Chrome runs headed on CI, each browser on its own Xvfb display, and headless locally; `SLICC_HEADLESS=1` or `0` overrides.
 - **The guard sweep:** `guard-<transport>-<variant>.test.mjs` runs the pinned `@ai-ecoverse/slicc-browsers` guard vectors on `seven` and `six-bridge`, `prompt` and `lagging`, `GUARD_PARALLEL` rows at a time (4 by default). Each file fails unless every row passes or skips for a known reason, with no all-skip run and no failed, incomplete, forged or missing row, and prints its `GUARD-PASS` line. The rows go to `artifacts/guard/<transport>-<variant>.json`, which the reviewers get.
 - **`main`:** semantic-release builds and packs `artifacts/slicc-extension.zip`, checks it with `scripts/check-live-permissions.mjs` and `scripts/check-six-floor.mjs`, and attaches it to the GitHub release. When a new `v*` tag points at the commit, the `cws` job checks the six floor again and publishes that zip with `scripts/cws-publish.mjs`, which refuses any version not newer than the store's.
@@ -79,15 +77,15 @@ Releases roll forward only. Before publishing, `scripts/check-six-floor.mjs` ref
 
 ## Permissions
 
-| Permission | Used by | Justification |
-|-----------|---------|---------------|
-| `debugger` | Both | CDP proxy for seven pages and six bridge |
-| `tabs` | Six | Leader tab management, tab queries for bridge CDP |
-| `tabGroups` | Six | Tab group management for leader tab |
-| `identity` | Both | Adobe IMS sign-in via launchWebAuthFlow |
-| `storage` | Six | Secrets storage in chrome.storage.local |
-| `webRequest` | Six | Handoff Link header observation, discovery |
-| `declarativeNetRequestWithHostAccess` | Both | Static CORS rules + session rules for forbidden headers |
-| `notifications` | Six | Handoff notification toasts |
-| `sidePanel` | Six | Cherry follower side panel |
-| `<all_urls>` (host) | Both | Relay fetch to any URL, DNR rules for any upstream |
+| Permission                            | Used by | Justification                                           |
+| ------------------------------------- | ------- | ------------------------------------------------------- |
+| `debugger`                            | Both    | CDP proxy for seven pages and six bridge                |
+| `tabs`                                | Six     | Leader tab management, tab queries for bridge CDP       |
+| `tabGroups`                           | Six     | Tab group management for leader tab                     |
+| `identity`                            | Both    | Adobe IMS sign-in via launchWebAuthFlow                 |
+| `storage`                             | Six     | Secrets storage in chrome.storage.local                 |
+| `webRequest`                          | Six     | Handoff Link header observation, discovery              |
+| `declarativeNetRequestWithHostAccess` | Both    | Static CORS rules + session rules for forbidden headers |
+| `notifications`                       | Six     | Handoff notification toasts                             |
+| `sidePanel`                           | Six     | Cherry follower side panel                              |
+| `<all_urls>` (host)                   | Both    | Relay fetch to any URL, DNR rules for any upstream      |
