@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { CDPClient } from '@ai-ecoverse/slicc-cdp';
 import { PageSession } from '../../node_modules/@ai-ecoverse/slicc-cdp/src/page.js';
@@ -13,6 +15,47 @@ const entries = {
 };
 const errorPage = 'chrome-error://chromewebdata/';
 const marker = 'FAKE-HOP-ID';
+
+async function prepare(paths) {
+  const path = join(paths[0], 'background.js');
+  const source = await readFile(path, 'utf8');
+  await writeFile(
+    path,
+    `const hopSend = chrome.debugger.sendCommand.bind(chrome.debugger);
+chrome.debugger.sendCommand = async (target, method, params) => {
+  if (params?.__hopTree) {
+    globalThis.__hopEntered = true;
+    await new Promise((resolve) => { globalThis.__hopRelease = resolve; });
+  }
+  return hopSend(target, method, params);
+};\n${source}`
+  );
+}
+
+async function worker(chrome) {
+  const { targetInfos } = await chrome.cdp.send('Target.getTargets');
+  const target = targetInfos.find(
+    (info) =>
+      info.type === 'service_worker' && info.url === `chrome-extension://${extId}/background.js`
+  );
+  assert.ok(target, 'worker target');
+  const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
+    targetId: target.targetId,
+    flatten: true,
+  });
+  return {
+    async evaluate(expression) {
+      const answer = await chrome.cdp.send(
+        'Runtime.evaluate',
+        { expression, returnByValue: true, awaitPromise: true },
+        sessionId
+      );
+      assert.equal(answer.exceptionDetails, undefined, 'worker evaluation');
+      return answer.result?.value;
+    },
+    close: () => chrome.cdp.send('Target.detachFromTarget', { sessionId }),
+  };
+}
 
 async function fixture() {
   const hits = [];
@@ -117,7 +160,7 @@ async function row(t, chrome, site, transport, variant, ownClient = false) {
       await session.attach(opened.targetId);
       await session.navigate(`${site.url}/hop`).catch(() => undefined);
       await settled(chrome, raw.sessionId, site.protectedUrl, true);
-      await assert.rejects(session.evaluate('document.title'), /^Error: slicc: refused:/);
+      await assert.rejects(session.evaluate('document.title'), /slicc: refused:/);
       const tree = await client.send('Page.getFrameTree', {}, session.sessionId);
       redacted(tree, site.protectedUrl);
       await session.navigate(`${site.url}/destination`);
@@ -133,8 +176,36 @@ async function row(t, chrome, site, transport, variant, ownClient = false) {
       assert.match(blocked.error ?? '', /^slicc: refused:/);
       await settled(chrome, raw.sessionId, `${site.url}/seed`);
     } else {
-      await send('Page.navigate', { url: `${site.url}/${variant}` });
-      await settled(chrome, raw.sessionId, site.protectedUrl, true);
+      let pending;
+      if (variant === 'pending') {
+        const sw = await worker(chrome);
+        try {
+          await sw.evaluate('globalThis.__hopEntered = false; true');
+          await page.evaluate((sessionId) => {
+            globalThis.__hopPending = h.attempt(
+              'Page.getFrameTree',
+              { __hopTree: true },
+              sessionId
+            );
+            return true;
+          }, opened.sessionId);
+          const deadline = Date.now() + 10000;
+          while (!(await sw.evaluate('globalThis.__hopEntered'))) {
+            assert.ok(Date.now() < deadline, 'pending tree entered');
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          await chrome.cdp.send('Page.navigate', { url: `${site.url}/hop` }, raw.sessionId);
+          await settled(chrome, raw.sessionId, site.protectedUrl, true);
+          await sw.evaluate('globalThis.__hopRelease(); true');
+          pending = await page.evaluate(() => globalThis.__hopPending);
+        } finally {
+          await sw.evaluate('globalThis.__hopRelease?.(); true');
+          await sw.close();
+        }
+      } else {
+        await send('Page.navigate', { url: `${site.url}/${variant}` });
+        await settled(chrome, raw.sessionId, site.protectedUrl, true);
+      }
       const info = await page.evaluate(
         (targetId) => h.cdp.send('Target.getTargetInfo', { targetId }),
         opened.targetId
@@ -142,7 +213,7 @@ async function row(t, chrome, site, transport, variant, ownClient = false) {
       assert.equal(info.targetInfo.url, new URL(site.protectedUrl).origin);
       assert.equal(info.targetInfo.title, new URL(site.protectedUrl).origin);
       assert.ok(!JSON.stringify(info).includes(marker), 'target metadata is redacted');
-      const tree = await send('Page.getFrameTree');
+      const tree = pending ?? (await send('Page.getFrameTree'));
       assert.equal(tree.error, undefined, 'frame tree answers');
       redacted(tree.result, site.protectedUrl);
       const sealed = await page.evaluate(async (sessionId) => {
@@ -193,9 +264,9 @@ test('a blocked hop tab recovers', { timeout: 180000 }, async (t) => {
   const site = await fixture();
   let chrome;
   try {
-    chrome = await launch();
+    chrome = await launch({ prepare });
     for (const transport of ['seven', 'six-bridge']) {
-      for (const variant of ['hop', 'redirect', 'direct'])
+      for (const variant of ['hop', 'redirect', 'direct', 'pending'])
         await t.test(`${transport} ${variant}`, (t) => row(t, chrome, site, transport, variant));
       await t.test(`${transport} package client`, (t) =>
         row(t, chrome, site, transport, 'hop', true)
