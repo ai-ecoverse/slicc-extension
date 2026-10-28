@@ -1104,6 +1104,14 @@ export function redactProtected<T>(value: T, method?: string): T {
     if (out === source) out = { ...source };
     out[key] = next;
   }
+  if (
+    method === 'Page.getFrameTree' &&
+    ['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(original[key]))
+  ) {
+    out = { ...out };
+    delete out['name'];
+    delete out['urlFragment'];
+  }
   if ('urlFragment' in original && URL_KEYS.some((k) => urlNamed(original[k]))) {
     if (out === original) out = { ...original };
     delete out['urlFragment'];
@@ -2016,6 +2024,8 @@ export class TabShield {
   }
 
   private async checkContent(method: string, params: CDPPayload = {}): Promise<void> {
+    if (method === 'Page.getFrameTree' && (await this.confirmedError(await this.readLive())))
+      return;
     if (method === 'IO.read' && this.streams.get(str(params['handle']) ?? '')?.page === false)
       return;
     const reads = errorPageRead(method);

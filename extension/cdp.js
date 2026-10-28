@@ -1217,6 +1217,11 @@ class Connection {
   }
 
   async checkContent(tabId, method, params = {}) {
+    if (
+      method === 'Page.getFrameTree' &&
+      (await this.confirmedError(tabId, await readTab(this.api, tabId)))
+    )
+      return;
     if (method === 'IO.read' && this.state.streams.get(textOf(params.handle))?.page === false)
       return;
     const reads = errorPageRead(method);
