@@ -27,7 +27,7 @@
   },
   "devDependencies": {
     "@ai-ecoverse/slicc-browsers": "1.18.21",
-    "@ai-ecoverse/slicc-cdp": "1.42.4",
+    "@ai-ecoverse/slicc-cdp": "1.42.8",
     "@ai-ecoverse/slicc-shared-web": "2.13.7",
     "@biomejs/biome": "2.6.2",
     "@semantic-release/exec": "7.1.0",
