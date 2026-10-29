@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMain } from './is-main.mjs';
+import { stampPageVersion } from './page-version.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ext = join(root, 'extension');
@@ -72,6 +73,7 @@ function main() {
   for (const gate of ['seven-gate.js', 'seven-gate-main.js']) {
     writeFileSync(join(ext, gate), `globalThis.__sliccSeven = ${data};\n`);
   }
+  stampPageVersion(ext, manifest.version);
   writeFileSync(
     join(ext, 'protected-rules.js'),
     `export const protectedRules = ${JSON.stringify(catalog.protectedOrigins)};\n`

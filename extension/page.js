@@ -134,6 +134,7 @@
 
   Object.defineProperty(globalThis, 'sliccExtension', {
     value: Object.freeze({
+      version: _seven.version,
       fetch: relayFetch,
       signIn,
       cdp: Object.freeze({
