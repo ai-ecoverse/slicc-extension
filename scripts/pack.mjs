@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { argv, cwd } from 'node:process';
+import { stampPageVersion } from './page-version.mjs';
 
 const root = cwd();
 const outDir = join(root, 'artifacts');
@@ -41,6 +42,7 @@ if (version) {
   const manifest = JSON.parse(readFileSync(join(stage, 'manifest.json'), 'utf8'));
   const stamped = { ...manifest, version };
   writeFileSync(join(stage, 'manifest.json'), `${JSON.stringify(stamped, null, 2)}\n`);
+  stampPageVersion(stage, version);
 }
 mkdirSync(outDir, { recursive: true });
 rmSync(zipPath, { force: true });

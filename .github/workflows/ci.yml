@@ -62,6 +62,8 @@ jobs:
         test/integration/joined-leak.test.mjs
         test/integration/large-payload.test.mjs
         test/integration/newtab.test.mjs
+        test/integration/owned-continue.test.mjs
+        test/integration/page-version.test.mjs
         test/integration/private-extension.test.mjs
         test/integration/privileged.test.mjs
         test/integration/rebuild.test.mjs

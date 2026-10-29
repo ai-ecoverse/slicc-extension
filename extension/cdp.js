@@ -1318,7 +1318,19 @@ class Connection {
 
   async admit(tabId, tab, method, params, sessionId) {
     const raw = await readTab(this.api, tabId);
-    const view = (await this.confirmedError(tabId, raw)) ? this.view(raw) : raw;
+    const pause = tab?.paused.get(textOf(params?.requestId));
+    const replying =
+      method === 'Fetch.continueRequest' &&
+      plainContinue(params) &&
+      pause?.method === 'Fetch.requestPaused' &&
+      pause.owner === sessionId &&
+      !pause.claimed &&
+      this.state.sessions.get(sessionId)?.tabId === tabId;
+    const view = replying
+      ? this.view(raw)
+      : (await this.confirmedError(tabId, raw))
+        ? this.view(raw)
+        : raw;
     if (this.held(tab, method, params, sessionId)) {
       try {
         return await demandTab(this.api, view);

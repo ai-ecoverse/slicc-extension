@@ -60,6 +60,7 @@ const onePixel = Buffer.from(
 export async function pages(tls) {
   const html = await readFile(new URL('page/index.html', import.meta.url));
   const probe = await readFile(new URL('page/probe.html', import.meta.url));
+  const version = await readFile(new URL('page/version.html', import.meta.url));
   const frames = await readFile(new URL('page/frames.html', import.meta.url));
   const seen = [];
   const refusedLoads = new Map();
@@ -70,6 +71,8 @@ export async function pages(tls) {
       path: pathname,
       search: searchParams.toString(),
     });
+    if (pathname === '/page-version')
+      return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(version);
     if (pathname.startsWith('/controller/')) {
       request.socket.destroy();
       return;
