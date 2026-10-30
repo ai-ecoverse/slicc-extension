@@ -60,6 +60,7 @@ jobs:
         test/integration/history-restore-live-check.test.mjs
         test/integration/is-main.test.mjs
         test/integration/joined-leak.test.mjs
+        test/integration/late-events-recovery.test.mjs
         test/integration/large-payload.test.mjs
         test/integration/newtab.test.mjs
         test/integration/owned-continue.test.mjs
