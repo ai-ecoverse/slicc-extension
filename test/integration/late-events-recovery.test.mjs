@@ -217,6 +217,36 @@ for (const [name, arrange, afterAttach] of orderings) {
   });
 }
 
+for (const proof of ['null', 'rejected', 'false']) {
+  test(`late recovery: inconclusive detached proof ${proof}`, async () => {
+    const f = fixture();
+    try {
+      const sessionId = await f.start();
+      await f.block();
+      const detached = await f.send('Target.detachFromTarget', { sessionId });
+      assert.equal(detached.error, undefined);
+      const getFrame = f.api.webNavigation.getFrame;
+      f.api.webNavigation.getFrame = async () => {
+        if (proof === 'rejected') throw new Error('frame unavailable');
+        return proof === 'null' ? null : { frameId: 0, url: vault, errorOccurred: false };
+      };
+      const early = await f.send('Target.attachToTarget', { targetId: '7', flatten: true });
+      assert.equal(early.error, refused, 'inconclusive proof refuses this admission');
+      f.api.webNavigation.getFrame = getFrame;
+      const recovery = await f.send('Target.attachToTarget', { targetId: '7', flatten: true });
+      assert.equal(recovery.error, undefined, 'later live error proof still recovers');
+      const navigation = await f.send(
+        'Page.navigate',
+        { url: destination },
+        recovery.result.sessionId
+      );
+      assert.equal(navigation.error, undefined);
+    } finally {
+      f.close();
+    }
+  });
+}
+
 for (const name of [
   'live protected return',
   'unblocked error document',
