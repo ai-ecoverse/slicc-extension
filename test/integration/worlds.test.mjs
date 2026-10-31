@@ -650,8 +650,8 @@ for (const transport of transports) {
       JSON.stringify(run.listed)
     );
     assert.equal(run.reserved.error, 'slicc: refused: that world name is reserved for the guard');
-    assert.equal(run.debug.error, undefined, JSON.stringify(run.debug));
-    assert.equal(run.listener.error, undefined, JSON.stringify(run.listener));
+    assert.equal(run.debug.error, PROTECTED, JSON.stringify(run.debug));
+    assert.equal(run.listener.error, PROTECTED, JSON.stringify(run.listener));
     assert.equal(run.product, 42);
     await page.evaluate((targetId) => h.close(targetId), targetId);
   });
