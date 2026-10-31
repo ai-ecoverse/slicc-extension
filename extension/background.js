@@ -49,32 +49,33 @@ const ims = {
 };
 
 function forbidden(headers) {
-  const requestHeaders = headers
+  return headers
     .filter(([name]) => restored.has(name.toLowerCase()))
     .map(([name, value]) => ({ header: name.toLowerCase(), operation: 'set', value }));
-  if (!requestHeaders.some(({ header }) => header === 'origin')) {
-    requestHeaders.push({ header: 'origin', operation: 'remove' });
-  }
-  return requestHeaders;
+}
+
+function rule(id, priority, urlFilter, requestHeaders) {
+  return {
+    id,
+    priority,
+    condition: { urlFilter, resourceTypes: ['xmlhttprequest'] },
+    action: { type: 'modifyHeaders', requestHeaders },
+  };
 }
 
 async function tag(url, headers) {
   const fragment = `slicc-${crypto.randomUUID()}`;
-  const id = nextRule++;
+  const ids = [nextRule++, nextRule++];
+  const client = forbidden(headers);
+  const addRules = [rule(ids[0], 1, `#${fragment}`, [{ header: 'origin', operation: 'remove' }])];
+  if (client.length > 0) {
+    addRules.push(rule(ids[1], 2, `|${new URL(url).origin}/*#${fragment}`, client));
+  }
   await ready;
-  await dnr.updateSessionRules({
-    addRules: [
-      {
-        id,
-        priority: 1,
-        condition: { urlFilter: `#${fragment}`, resourceTypes: ['xmlhttprequest'] },
-        action: { type: 'modifyHeaders', requestHeaders: forbidden(headers) },
-      },
-    ],
-  });
+  await dnr.updateSessionRules({ addRules });
   return {
     url: `${url.split('#')[0]}#${fragment}`,
-    untag: () => dnr.updateSessionRules({ removeRuleIds: [id] }),
+    untag: () => dnr.updateSessionRules({ removeRuleIds: ids }),
   };
 }
 

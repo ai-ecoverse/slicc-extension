@@ -384,3 +384,119 @@ test('a status the page cannot carry rejects and does not hang', async (t) => {
   const page = await chrome.visit(t, slicc);
   assert.deepEqual(await relay(page, `${remote}/hop?status=600`), { rejected: 'TypeError' });
 });
+
+const client = {
+  cookie: 'session=from-client',
+  origin: 'https://client.example',
+  referer: 'https://client.example/page',
+  'user-agent': 'git/2.47.0',
+};
+
+function sentTo(path) {
+  const [sent, ...rest] = contacted(path);
+  assert.ok(sent, `${path} was contacted`);
+  assert.deepEqual(rest, []);
+  return sent;
+}
+
+function assertClientValues(sent) {
+  assert.equal(sent.headers.cookie, client.cookie);
+  assert.equal(sent.headers.origin, client.origin);
+  assert.equal(sent.headers.referer, client.referer);
+  assert.equal(sent.headers['user-agent'], client['user-agent']);
+}
+
+function assertNoClientValues(sent) {
+  assert.equal(sent.headers.cookie, undefined);
+  assert.equal(sent.headers.referer, undefined);
+  assert.notEqual(sent.headers.origin, client.origin);
+  assert.match(sent.headers['user-agent'], /Chrome/);
+  assert.doesNotMatch(JSON.stringify(sent.headers), /client|chrome-extension|slicc-/);
+}
+
+async function followed(t, first, to, init = {}) {
+  const page = await chrome.visit(t, slicc);
+  const answer = await relay(page, first(to), { headers: client, ...init });
+  assert.equal(answer.status, 200);
+  return sentTo(new URL(to).pathname);
+}
+
+test('a cross-origin hop gets none of the client values', async (t) => {
+  const sent = await followed(t, (to) => hop(302, to), `${next}${unique('cross')}`);
+  assert.equal(sent.headers.host, 'next.test');
+  assertNoClientValues(sent);
+  assert.equal(sent.headers.origin, undefined);
+});
+
+test('a cross-origin 307 keeps its body and gets none of the client values', async (t) => {
+  const sent = await followed(t, (to) => hop(307, to), `${next}${unique('posted')}`, {
+    method: 'POST',
+    body: 'payload',
+  });
+  assert.equal(sent.method, 'POST');
+  assert.equal(atob(sent.body), 'payload');
+  assertNoClientValues(sent);
+  assert.equal(sent.headers.origin, undefined);
+});
+
+test('the same host on another port is another origin', async (t) => {
+  const sent = await followed(
+    t,
+    (to) => hop(302, to),
+    `https://upstream.test:8443${unique('port')}`
+  );
+  assert.equal(sent.headers.host, 'upstream.test:8443');
+  assertNoClientValues(sent);
+  assert.equal(sent.headers.origin, undefined);
+});
+
+test('http to https on the same host is another origin', async (t) => {
+  const sent = await followed(
+    t,
+    (to) => `http://upstream.test/hop?${new URLSearchParams({ status: 302, to })}`,
+    `${remote}${unique('scheme')}`
+  );
+  assertNoClientValues(sent);
+  assert.equal(sent.headers.origin, undefined);
+});
+
+test('a same-origin hop keeps the client values', async (t) => {
+  const marker = unique('first');
+  const sent = await followed(t, (to) => hop(302, to, { marker }), `${remote}${unique('same')}`);
+  assertClientValues(sent);
+  const [first] = chrome.upstream.seen.filter((seen) =>
+    seen.search.includes(encodeURIComponent(marker))
+  );
+  assertClientValues(first);
+});
+
+test('a Location with its own fragment ends with no client values either', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  const path = unique('fragment');
+  const answer = await relay(page, hop(302, `${next}${path}#mine`), { headers: client });
+  assert.equal(answer.status, 200);
+  assert.equal(answer.url, `${next}${path}`);
+  assertNoClientValues(sentTo(path));
+});
+
+test('a follow with no client headers sends no origin and no extension URL', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  for (const to of [`${next}${unique('bare')}`, `${remote}${unique('bare')}`]) {
+    const marker = unique('bare-first');
+    const answer = await relay(page, hop(302, to, { marker }));
+    assert.equal(answer.status, 200);
+    const [first] = chrome.upstream.seen.filter((seen) =>
+      seen.search.includes(encodeURIComponent(marker))
+    );
+    for (const sent of [first, sentTo(new URL(to).pathname)]) {
+      assertNoClientValues(sent);
+      assert.equal(sent.headers.origin, undefined);
+    }
+  }
+});
+
+test('no rule outlives a request that set client values', async (t) => {
+  const page = await chrome.visit(t, slicc);
+  await relay(page, hop(302, `${next}${unique('rules')}`), { headers: client });
+  assert.deepEqual(await leftovers(), [0, 0]);
+});

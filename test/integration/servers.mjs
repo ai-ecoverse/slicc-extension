@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { createServer as createPlainServer } from 'node:http';
 import { createServer } from 'node:https';
 import { join } from 'node:path';
 
@@ -28,7 +29,7 @@ export function certificate(dir) {
 }
 
 function listen(tls, handler) {
-  const server = createServer(tls, handler);
+  const server = tls ? createServer(tls, handler) : createPlainServer(handler);
   const sockets = new Set();
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
@@ -409,7 +410,7 @@ export async function upstream(tls) {
     '/empty': (response) => response.writeHead(204).end(),
     '/stream': (response) => stream(response, progress),
   };
-  const server = await listen(tls, async (request, response) => {
+  const handler = async (request, response) => {
     const { pathname, search } = new URL(request.url, 'https://upstream.test');
     const body = await collect(request);
     seen.push({
@@ -447,8 +448,16 @@ export async function upstream(tls) {
         body: body.toString('base64'),
       })
     );
-  });
-  return { ...server, seen, progress };
+  };
+  const server = await listen(tls, handler);
+  const plain = await listen(undefined, handler);
+  return {
+    ...server,
+    plainPort: plain.port,
+    close: () => Promise.all([server.close(), plain.close()]),
+    seen,
+    progress,
+  };
 }
 
 export async function ims(tls) {
