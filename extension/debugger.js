@@ -38,6 +38,47 @@ export class DebuggerGate {
     this.states = new Map();
   }
 
+  unplaced(tab) {
+    const entries = [...tab.worlds.ids.values()];
+    if (
+      !entries.some(
+        (entry) =>
+          entry.context?.auxData?.isDefault === true &&
+          entry.context.auxData.frameId === tab.mainFrameId
+      )
+    )
+      return true;
+    return entries.some((entry) => {
+      const context = entry.context;
+      const document = tab.documents.contexts.get(context?.id);
+      const frame = tab.documents.frames.get(context?.auxData?.frameId);
+      return (
+        entry.hidden ||
+        !context?.uniqueId ||
+        !document ||
+        !frame ||
+        document.uniqueId !== context.uniqueId ||
+        document.loaderId !== frame.loaderId
+      );
+    });
+  }
+
+  placed(tab, tree) {
+    return [...tab.worlds.ids.values()].every((entry) => {
+      const context = entry.context;
+      const document = tab.documents.contexts.get(context?.id);
+      const frame = frameIn(tree, context?.auxData?.frameId);
+      return (
+        document &&
+        frame &&
+        document.loaderId === frame.loaderId &&
+        typeof context.origin === 'string' &&
+        /^https?:\/\//.test(context.origin) &&
+        !this.connection.protectedOrigin(context.origin)
+      );
+    });
+  }
+
   current(tabId, state) {
     const c = this.connection;
     const tab = c.tabState(tabId);
@@ -50,7 +91,7 @@ export class DebuggerGate {
       !tab.worlds.foreign &&
       tab.pendingFrames.size === 0 &&
       tab.debuggerChildren.size === 0 &&
-      ![...tab.worlds.ids.values()].some((entry) => entry.hidden)
+      !this.unplaced(tab)
     );
   }
 
@@ -59,7 +100,7 @@ export class DebuggerGate {
     const tab = c.tabState(tabId);
     if (tab?.worlds.foreign) throw new Error(PROFILED);
     if (!tab?.pageObserved || tab.pendingFrames.size || tab.debuggerChildren.size) refused();
-    if ([...tab.worlds.ids.values()].some((entry) => entry.hidden)) refused();
+    if (this.unplaced(tab)) refused();
     const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
     const revision = tab.debuggerRevision;
     const [tree, frames] = await bounded(
@@ -81,7 +122,8 @@ export class DebuggerGate {
       tab.worlds.foreign ||
       tab.pendingFrames.size ||
       tab.debuggerChildren.size ||
-      [...tab.worlds.ids.values()].some((entry) => entry.hidden)
+      this.unplaced(tab) ||
+      !this.placed(tab, tree.frameTree)
     )
       refused();
     const pending = [tree.frameTree];
@@ -410,6 +452,7 @@ export class DebuggerGate {
     if (
       state.generation !== generation ||
       state.revision !== tab.debuggerRevision ||
+      this.unplaced(tab) ||
       tab.pendingFrames.size ||
       (state.pause?.published && !this.valid(tabId, state, state.pause))
     ) {

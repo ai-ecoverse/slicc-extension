@@ -1566,6 +1566,7 @@ class Connection {
   async learn(tabId, tab, method, result) {
     tab.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') tab.worlds.seen(result.executionContextId);
+    this.debuggerGate.revoke(tabId);
     if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
       await resolveFrameOrigins(result.frameTree, tab.uncertain ?? new Set(), (id) =>
         this.documentOrigin(tabId, id)

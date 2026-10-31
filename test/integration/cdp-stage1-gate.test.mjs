@@ -84,6 +84,27 @@ test('675 extension live reads require an ordinary published current-generation 
   );
 });
 
+test('675 extension an unplaced isolated world revokes an existing debugger lease', async (t) => {
+  const fixture = await backend();
+  t.after(fixture.close);
+  await fixture.lease();
+  await fixture.emit('Debugger.scriptParsed', ordinaryScript);
+  await fixture.emit('Debugger.paused', ordinaryPause);
+  const isolated = await fixture.command('Page.createIsolatedWorld', {
+    frameId: 'root',
+    worldName: 'ordinary-unplaced',
+  });
+  assert.equal(isolated.result.executionContextId, 999);
+  const before = fixture.calls.length;
+  const reply = await fixture.command('Debugger.enable');
+  assert.match(reply.error ?? '', /slicc: refused:/);
+  assert.equal(
+    fixture.calls.slice(before).some((call) => call.method === 'Debugger.enable'),
+    false
+  );
+  assert.ok(fixture.calls.some((call) => call.method === 'Debugger.resume'));
+});
+
 test('675 extension a committed generation never forwards a stale call-frame evaluation', async (t) => {
   const fixture = await backend();
   t.after(fixture.close);
