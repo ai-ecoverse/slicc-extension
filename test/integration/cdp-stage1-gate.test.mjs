@@ -81,6 +81,55 @@ test('675 extension live reads require an ordinary published current-generation 
   );
 });
 
+test('675 extension converts a newly committed pending document before live verification', async (t) => {
+  const fixture = await backend();
+  t.after(fixture.close);
+  await fixture.lease();
+  await fixture.commit();
+  await fixture.emit('Page.frameStartedLoading', { frameId: 'root' });
+  const gate = fixture.connection.debuggerGate;
+  const state = gate.states.get(11);
+  assert.equal(state.generation, 'next-document');
+  assert.equal(gate.current(11, state), false);
+  await fixture.emit('Runtime.executionContextCreated', {
+    context: {
+      id: 1,
+      uniqueId: 'next-context',
+      origin: 'https://ordinary.test',
+      auxData: { isDefault: true, frameId: 'root' },
+    },
+  });
+  await fixture.emit('Debugger.scriptParsed', ordinaryScript);
+  const before = fixture.calls.length;
+  await fixture.emit('Debugger.paused', { reason: 'instrumentation', callFrames: [] });
+  assert.equal(
+    fixture.calls.slice(before).filter((call) => call.method === 'Debugger.pause').length,
+    1
+  );
+  assert.equal(
+    fixture.calls.slice(before).filter((call) => call.method === 'Debugger.resume').length,
+    1
+  );
+  assert.equal(
+    fixture.calls.slice(before).some((call) => call.method === 'Page.getFrameTree'),
+    false
+  );
+  assert.equal(
+    fixture.messages.some((message) => message.method?.startsWith('Debugger.')),
+    false
+  );
+  assert.equal(state.pause.converted, true);
+  const deadline = state.pause.deadline;
+  await fixture.emit('Debugger.resumed', {});
+  await fixture.emit('Page.frameStoppedLoading', { frameId: 'root' });
+  await fixture.emit('Debugger.paused', ordinaryPause);
+  assert.equal(
+    fixture.messages.filter((message) => message.method === 'Debugger.paused').length,
+    1
+  );
+  assert.equal(state.pause.deadline, deadline);
+});
+
 test('675 extension an unplaced isolated world revokes an existing debugger lease', async (t) => {
   const fixture = await backend();
   t.after(fixture.close);

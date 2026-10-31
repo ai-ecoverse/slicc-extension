@@ -95,6 +95,31 @@ export class DebuggerGate {
     );
   }
 
+  convertible(tabId, state) {
+    const c = this.connection;
+    const tab = c.tabState(tabId);
+    return (
+      state?.enabled &&
+      !c.closed &&
+      this.states.get(tabId) === state &&
+      c.state.sessions.get(state.owner)?.tabId === tabId &&
+      tab?.documents.frames.get(tab.mainFrameId)?.loaderId === state.generation &&
+      tab.debuggerRevision === state.revision &&
+      !tab.worlds.foreign &&
+      tab.debuggerChildren.size === 0 &&
+      ![...tab.frames.values()].some(Boolean) &&
+      ![...tab.worlds.ids.values()].some((entry) => entry.hidden) &&
+      ![...tab.documents.frames.values()].some(
+        (frame) =>
+          c.protectedOrigin(frame.url) ||
+          c.protectedOrigin(frame.securityOrigin) ||
+          frame.errorOccurred ||
+          frame.unreachableUrl ||
+          frame.url?.startsWith('chrome-error:')
+      )
+    );
+  }
+
   async proof(tabId, state) {
     const c = this.connection;
     const tab = c.tabState(tabId);
@@ -267,9 +292,18 @@ export class DebuggerGate {
 
   script(tabId, state, method, params) {
     const c = this.connection;
-    if (!state || !this.current(tabId, state) || c.mentions(params)) return;
-    const context = c.tabState(tabId)?.worlds.ids.get(params.executionContextId)?.context;
-    if (!this.context(tabId, state, params.executionContextId, context?.uniqueId)) return;
+    if (!this.convertible(tabId, state) || c.mentions(params)) return;
+    const tab = c.tabState(tabId);
+    const context = tab.worlds.ids.get(params.executionContextId)?.context;
+    const document = tab.documents.contexts.get(params.executionContextId);
+    if (
+      !context?.uniqueId ||
+      context.auxData?.isDefault !== true ||
+      context.auxData.frameId !== tab.mainFrameId ||
+      document?.loaderId !== state.generation ||
+      document.uniqueId !== context.uniqueId
+    )
+      return;
     if (
       typeof params.scriptId !== 'string' ||
       !params.scriptId ||
@@ -326,7 +360,7 @@ export class DebuggerGate {
     if (pause.converted || !state.breakpoints.size) refused();
     pause.converted = true;
     await bounded(this.connection.send(tabId, 'Debugger.pause', {}));
-    if (!this.current(tabId, state) || state.pause !== pause || Date.now() >= pause.deadline)
+    if (!this.convertible(tabId, state) || state.pause !== pause || Date.now() >= pause.deadline)
       refused();
     await bounded(this.connection.send(tabId, 'Debugger.resume', {}));
   }
@@ -337,11 +371,16 @@ export class DebuggerGate {
     else await this.resume(tabId, state, true);
   }
 
+  pauseEligible(tabId, state, reason) {
+    return (
+      this.convertible(tabId, state) && (reason === 'instrumentation' || this.current(tabId, state))
+    );
+  }
+
   async paused(tabId, state, params) {
     const c = this.connection;
     if (
-      !state?.enabled ||
-      !this.current(tabId, state) ||
+      !this.pauseEligible(tabId, state, params.reason) ||
       c.mentions(params) ||
       JSON.stringify(params).length > 1048576
     ) {
@@ -374,13 +413,13 @@ export class DebuggerGate {
           revision: state.revision,
         })
       );
-      await this.proof(tabId, state);
       if (state.pause !== pause || Date.now() >= pause.deadline) refused();
       if (params.reason === 'instrumentation') {
         await this.convert(tabId, state, pause);
         return;
       }
       pause.verifying = true;
+      await this.proof(tabId, state);
       if (!Array.isArray(params.callFrames) || params.callFrames.length === 0) refused();
       const scripts = [];
       for (const frame of params.callFrames) {
@@ -438,7 +477,16 @@ export class DebuggerGate {
       this.connection.closed ||
       tab.worlds.foreign ||
       tab.debuggerChildren.size ||
-      [...tab.worlds.ids.values()].some((entry) => entry.hidden)
+      [...tab.frames.values()].some(Boolean) ||
+      [...tab.worlds.ids.values()].some((entry) => entry.hidden) ||
+      [...tab.documents.frames.values()].some(
+        (frame) =>
+          this.connection.protectedOrigin(frame.url) ||
+          this.connection.protectedOrigin(frame.securityOrigin) ||
+          frame.errorOccurred ||
+          frame.unreachableUrl ||
+          frame.url?.startsWith('chrome-error:')
+      )
     ) {
       void this.drop(tabId);
       return;
@@ -447,15 +495,13 @@ export class DebuggerGate {
     if (
       state.generation !== generation ||
       state.revision !== tab.debuggerRevision ||
-      this.unplaced(tab) ||
-      tab.pendingFrames.size ||
       (state.pause?.published && !this.valid(tabId, state, state.pause))
     ) {
       if (state.pause?.converted && !state.pause.published) {
         void this.drop(tabId);
         return;
       }
-      void this.resume(tabId, state);
+      if (state.pause) void this.resume(tabId, state);
       state.scripts.clear();
       state.resuming = null;
       state.generation = generation;
