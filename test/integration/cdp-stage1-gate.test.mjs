@@ -44,20 +44,17 @@ test('675 extension live reads require an ordinary published current-generation 
     fixture.messages.filter((message) => message.method === 'Debugger.paused').length,
     1
   );
-  assert.equal(
-    (await fixture.command('Debugger.getScriptSource', { scriptId: 'ordinary-script' })).result
-      .scriptSource,
-    'ordinary source'
-  );
-  assert.equal(
-    (
-      await fixture.command('Debugger.evaluateOnCallFrame', {
-        callFrameId: '1.1.0',
-        expression: '40 + 2',
-      })
-    ).result.result.value,
-    42
-  );
+  const published = fixture.calls.length;
+  for (const [method, params] of [
+    ['Debugger.getScriptSource', { scriptId: 'ordinary-script' }],
+    ['Debugger.evaluateOnCallFrame', { callFrameId: '1.1.0', expression: '40 + 2' }],
+  ]) {
+    assert.match((await fixture.command(method, params)).error ?? '', /slicc: refused:/);
+    assert.equal(
+      fixture.calls.slice(published).some((call) => call.method === method),
+      false
+    );
+  }
   const before = fixture.calls.length;
   assert.match(
     (await fixture.command('Debugger.getScriptSource', { scriptId: 'unplaced-script' })).error,
