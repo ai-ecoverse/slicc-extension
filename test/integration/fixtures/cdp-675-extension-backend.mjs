@@ -53,10 +53,21 @@ export async function backend() {
       detach: async () => calls.push({ method: 'detach' }),
       sendCommand: async (source, method, params) => {
         calls.push({ source, method, params });
+        if (method === 'Runtime.enable') {
+          await api.debugger.onEvent.emit({ tabId: 11 }, 'Runtime.executionContextCreated', {
+            context: {
+              id: 1,
+              uniqueId: 'ordinary-context',
+              origin: frame.securityOrigin,
+              auxData: { isDefault: true, frameId: 'root' },
+            },
+          });
+        }
         if (method === 'Page.getFrameTree') {
           if (stall) return new Promise(() => {});
           return { frameTree: { frame: { ...frame } } };
         }
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 999 };
         if (method === 'Debugger.setInstrumentationBreakpoint')
           return { breakpointId: 'instrumentation' };
         if (method === 'Debugger.getScriptSource') return { scriptSource: 'ordinary source' };
