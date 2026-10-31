@@ -5,7 +5,8 @@ Chrome MV3 extension that serves both six (the hosted leader tab on `www.sliccy.
 ## Seven — CORS lifting and relay
 
 1. **Rules.** A static `declarativeNetRequest` rule ([`extension/rules.json`](extension/rules.json)) adds `Access-Control-Allow-Origin: *`, `-Methods: *`, `-Headers: *, authorization` and `-Expose-Headers: *` to every `fetch`/XHR response, preflights included, of requests that a page on `sliccy.ai` or a subdomain starts.
-2. **The relay.** `globalThis.sliccExtension.fetch` sends the request from the extension's service worker, which CORS doesn't apply to. That covers preflights the upstream answers with a non-2xx status and the request headers a page can't send.
+2. **The relay.** `globalThis.sliccExtension.fetch` sends the request from the extension's service worker, which CORS doesn't apply to. That covers preflights the upstream answers with a non-2xx status and the request headers a page can't send. It always omits credentials.
+3. **Redirects.** `sliccExtension.fetch(url, { redirect })` takes the three `fetch` modes. `follow`, the default, follows redirects and sets `response.url` and `response.redirected`. `error` rejects on any redirect. `manual` takes exactly one hop and resolves with the real 3xx status, its headers and an empty body. The worker's own `fetch` only gets an opaque response there, so it reads the head from `chrome.webRequest`; if that head can't be observed or is ambiguous, `manual` rejects with a `TypeError`. Responses that aren't redirects pass through as usual. Any other mode rejects with a `TypeError` before anything is sent.
 
 ## Seven — Chrome debugger
 
@@ -84,7 +85,7 @@ Releases roll forward only. Before publishing, `scripts/check-six-floor.mjs` ref
 | `tabGroups`                           | Six     | Tab group management for leader tab                     |
 | `identity`                            | Both    | Adobe IMS sign-in via launchWebAuthFlow                 |
 | `storage`                             | Six     | Secrets storage in chrome.storage.local                 |
-| `webRequest`                          | Six     | Handoff Link header observation, discovery              |
+| `webRequest`                          | Both    | Handoff Link headers, discovery, relay redirect heads   |
 | `declarativeNetRequestWithHostAccess` | Both    | Static CORS rules + session rules for forbidden headers |
 | `notifications`                       | Six     | Handoff notification toasts                             |
 | `sidePanel`                           | Six     | Cherry follower side panel                              |

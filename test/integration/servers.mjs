@@ -412,9 +412,30 @@ export async function upstream(tls) {
   const server = await listen(tls, async (request, response) => {
     const { pathname, search } = new URL(request.url, 'https://upstream.test');
     const body = await collect(request);
-    seen.push({ method: request.method, path: pathname, search, headers: request.headers });
+    seen.push({
+      method: request.method,
+      path: pathname,
+      search,
+      headers: request.headers,
+      body: body.toString('base64'),
+    });
     if (request.method === 'OPTIONS') {
       return response.writeHead(pathname.startsWith('/strict/') ? 405 : 204).end();
+    }
+    if (pathname === '/hop') {
+      const params = new URLSearchParams(search);
+      const to = params.getAll('to');
+      const delay = Number(params.get('delay') ?? 0);
+      const headers = {
+        'content-type': 'text/plain',
+        'set-cookie': 'hop=secret; Secure; SameSite=None',
+        'x-hop': 'seen',
+        ...(params.has('cache') ? { 'cache-control': params.get('cache') } : {}),
+        ...(to.length === 0 ? {} : { location: to.length === 1 ? to[0] : to }),
+      };
+      const answer = () =>
+        response.writeHead(Number(params.get('status') ?? 302), headers).end('hop body');
+      return delay ? setTimeout(answer, delay) : answer();
     }
     const route = routes[pathname];
     if (route) return route(response);
