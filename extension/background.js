@@ -25,7 +25,10 @@ if (typeof Uint8Array.fromBase64 !== 'function') {
 }
 
 import { listen, trusted } from './cdp.js';
+import { debuggerRescue } from './debugger-rescue.js';
 import './six-sw.js';
+
+void debuggerRescue(chrome).ready.catch(() => undefined);
 
 try {
   chrome.storage?.local

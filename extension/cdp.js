@@ -9,6 +9,7 @@ if (typeof URL.canParse !== 'function') {
   };
 }
 
+import { DebuggerGate, debuggerDomain } from './debugger.js';
 import { protectedOrigins } from './protected.mjs';
 import { protectedRules } from './protected-rules.js';
 import { seven } from './seven.js';
@@ -413,6 +414,7 @@ class Connection {
       counter: 0,
     };
     this.closed = false;
+    this.debuggerGate = new DebuggerGate(this);
     this.chain = Promise.resolve();
     this.pending = Promise.resolve();
     this.onEvent = this.onEvent.bind(this);
@@ -422,6 +424,7 @@ class Connection {
     this.onRemoved = this.onRemoved.bind(this);
     this.onSource = this.onSource.bind(this);
     this.onFrames = this.onFrames.bind(this);
+    this.onCommit = this.onCommit.bind(this);
     this.shutdown = this.shutdown.bind(this);
     api.debugger.onEvent.addListener(this.onEvent);
     api.debugger.onDetach.addListener(this.onDetach);
@@ -430,6 +433,7 @@ class Connection {
     api.tabs.onRemoved?.addListener(this.onRemoved);
     api.webNavigation?.onCreatedNavigationTarget?.addListener(this.onSource);
     for (const name of FRAME_EVENTS) api.webNavigation?.[name]?.addListener(this.onFrames);
+    api.webNavigation?.onCommitted?.addListener(this.onCommit);
     port.onDisconnect.addListener(this.shutdown);
   }
 
@@ -531,6 +535,7 @@ class Connection {
   }
 
   forget(tabId) {
+    void this.debuggerGate.drop(tabId);
     this.drop(tabId);
     const tab = this.tabState(tabId);
     if (tab) for (const sessionId of tab.sessions) this.state.sessions.delete(sessionId);
@@ -815,6 +820,8 @@ class Connection {
         reroutes: new Map(),
         paused: new Map(),
         epoch: 0,
+        debuggerChildren: new Set(),
+        debuggerRevision: 0,
         wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
       this.state.tabs.set(tabId, tab);
@@ -900,6 +907,7 @@ class Connection {
     if (!session) return {};
     const { tabId } = session;
     const tab = this.tabState(tabId);
+    await this.debuggerGate.drop(tabId, sessionId);
     this.state.sessions.delete(sessionId);
     tab?.sessions.delete(sessionId);
     tab?.runtime.delete(sessionId);
@@ -1558,6 +1566,7 @@ class Connection {
   async learn(tabId, tab, method, result) {
     tab.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') tab.worlds.seen(result.executionContextId);
+    this.debuggerGate.revoke(tabId);
     if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
       await resolveFrameOrigins(result.frameTree, tab.uncertain ?? new Set(), (id) =>
         this.documentOrigin(tabId, id)
@@ -1604,6 +1613,11 @@ class Connection {
       case 'Browser.getVersion':
         return version();
       default:
+        if (debuggerDomain(message.method)) {
+          const { tabId } = this.sessionOf(message.sessionId);
+          this.checkParams(message.method, params, this.tabState(tabId));
+          return this.debuggerGate.command(tabId, message.sessionId, message.method, params);
+        }
         return this.sessionCommand(
           message,
           message.method === 'Runtime.addBinding' ? scopedBinding(params) : params
@@ -1748,6 +1762,13 @@ class Connection {
   }
 
   watchChild(tabId, method, p) {
+    const tab = this.tabState(tabId);
+    const child = textOf(p.sessionId) || textOf(p.targetInfo?.targetId);
+    if (method === 'Target.detachedFromTarget') tab?.debuggerChildren.delete(child);
+    if (method === 'Target.attachedToTarget' || method === 'Target.targetInfoChanged') {
+      tab?.debuggerChildren.add(child);
+      this.debuggerGate.revoke(tabId);
+    }
     const url = textOf(p.targetInfo?.url);
     const hidden = urlProtected(guard, url) || uiType(p.targetInfo?.type);
     if (method === 'Target.attachedToTarget') {
@@ -1947,7 +1968,13 @@ class Connection {
     }
     if (tab.wake.hides(method, p)) return;
     if (this.hop(tabId, tab, method, p)) return;
-    if (this.watch(tabId, tab, method, p)) return;
+    const watched = this.watch(tabId, tab, method, p);
+    this.debuggerGate.revoke(tabId);
+    if (debuggerDomain(method)) {
+      await this.debuggerGate.event(tabId, method, p);
+      return;
+    }
+    if (watched) return;
     if (profiled(method) && tab.worlds.foreign) return;
     if (tab.worlds.hides(p)) return;
     if (this.frameProtected(tab, p.frameId)) return;
@@ -1997,6 +2024,13 @@ class Connection {
   onCreated(tab) {
     void this.keepFront(tab?.id, tab?.openerTabId).catch(() => undefined);
     void this.announce(tab, true).catch(() => undefined);
+  }
+
+  onCommit(details) {
+    const tab = this.tabState(details?.tabId);
+    if (!tab) return;
+    tab.debuggerRevision += 1;
+    this.debuggerGate.revoke(details.tabId);
   }
 
   onFrames(details) {
@@ -2084,10 +2118,12 @@ class Connection {
     this.api.tabs.onRemoved?.removeListener(this.onRemoved);
     this.api.webNavigation?.onCreatedNavigationTarget?.removeListener(this.onSource);
     for (const name of FRAME_EVENTS) this.api.webNavigation?.[name]?.removeListener(this.onFrames);
+    this.api.webNavigation?.onCommitted?.removeListener(this.onCommit);
     const owned = [...this.state.ownedTabs];
     for (const tabId of [...this.state.inflight.keys()]) this.drop(tabId);
     this.state.ownedTabs.clear();
     this.state.sessions.clear();
+    for (const tabId of this.state.tabs.keys()) void this.debuggerGate.drop(tabId);
     this.state.tabs.clear();
     for (const tabId of owned) this.api.debugger.detach({ tabId }).catch(() => undefined);
   }
