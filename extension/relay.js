@@ -84,7 +84,13 @@ function serve(page) {
       if (open.delete(id)) page.postMessage({ id, error: 'slicc-extension: relay disconnected' });
     });
     const body = data.body ? new Uint8Array(data.body).toBase64() : undefined;
-    worker.postMessage({ url: data.url, method: data.method, headers: data.headers, body });
+    worker.postMessage({
+      url: data.url,
+      method: data.method,
+      headers: data.headers,
+      body,
+      redirect: data.redirect,
+    });
   };
 }
 

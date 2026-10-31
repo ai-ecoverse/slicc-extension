@@ -35,6 +35,10 @@ try {
 
 const dnr = chrome.declarativeNetRequest;
 const restored = new Set(['cookie', 'origin', 'referer', 'user-agent']);
+const redirects = new Set([301, 302, 303, 307, 308]);
+const unexposed = new Set(['set-cookie', 'set-cookie2']);
+const hopWait = 5000;
+const watched = new Map();
 const ready = dnr
   .getSessionRules()
   .then((rules) => dnr.updateSessionRules({ removeRuleIds: rules.map(({ id }) => id) }));
@@ -45,33 +49,91 @@ const ims = {
 };
 
 function forbidden(headers) {
-  const requestHeaders = headers
+  return headers
     .filter(([name]) => restored.has(name.toLowerCase()))
     .map(([name, value]) => ({ header: name.toLowerCase(), operation: 'set', value }));
-  if (!requestHeaders.some(({ header }) => header === 'origin')) {
-    requestHeaders.push({ header: 'origin', operation: 'remove' });
-  }
-  return requestHeaders;
+}
+
+function rule(id, priority, urlFilter, requestHeaders) {
+  return {
+    id,
+    priority,
+    condition: { urlFilter, resourceTypes: ['xmlhttprequest'] },
+    action: { type: 'modifyHeaders', requestHeaders },
+  };
 }
 
 async function tag(url, headers) {
   const fragment = `slicc-${crypto.randomUUID()}`;
-  const id = nextRule++;
+  const ids = [nextRule++, nextRule++];
+  const client = forbidden(headers);
+  const addRules = [rule(ids[0], 1, `#${fragment}`, [{ header: 'origin', operation: 'remove' }])];
+  if (client.length > 0) {
+    addRules.push(rule(ids[1], 2, `|${new URL(url).origin}/*#${fragment}`, client));
+  }
   await ready;
-  await dnr.updateSessionRules({
-    addRules: [
-      {
-        id,
-        priority: 1,
-        condition: { urlFilter: `#${fragment}`, resourceTypes: ['xmlhttprequest'] },
-        action: { type: 'modifyHeaders', requestHeaders: forbidden(headers) },
-      },
-    ],
-  });
+  await dnr.updateSessionRules({ addRules });
   return {
     url: `${url.split('#')[0]}#${fragment}`,
-    untag: () => dnr.updateSessionRules({ removeRuleIds: [id] }),
+    untag: () => dnr.updateSessionRules({ removeRuleIds: ids }),
   };
+}
+
+chrome.webRequest.onHeadersReceived.addListener(
+  (details) => watched.get(details.url)?.(details),
+  { urls: ['<all_urls>'], types: ['xmlhttprequest', 'other'], tabId: -1 },
+  ['responseHeaders', 'extraHeaders']
+);
+
+function watch(url) {
+  const heads = [];
+  let wake;
+  const arrived = new Promise((resolve) => {
+    wake = resolve;
+  });
+  watched.set(url, (details) => {
+    heads.push(details);
+    wake();
+  });
+  return { heads, arrived };
+}
+
+function expired(signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) resolve();
+    signal.addEventListener('abort', resolve, { once: true });
+  });
+}
+
+function byteString({ value, binaryValue }) {
+  const bytes = binaryValue ?? new TextEncoder().encode(value);
+  return Array.from(bytes, (byte) => String.fromCharCode(byte)).join('');
+}
+
+async function hop({ heads, arrived }, signal) {
+  await Promise.race([arrived, expired(AbortSignal.any([signal, AbortSignal.timeout(hopWait)]))]);
+  signal.throwIfAborted();
+  const [head] = heads;
+  const headers = (head?.responseHeaders ?? [])
+    .filter(({ name }) => !unexposed.has(name.toLowerCase()))
+    .map((header) => [header.name.toLowerCase(), byteString(header)]);
+  const locations = headers.filter(([name]) => name === 'location');
+  if (heads.length !== 1 || !redirects.has(head.statusCode) || locations.length > 1) {
+    throw new TypeError('slicc-extension: the redirect could not be observed');
+  }
+  return {
+    status: head.statusCode,
+    statusText: /^HTTP\/\S+\s+\d{3}\s*(.*)$/.exec(head.statusLine)?.[1].trim() ?? '',
+    headers,
+  };
+}
+
+function exposed(response) {
+  const headers = [];
+  response.headers.forEach((value, name) => {
+    headers.push([name, value]);
+  });
+  return { status: response.status, statusText: response.statusText, headers };
 }
 
 async function send(request, signal) {
@@ -80,27 +142,27 @@ async function send(request, signal) {
     throw new TypeError(`slicc-extension: cannot fetch ${url.protocol} URLs`);
   }
   const tagged = await tag(url.href, request.headers);
+  const seen = watch(tagged.url);
   try {
-    return await fetch(tagged.url, {
+    const response = await fetch(tagged.url, {
       method: request.method,
       headers: request.headers,
       body: request.body === undefined ? undefined : Uint8Array.fromBase64(request.body),
       credentials: 'omit',
-      redirect: 'follow',
+      redirect: request.redirect,
       signal,
     });
+    const opaque = response.type === 'opaqueredirect';
+    return { response, head: opaque ? await hop(seen, signal) : exposed(response) };
   } finally {
+    watched.delete(tagged.url);
     await tagged.untag();
   }
 }
 
 async function relay(port, request, signal) {
-  const response = await send(request, signal);
-  const headers = [];
-  response.headers.forEach((value, name) => {
-    headers.push([name, value]);
-  });
-  port.postMessage({ status: response.status, statusText: response.statusText, headers });
+  const { response, head } = await send(request, signal);
+  port.postMessage({ ...head, url: response.url, redirected: response.redirected });
   return response.body?.getReader();
 }
 

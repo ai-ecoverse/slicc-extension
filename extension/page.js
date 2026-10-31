@@ -15,6 +15,7 @@
   const pending = new Map();
   const listeners = new Set();
   const bodiless = new Set([101, 103, 204, 205, 304]);
+  const modes = ['follow', 'error', 'manual'];
   let next = 0;
 
   function deliver(message) {
@@ -68,8 +69,24 @@
     signal?.addEventListener('abort', abort, { once: true });
     open.set(id, (message) => {
       if (message.status !== undefined) {
-        const { status, statusText, headers } = message;
-        resolve(new Response(bodiless.has(status) ? null : body, { status, statusText, headers }));
+        const { status, statusText, headers, url, redirected } = message;
+        try {
+          const response = new Response(bodiless.has(status) ? null : body, {
+            status,
+            statusText,
+            headers,
+          });
+          resolve(
+            Object.defineProperties(response, {
+              url: { value: url },
+              redirected: { value: redirected },
+            })
+          );
+        } catch (error) {
+          stop();
+          signal?.removeEventListener('abort', abort);
+          reject(new TypeError(error.message));
+        }
         return;
       }
       pulled();
@@ -90,6 +107,10 @@
   }
 
   async function relayFetch(input, init = {}) {
+    const { redirect = 'follow' } = init;
+    if (!modes.includes(redirect)) {
+      throw new TypeError('slicc-extension: unknown redirect mode');
+    }
     init.signal?.throwIfAborted();
     const url = new URL(input, location.href).href;
     const method = init.method ?? 'GET';
@@ -105,7 +126,10 @@
     const id = ++next;
     return new Promise((resolve, reject) => {
       receive(id, init.signal, resolve, reject);
-      port1.postMessage({ id, url, method, headers: [...headers], body }, body ? [body] : []);
+      port1.postMessage(
+        { id, url, method, headers: [...headers], body, redirect },
+        body ? [body] : []
+      );
     });
   }
 
