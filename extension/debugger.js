@@ -222,7 +222,7 @@ export class DebuggerGate {
 
   async command(tabId, owner, method, params) {
     const lifetime = debuggerLifetimes.get(method);
-    if (!lifetime) refused();
+    if (!lifetime || lifetime === 'document') refused();
     const c = this.connection;
     const generation = await this.proof(tabId);
     const state =
@@ -238,7 +238,7 @@ export class DebuggerGate {
     )
       refused();
     const pause = state.pause;
-    if (lifetime === 'document' || lifetime === 'pause-control') {
+    if (lifetime === 'pause-control') {
       if (!this.valid(tabId, state, pause) || !this.ids(tabId, state, pause, params)) refused();
     }
     if (method === 'Debugger.removeBreakpoint' && !state.breakpoints.has(params.breakpointId))
@@ -252,11 +252,6 @@ export class DebuggerGate {
       result = (await bounded(c.send(tabId, method, params))) ?? {};
       await this.proof(tabId, state);
       if (method === 'Debugger.enable') state.enabled = true;
-      if (
-        lifetime === 'document' &&
-        (!this.valid(tabId, state, pause) || !this.ids(tabId, state, pause, result))
-      )
-        refused();
       if (method === 'Debugger.setInstrumentationBreakpoint') {
         if (typeof result.breakpointId !== 'string' || !result.breakpointId) refused();
         state.breakpoints.add(result.breakpointId);
