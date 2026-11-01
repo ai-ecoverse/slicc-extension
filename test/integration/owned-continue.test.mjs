@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { install } from './client.mjs';
 import { extId } from './extension-page.mjs';
+import { continueGate } from './owned-continue-gate.mjs';
 
 const entries = {
   seven: 'https://seven.sliccy.ai/',
@@ -31,18 +32,7 @@ async function prepare(paths) {
   await writeFile(
     backgroundPath,
     `${background}
-const continueSend = chrome.debugger.sendCommand.bind(chrome.debugger);
-chrome.debugger.sendCommand = async (target, method, params) => {
-  const gate = globalThis.__continueGate;
-  if (gate?.tabId === target.tabId) {
-    if (method === 'Page.getFrameTree') {
-      gate.trees += 1;
-      throw new Error('renderer unavailable during request pause');
-    }
-    if (method.startsWith('Fetch.')) gate.forwarded.push(method);
-  }
-  return continueSend(target, method, params);
-};`
+chrome.debugger.sendCommand = (${continueGate.toString()})(chrome.debugger.sendCommand.bind(chrome.debugger));`
   );
 }
 
@@ -135,7 +125,7 @@ const rejected = [
 ];
 
 async function row(t, chrome, sw, site, transport, gate) {
-  const [name, method, params, kind] = gate;
+  const [name, method, params, kind, probe] = gate;
   const page = await chrome.visit(t, entries[transport]);
   await page.evaluate(install, transport, extId);
   const opened = await page.evaluate((url) => h.open(url), `${site.url}/seed`);
@@ -227,7 +217,21 @@ async function row(t, chrome, sw, site, transport, gate) {
       })()`);
       assert.equal(claimed, opened.sessionId);
     }
-    await sw.evaluate(`globalThis.__continueGate = {tabId:${tabId}, trees:0, forwarded:[]}; true`);
+    if (probe) {
+      const history = await sw.evaluate(`(async () => {
+        let timer;
+        try {
+          return await Promise.race([
+            chrome.debugger.sendCommand({tabId:${tabId}}, 'Page.getNavigationHistory', {}),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('history waited on a paused renderer')), 1000); })
+          ]);
+        } finally { clearTimeout(timer); }
+      })()`);
+      assert.equal(history.entries[history.currentIndex].url, site.protectedUrl);
+    }
+    await sw.evaluate(
+      `globalThis.__continueGate = {tabId:${tabId}, requestId:${JSON.stringify(pause.params.requestId)}, trees:0, afterTrees:0, continued:false, forwarded:[]}; true`
+    );
     const answer = await send(
       method,
       { requestId: pause.params.requestId, ...params },
@@ -237,7 +241,8 @@ async function row(t, chrome, sw, site, transport, gate) {
     await sw.evaluate('delete globalThis.__continueGate; true');
     if (name === 'plain owner continue') {
       assert.equal(answer.error, undefined, 'owned continuation answers');
-      assert.equal(observed.trees, 0, 'no renderer tree needed');
+      assert.equal(observed.trees, 0, 'no renderer tree before owned continue is forwarded');
+      assert.equal(observed.continued, true, 'the matching request was forwarded');
       assert.deepEqual(observed.forwarded, ['Fetch.continueRequest']);
       const navigation = await page.evaluate(() => globalThis.__continueNavigation);
       assert.equal(navigation.error, undefined, 'navigation answers');
@@ -271,6 +276,50 @@ async function row(t, chrome, sw, site, transport, gate) {
   }
 }
 
+test('the renderer exclusion ends only when the matching continuation is forwarded', async (t) => {
+  const gate = {
+    tabId: 1,
+    requestId: 'owned',
+    trees: 0,
+    afterTrees: 0,
+    continued: false,
+    forwarded: [],
+  };
+  globalThis.__continueGate = gate;
+  t.after(() => {
+    delete globalThis.__continueGate;
+  });
+  let release;
+  const calls = [];
+  const send = continueGate(async (target, method, params) => {
+    calls.push({ target, method, params });
+    if (method === 'Fetch.continueRequest' && params.requestId === 'owned') {
+      await new Promise((resolve) => {
+        release = resolve;
+      });
+    }
+    return {};
+  });
+  await assert.rejects(send({ tabId: 1 }, 'Page.getFrameTree', {}), /renderer unavailable/);
+  await send({ tabId: 2 }, 'Page.getFrameTree', {});
+  await send({ tabId: 1 }, 'Fetch.continueRequest', { requestId: 'other' });
+  assert.equal(gate.continued, false);
+  await assert.rejects(send({ tabId: 1 }, 'Page.getFrameTree', {}), /renderer unavailable/);
+  assert.equal(gate.trees, 2);
+  const continuing = send({ tabId: 1 }, 'Fetch.continueRequest', { requestId: 'owned' });
+  assert.equal(gate.continued, true);
+  assert.equal(typeof release, 'function');
+  assert.deepEqual(await send({ tabId: 1 }, 'Page.getFrameTree', {}), {});
+  assert.equal(gate.trees, 2);
+  assert.equal(gate.afterTrees, 1);
+  assert.equal(
+    calls.filter((call) => call.target.tabId === 1 && call.method === 'Page.getFrameTree').length,
+    1
+  );
+  release();
+  await continuing;
+});
+
 test('an owned request can release an ordinary navigation', { timeout: 180000 }, async (t) => {
   process.env.SLICC_CDP_PORTS = '9300-9309';
   const site = await fixture();
@@ -284,6 +333,34 @@ test('an owned request can release an ordinary navigation', { timeout: 180000 },
       if (transport === 'seven') gates.push(...rejected);
       for (const gate of gates)
         await t.test(`${transport} ${gate[0]}`, (t) => row(t, chrome, sw, site, transport, gate));
+    }
+  } finally {
+    await sw?.close();
+    await chrome?.close();
+    await site.close();
+  }
+});
+
+test('browser history answers while an owned navigation remains paused', {
+  timeout: 180000,
+}, async (t) => {
+  process.env.SLICC_CDP_PORTS = '9300-9309';
+  const site = await fixture();
+  let chrome;
+  let sw;
+  try {
+    chrome = await launch({ prepare });
+    sw = await worker(chrome);
+    for (const transport of ['seven', 'six-bridge']) {
+      await t.test(transport, (t) =>
+        row(t, chrome, sw, site, transport, [
+          'plain owner continue',
+          'Fetch.continueRequest',
+          {},
+          undefined,
+          true,
+        ])
+      );
     }
   } finally {
     await sw?.close();

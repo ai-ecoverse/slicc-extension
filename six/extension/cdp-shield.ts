@@ -1931,17 +1931,86 @@ export class TabShield {
     );
   }
 
+  private retryReady(): boolean {
+    return (
+      !this.blockedFlag &&
+      this.frames.get(this.mainFrameId)?.[0] !== ERROR_PAGE &&
+      this.pendingFrames.size === 0 &&
+      this.startedFrames.size === 0
+    );
+  }
+
+  private commitMismatch(tab: ChromeTab, historyUrl?: string): boolean {
+    const committed = this.frames.get(this.mainFrameId)?.[0];
+    if (committed === tab.url && isProtectedUrl(tab.url)) return false;
+    const pending = historyUrl || tab.pendingUrl;
+    return Boolean(committed && (committed !== tab.url || (pending && committed !== pending)));
+  }
+
+  private async retryShown(error: unknown): Promise<ChromeTab> {
+    const deadline = Date.now() + 250;
+    const check = () => {
+      if (!this.retryReady() || Date.now() >= deadline) throw error;
+    };
+    const work = async () => {
+      for (;;) {
+        check();
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, Math.min(10, deadline - Date.now()))
+        );
+        check();
+        const fresh = await this.readLive();
+        check();
+        let historyUrl: string | undefined;
+        try {
+          this.refuseShown(fresh, await this.openerState(fresh));
+          await this.protectedHistory((url) => {
+            historyUrl = url;
+          });
+          check();
+          return fresh;
+        } catch (next) {
+          if (!(next instanceof Error) || next.message !== PROTECTED_RULES.refusal) throw error;
+          if (!this.commitMismatch(fresh, historyUrl)) throw error;
+        }
+      }
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work(),
+        new Promise<ChromeTab>((_, reject) => {
+          timer = setTimeout(() => reject(error), 250);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async gate(method: string, params: CDPPayload): Promise<void> {
     if (BROWSER_LEVEL.has(method)) return;
     if (FETCH_SETTLES.has(method)) {
       this.admitSettle(params);
       return;
     }
-    const tab = await this.readLive();
+    let tab = await this.readLive();
     const confirmed = await this.confirmedError(tab);
-    this.refuseShown(confirmed ? this.failedView(tab) : tab, await this.openerState(tab));
-    if (method.startsWith('Input.') && tab.status === 'loading') refuse(UNSETTLED_REFUSAL);
-    if (tab.status === 'loading' && !confirmed) await this.protectedHistory();
+    let historyUrl: string | undefined;
+    try {
+      this.refuseShown(confirmed ? this.failedView(tab) : tab, await this.openerState(tab));
+      if (method.startsWith('Input.') && tab.status === 'loading') refuse(UNSETTLED_REFUSAL);
+      if (tab.status === 'loading' && !confirmed) {
+        await this.protectedHistory((url) => {
+          historyUrl = url;
+        });
+      }
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== PROTECTED_RULES.refusal) throw error;
+      if (confirmed || !this.retryReady() || !this.commitMismatch(tab, historyUrl)) throw error;
+      tab = await this.retryShown(error);
+      if (method.startsWith('Input.') && tab.status === 'loading') refuse(UNSETTLED_REFUSAL);
+    }
   }
 
   private async readLive(): Promise<ChromeTab> {
@@ -2011,7 +2080,7 @@ export class TabShield {
     return unreachable !== undefined && unfragmented(unreachable) === unfragmented(url);
   }
 
-  private async protectedHistory(): Promise<void> {
+  private async protectedHistory(onRefused?: (url: string) => void): Promise<void> {
     const history = await this.send('Page.getNavigationHistory', {}).catch(() =>
       refuse(UNSETTLED_REFUSAL)
     );
@@ -2020,7 +2089,10 @@ export class TabShield {
     const entry = typeof index === 'number' ? entries[index] : undefined;
     if (!isObj(entry) || typeof entry['url'] !== 'string' || !entry['url'])
       refuse(UNSETTLED_REFUSAL);
-    if (urlProtected(entry['url'])) refuse(PROTECTED_RULES.refusal);
+    if (urlProtected(entry['url'])) {
+      onRefused?.(entry['url']);
+      refuse(PROTECTED_RULES.refusal);
+    }
   }
 
   private async checkContent(method: string, params: CDPPayload = {}): Promise<void> {
