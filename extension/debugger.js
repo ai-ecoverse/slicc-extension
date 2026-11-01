@@ -164,7 +164,7 @@ export class DebuggerGate {
     );
   }
 
-  convertible(tabId, state) {
+  convertible(tabId, state, requireWitness = true) {
     const c = this.connection;
     const tab = c.tabState(tabId);
     return (
@@ -175,7 +175,7 @@ export class DebuggerGate {
       tab?.documents.frames.get(tab.mainFrameId)?.loaderId === state.generation &&
       tab.debuggerRevision === state.revision &&
       !tab.worlds.foreign &&
-      this.childrenPlaced(tabId) &&
+      (!requireWitness || this.childrenPlaced(tabId)) &&
       ![...tab.frames.values()].some(Boolean) &&
       ![...tab.worlds.ids.values()].some((entry) => entry.hidden) &&
       ![...tab.documents.frames.values()].some(
@@ -364,7 +364,7 @@ export class DebuggerGate {
 
   script(tabId, state, method, params) {
     const c = this.connection;
-    if (!this.convertible(tabId, state) || c.mentions(params)) return;
+    if (!this.convertible(tabId, state, false) || c.mentions(params)) return;
     if (
       typeof params.scriptId !== 'string' ||
       !params.scriptId ||
@@ -485,6 +485,7 @@ export class DebuggerGate {
   }
 
   async pauseReady(tabId, state, params) {
+    if (!state?.enabled || this.privateInstrumentation(tabId, state, params)) return false;
     if (!this.childrenPlaced(tabId)) {
       try {
         await this.proof(tabId, state);

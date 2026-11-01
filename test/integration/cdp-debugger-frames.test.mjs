@@ -2,6 +2,76 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
 
+async function witnessedWorker(t) {
+  const fixture = await children(t, []);
+  await fixture.emit('Target.attachedToTarget', {
+    sessionId: 'gap-worker',
+    targetInfo: {
+      targetId: 'gap-worker-target',
+      type: 'worker',
+      url: 'https://ordinary.test/worker.js',
+    },
+  });
+  await fixture.lease();
+  fixture.connection.tabState(11).frameEvents++;
+  assert.equal(fixture.connection.debuggerGate.childrenPlaced(11), false);
+  return fixture;
+}
+
+test('675 extension buffers root scripts before refreshing an invalidated whole-page witness at publication', async (t) => {
+  const fixture = await witnessedWorker(t);
+  const state = fixture.connection.debuggerGate.states.get(11);
+  await fixture.emit('Debugger.scriptParsed', {
+    scriptId: 'witness-gap-script',
+    executionContextId: 1,
+    url: 'https://ordinary.test/root-script.js',
+  });
+  assert.ok(state.scripts.has('witness-gap-script'));
+  assert.equal(
+    fixture.messages.some(({ method }) => method?.startsWith('Debugger.')),
+    false
+  );
+  await fixture.emit('Debugger.paused', {
+    reason: 'instrumentation',
+    data: { scriptId: 'witness-gap-script' },
+    callFrames: [],
+  });
+  await fixture.emit('Debugger.paused', {
+    reason: 'other',
+    callFrames: [{ callFrameId: '1.1.0', location: { scriptId: 'witness-gap-script' } }],
+  });
+  assert.equal(fixture.messages.filter(({ method }) => method === 'Debugger.paused').length, 1);
+  assert.equal(fixture.connection.debuggerGate.childrenPlaced(11), true);
+});
+
+test('675 extension R1 resumes a known evaluation before any invalidated child-witness read', async (t) => {
+  const fixture = await witnessedWorker(t);
+  await fixture.emit('Debugger.scriptParsed', {
+    scriptId: 'witness-gap-evaluate',
+    executionContextId: 1,
+    url: '',
+    embedderName: '',
+  });
+  const before = fixture.calls.length;
+  await fixture.emit('Debugger.paused', {
+    reason: 'instrumentation',
+    data: { scriptId: 'witness-gap-evaluate' },
+    callFrames: [],
+  });
+  const calls = fixture.calls.slice(before);
+  assert.equal(calls.filter(({ method }) => method === 'Debugger.resume').length, 1);
+  assert.equal(
+    calls.some(({ method }) =>
+      ['Debugger.pause', 'Page.getFrameTree', 'DOM.getDocument'].includes(method)
+    ),
+    false
+  );
+  assert.equal(
+    fixture.messages.some(({ method }) => method?.startsWith('Debugger.')),
+    false
+  );
+});
+
 async function children(t, urls) {
   const fixture = await backend();
   t.after(fixture.close);
