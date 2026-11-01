@@ -36,6 +36,47 @@ export class DebuggerGate {
   constructor(connection) {
     this.connection = connection;
     this.states = new Map();
+    this.placements = new Map();
+  }
+
+  childrenPlaced(tabId) {
+    const tab = this.connection.tabState(tabId);
+    if (!tab?.debuggerChildren.size) return true;
+    const placed = this.placements.get(tabId);
+    return Boolean(
+      placed &&
+        placed.revision === tab.debuggerRevision &&
+        placed.frames === tab.frameEvents &&
+        placed.generation === tab.documents.frames.get(tab.mainFrameId)?.loaderId &&
+        placed.children === JSON.stringify([...tab.debuggerChildren].sort())
+    );
+  }
+
+  async placeChildren(tabId) {
+    const c = this.connection;
+    const tab = c.tabState(tabId);
+    if (!tab.debuggerChildren.size) return;
+    const revision = tab.debuggerRevision;
+    const children = JSON.stringify([...tab.debuggerChildren].sort());
+    const list = await bounded(c.frames(tabId));
+    if (
+      c.tabState(tabId) !== tab ||
+      tab.debuggerRevision !== revision ||
+      JSON.stringify([...tab.debuggerChildren].sort()) !== children ||
+      list.revision !== tab.frameEvents ||
+      list.rootFrameId !== tab.mainFrameId ||
+      list.rootLoaderId !== tab.documents.frames.get(tab.mainFrameId)?.loaderId ||
+      list.remoteOwners.length >= list.frames.length ||
+      tab.debuggerChildren.size >= list.frames.length ||
+      !list.frames.every((frame) => /^https?:\/\//.test(frame.url) && !c.protectedOrigin(frame.url))
+    )
+      refused();
+    this.placements.set(tabId, {
+      revision,
+      frames: list.revision,
+      generation: list.rootLoaderId,
+      children,
+    });
   }
 
   unplaced(tab) {
@@ -90,7 +131,7 @@ export class DebuggerGate {
       tab.debuggerRevision === state.revision &&
       !tab.worlds.foreign &&
       tab.pendingFrames.size === 0 &&
-      tab.debuggerChildren.size === 0 &&
+      this.childrenPlaced(tabId) &&
       !this.unplaced(tab)
     );
   }
@@ -106,7 +147,7 @@ export class DebuggerGate {
       tab?.documents.frames.get(tab.mainFrameId)?.loaderId === state.generation &&
       tab.debuggerRevision === state.revision &&
       !tab.worlds.foreign &&
-      tab.debuggerChildren.size === 0 &&
+      this.childrenPlaced(tabId) &&
       ![...tab.frames.values()].some(Boolean) &&
       ![...tab.worlds.ids.values()].some((entry) => entry.hidden) &&
       ![...tab.documents.frames.values()].some(
@@ -124,10 +165,11 @@ export class DebuggerGate {
     const c = this.connection;
     const tab = c.tabState(tabId);
     if (tab?.worlds.foreign) throw new Error(PROFILED);
-    if (!tab?.pageObserved || tab.pendingFrames.size || tab.debuggerChildren.size) refused();
+    if (!tab?.pageObserved || tab.pendingFrames.size) refused();
     if (this.unplaced(tab)) refused();
     const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
     const revision = tab.debuggerRevision;
+    await this.placeChildren(tabId);
     const [tree, frames] = await bounded(
       Promise.all([
         c.contentTree(tabId),
@@ -146,7 +188,7 @@ export class DebuggerGate {
       tree.sealed ||
       tab.worlds.foreign ||
       tab.pendingFrames.size ||
-      tab.debuggerChildren.size ||
+      !this.childrenPlaced(tabId) ||
       this.unplaced(tab) ||
       !this.placed(tab, tree.frameTree)
     )
@@ -361,6 +403,7 @@ export class DebuggerGate {
   async drop(tabId, owner) {
     const state = this.states.get(tabId);
     if (!state || (owner !== undefined && state.owner !== owner)) return;
+    this.placements.delete(tabId);
     this.states.delete(tabId);
     await this.resume(tabId, state);
     const rescue = debuggerRescue(this.connection.api);
@@ -413,13 +456,24 @@ export class DebuggerGate {
     );
   }
 
+  async pauseReady(tabId, state, params) {
+    if (!this.childrenPlaced(tabId)) {
+      try {
+        await this.proof(tabId, state);
+      } catch {
+        return false;
+      }
+    }
+    return (
+      this.pauseEligible(tabId, state, params) &&
+      !this.connection.mentions(params) &&
+      JSON.stringify(params).length <= 1048576
+    );
+  }
+
   async paused(tabId, state, params) {
     const c = this.connection;
-    if (
-      !this.pauseEligible(tabId, state, params) ||
-      c.mentions(params) ||
-      JSON.stringify(params).length > 1048576
-    ) {
+    if (!(await this.pauseReady(tabId, state, params))) {
       await this.resume(tabId, state);
       return;
     }
@@ -512,7 +566,6 @@ export class DebuggerGate {
       !tab ||
       this.connection.closed ||
       tab.worlds.foreign ||
-      tab.debuggerChildren.size ||
       [...tab.frames.values()].some(Boolean) ||
       [...tab.worlds.ids.values()].some((entry) => entry.hidden) ||
       [...tab.documents.frames.values()].some(
