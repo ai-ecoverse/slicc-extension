@@ -19,6 +19,101 @@ const ordinaryPause = {
   ],
 };
 
+test('675 extension privately resumes known evaluate instrumentation before context placement', async (t) => {
+  const fixture = await backend();
+  t.after(fixture.close);
+  await fixture.lease();
+  await fixture.commit();
+  await fixture.emit('Page.frameStartedLoading', { frameId: 'root' });
+  await fixture.emit('Debugger.scriptParsed', {
+    scriptId: 'placement-read',
+    executionContextId: 1,
+    url: '',
+    embedderName: '',
+  });
+  const before = fixture.calls.length;
+  await fixture.emit('Debugger.paused', {
+    reason: 'instrumentation',
+    data: { scriptId: 'placement-read' },
+    callFrames: [],
+  });
+  const calls = fixture.calls.slice(before);
+  assert.equal(calls.filter(({ method }) => method === 'Debugger.resume').length, 1);
+  assert.equal(
+    calls.some(({ method }) =>
+      ['Debugger.pause', 'Page.getFrameTree', 'Debugger.removeBreakpoint'].includes(method)
+    ),
+    false
+  );
+  assert.equal(
+    fixture.messages.some(({ method }) => method?.startsWith('Debugger.')),
+    false
+  );
+  assert.equal(fixture.connection.debuggerGate.states.get(11).breakpoints.size, 1);
+});
+
+test('675 extension privately resumes only contexts actually published in the same generation', async (t) => {
+  const fixture = await backend();
+  t.after(fixture.close);
+  await fixture.lease();
+  await fixture.emit('Debugger.scriptParsed', ordinaryScript);
+  await fixture.emit('Debugger.paused', ordinaryPause);
+  assert.equal(fixture.messages.filter(({ method }) => method === 'Debugger.paused').length, 1);
+  await fixture.command('Debugger.resume');
+  const before = fixture.calls.length;
+  await fixture.emit('Debugger.scriptParsed', { ...ordinaryScript, scriptId: 'later-script' });
+  await fixture.emit('Debugger.paused', {
+    reason: 'instrumentation',
+    data: { scriptId: 'later-script' },
+    callFrames: [],
+  });
+  const calls = fixture.calls.slice(before);
+  assert.equal(calls.filter(({ method }) => method === 'Debugger.resume').length, 1);
+  assert.equal(
+    calls.some(({ method }) => ['Debugger.pause', 'Page.getFrameTree'].includes(method)),
+    false
+  );
+  assert.equal(fixture.messages.filter(({ method }) => method === 'Debugger.paused').length, 1);
+  await fixture.emit('Runtime.executionContextCreated', {
+    context: {
+      id: 2,
+      uniqueId: 'new-context',
+      origin: 'https://ordinary.test',
+      auxData: { isDefault: true, frameId: 'root' },
+    },
+  });
+  await fixture.emit('Debugger.scriptParsed', {
+    ...ordinaryScript,
+    scriptId: 'new-context-script',
+    executionContextId: 2,
+  });
+  const next = fixture.calls.length;
+  await fixture.emit('Debugger.paused', {
+    reason: 'instrumentation',
+    data: { scriptId: 'new-context-script' },
+    callFrames: [],
+  });
+  assert.equal(
+    fixture.calls.slice(next).filter(({ method }) => method === 'Debugger.pause').length,
+    1
+  );
+  await fixture.emit('Debugger.resumed', {});
+  await fixture.emit('Debugger.paused', {
+    reason: 'other',
+    callFrames: [
+      {
+        callFrameId: '1.2.0',
+        location: { scriptId: 'new-context-script', lineNumber: 0 },
+        url: ordinaryScript.url,
+      },
+    ],
+  });
+  assert.equal(fixture.messages.filter(({ method }) => method === 'Debugger.paused').length, 2);
+  await fixture.command('Debugger.resume');
+  await fixture.commit();
+  assert.equal(fixture.connection.debuggerGate.states.get(11).publishedContexts.size, 0);
+});
+
 test('675 extension live reads require an ordinary published current-generation pause', async (t) => {
   const fixture = await backend();
   t.after(fixture.close);

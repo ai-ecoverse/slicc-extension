@@ -229,6 +229,8 @@ export class DebuggerGate {
       token: crypto.randomUUID(),
       enabled: false,
       scripts: new Map(),
+      scriptInfo: new Map(),
+      publishedContexts: new Map(),
       breakpoints: new Set(),
       pause: null,
       resuming: null,
@@ -293,6 +295,20 @@ export class DebuggerGate {
   script(tabId, state, method, params) {
     const c = this.connection;
     if (!this.convertible(tabId, state) || c.mentions(params)) return;
+    if (
+      typeof params.scriptId !== 'string' ||
+      !params.scriptId ||
+      !Number.isSafeInteger(params.executionContextId) ||
+      params.executionContextId <= 0 ||
+      state.scriptInfo.size >= 1000 ||
+      JSON.stringify(params).length > 1048576
+    )
+      return;
+    state.scriptInfo.set(params.scriptId, {
+      url: params.url,
+      embedderName: params.embedderName,
+      context: params.executionContextId,
+    });
     const tab = c.tabState(tabId);
     const context = tab.worlds.ids.get(params.executionContextId)?.context;
     const document = tab.documents.contexts.get(params.executionContextId);
@@ -371,16 +387,36 @@ export class DebuggerGate {
     else await this.resume(tabId, state, true);
   }
 
-  pauseEligible(tabId, state, reason) {
+  rememberPublished(state, pause) {
+    pause.published = true;
+    for (const [id, unique] of pause.contexts) state.publishedContexts.set(id, unique);
+  }
+
+  privateInstrumentation(tabId, state, params) {
+    if (params.reason !== 'instrumentation') return false;
+    const id = params.data?.scriptId ?? params.callFrames?.[0]?.location?.scriptId;
+    const info = state?.scriptInfo.get(id);
+    if (info?.url === '' && info.embedderName === '') return true;
+    const script = state?.scripts.get(id);
+    return Boolean(
+      script &&
+        state.publishedContexts.get(script.context) === script.unique &&
+        this.context(tabId, state, script.context, script.unique)
+    );
+  }
+
+  pauseEligible(tabId, state, params) {
     return (
-      this.convertible(tabId, state) && (reason === 'instrumentation' || this.current(tabId, state))
+      this.convertible(tabId, state) &&
+      (params.reason === 'instrumentation' || this.current(tabId, state)) &&
+      !this.privateInstrumentation(tabId, state, params)
     );
   }
 
   async paused(tabId, state, params) {
     const c = this.connection;
     if (
-      !this.pauseEligible(tabId, state, params.reason) ||
+      !this.pauseEligible(tabId, state, params) ||
       c.mentions(params) ||
       JSON.stringify(params).length > 1048576
     ) {
@@ -441,7 +477,7 @@ export class DebuggerGate {
       for (const script of scripts)
         c.post({ method: script.method, params: script.params, sessionId: state.owner });
       c.post({ method: 'Debugger.paused', params, sessionId: state.owner });
-      pause.published = true;
+      this.rememberPublished(state, pause);
     } catch {
       if (pause.converted && !pause.published) await this.drop(tabId);
       else await this.resume(tabId, state);
@@ -503,6 +539,8 @@ export class DebuggerGate {
       }
       if (state.pause) void this.resume(tabId, state);
       state.scripts.clear();
+      state.scriptInfo.clear();
+      state.publishedContexts.clear();
       state.resuming = null;
       state.generation = generation;
       state.revision = tab.debuggerRevision;
