@@ -211,6 +211,27 @@ for (const transport of ['seven', 'six-bridge']) {
     assert.ok(f.historyReads() >= 4);
   });
 
+  test(`${transport}: completed tab with lagging return history holds the result until fresh checks pass`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset(() => ({ id: 1, url: ordinary, status: 'complete' }));
+    f.history((reads) => ({
+      currentIndex: 0,
+      entries: [{ id: 1, url: reads <= 3 ? protectedUrl : ordinary }],
+    }));
+    assert.deepEqual(await f.command('Page.getFrameTree'), tree(ordinary));
+    assert.ok(f.historyReads() >= 4);
+  });
+
+  test(`${transport}: completed tab with persistently protected return history keeps the result refused`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset(() => ({ id: 1, url: ordinary, status: 'complete' }));
+    f.history(() => ({ currentIndex: 0, entries: [{ id: 1, url: protectedUrl }] }));
+    await assert.rejects(f.command('Page.getFrameTree'), /^Error: slicc: refused:/);
+    assert.ok(f.historyReads() > 1);
+  });
+
   test(`${transport}: persistently protected history refuses without forwarding the command`, async (t) => {
     const f = await fixture(transport);
     t.after(f.close);

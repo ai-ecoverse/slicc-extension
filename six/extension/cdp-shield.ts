@@ -1964,11 +1964,9 @@ export class TabShield {
         let historyUrl: string | undefined;
         try {
           this.refuseShown(fresh, await this.openerState(fresh));
-          if (fresh.status === 'loading') {
-            await this.protectedHistory((url) => {
-              historyUrl = url;
-            });
-          }
+          await this.protectedHistory((url) => {
+            historyUrl = url;
+          });
           check();
           return fresh;
         } catch (next) {
@@ -2178,11 +2176,20 @@ export class TabShield {
       this.refuseShown(this.failedView(tab), await this.openerState(tab));
       return;
     }
-    this.refuseShown(tab, await this.openerState(tab));
-    const url = tab.url ?? '';
-    if (PROTECTED_RULES.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
-    if (tab.pendingUrl && tab.pendingUrl !== url) return;
-    await this.protectedHistory();
+    let historyUrl: string | undefined;
+    try {
+      this.refuseShown(tab, await this.openerState(tab));
+      const url = tab.url ?? '';
+      if (PROTECTED_RULES.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
+      if (tab.pendingUrl && tab.pendingUrl !== url) return;
+      await this.protectedHistory((url) => {
+        historyUrl = url;
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== PROTECTED_RULES.refusal) throw error;
+      if (!this.retryReady() || !this.commitMismatch(tab, historyUrl)) throw error;
+      await this.retryShown(error);
+    }
   }
 
   private async admit(method: string, params: CDPPayload): Promise<void> {
