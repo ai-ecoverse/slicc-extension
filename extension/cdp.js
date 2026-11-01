@@ -458,6 +458,92 @@ class Connection {
     return this.state.tabs.get(tabId);
   }
 
+  async frames(tabId) {
+    const tab = this.tabState(tabId);
+    const refuse = () => {
+      throw new Error('slicc: refused: unsettled frame list');
+    };
+    if (this.closed || !Number.isSafeInteger(tabId) || !tab) refuse();
+    const revision = tab.frameEvents;
+    const [frames, tree, document] = await bounded(
+      Promise.all([
+        this.api.webNavigation?.getAllFrames?.({ tabId }),
+        this.send(tabId, 'Page.getFrameTree', {}),
+        this.send(tabId, 'DOM.getDocument', { depth: -1, pierce: true }),
+      ]),
+      2000,
+      'frame list'
+    );
+    if (
+      this.closed ||
+      this.tabState(tabId) !== tab ||
+      tab.frameEvents !== revision ||
+      !Array.isArray(frames) ||
+      !frames.length
+    )
+      refuse();
+    const ids = new Set(frames.map((frame) => frame?.frameId));
+    const root = frames.find((frame) => frame?.frameId === 0);
+    if (
+      ids.size !== frames.length ||
+      root?.parentFrameId !== -1 ||
+      !root.documentId ||
+      frames.some(
+        (frame) =>
+          !Number.isSafeInteger(frame.frameId) ||
+          typeof frame.documentId !== 'string' ||
+          !frame.documentId ||
+          typeof frame.url !== 'string' ||
+          !frame.url ||
+          frame.errorOccurred === true ||
+          (frame.documentLifecycle !== undefined && frame.documentLifecycle !== 'active')
+      )
+    )
+      refuse();
+    for (const frame of frames) {
+      const seen = new Set();
+      let current = frame;
+      while (current.frameId !== 0) {
+        if (seen.has(current.frameId)) refuse();
+        seen.add(current.frameId);
+        current = frames.find((candidate) => candidate.frameId === current.parentFrameId);
+        if (!current) refuse();
+      }
+    }
+    const frame = tree?.frameTree?.frame;
+    if (
+      typeof frame?.id !== 'string' ||
+      !frame.id ||
+      typeof frame.loaderId !== 'string' ||
+      !frame.loaderId ||
+      !document?.root
+    )
+      refuse();
+    const remoteOwners = new Set();
+    const visit = (node) => {
+      if (['IFRAME', 'FRAME'].includes(node.nodeName) && !node.contentDocument) {
+        if (typeof node.frameId !== 'string' || !node.frameId) refuse();
+        remoteOwners.add(node.frameId);
+      }
+      for (const child of [
+        ...(node.children ?? []),
+        ...(node.shadowRoots ?? []),
+        ...(node.contentDocument ? [node.contentDocument] : []),
+      ])
+        visit(child);
+    };
+    visit(document.root);
+    return {
+      version: 1,
+      rootDocumentId: root.documentId,
+      revision,
+      rootFrameId: frame.id,
+      rootLoaderId: frame.loaderId,
+      frames,
+      remoteOwners: [...remoteOwners],
+    };
+  }
+
   sessionsOf(tabId) {
     return [...(this.tabState(tabId)?.sessions ?? [])];
   }
@@ -1669,6 +1755,8 @@ class Connection {
   }
 
   async dispatch(message) {
+    if (['frames', 'sliccExtension.frames', 'Slicc.frames'].includes(message.method))
+      throw new Error('slicc: refused: private frame list');
     const params = bag(message.params);
     const outright = refusedOutright(message.method, params, message.sessionId);
     if (outright) throw new Error(outright);
@@ -2216,6 +2304,20 @@ class Connection {
   }
 
   handle(message) {
+    if (message?.privateFrames && Number.isSafeInteger(message.privateFrames.id)) {
+      const { id, tabId } = message.privateFrames;
+      const task = this.frames(tabId)
+        .then(
+          (result) => this.port.postMessage({ privateFrames: { id, result } }),
+          () =>
+            this.port.postMessage({
+              privateFrames: { id, error: 'slicc: refused: unsettled frame list' },
+            })
+        )
+        .catch(() => undefined);
+      this.pending = Promise.all([this.pending, task]).then(() => undefined);
+      return true;
+    }
     if (!isCdp(message)) return false;
     if (!this.closed) {
       const serial =

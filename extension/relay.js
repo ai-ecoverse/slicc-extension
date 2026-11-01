@@ -32,7 +32,9 @@ function serve(page) {
     if (cdpPort) return cdpPort;
     const worker = chrome.runtime.connect({ name: 'slicc-fetch' });
     cdpPort = worker;
-    worker.onMessage.addListener((message) => page.postMessage({ cdp: message }));
+    worker.onMessage.addListener((message) =>
+      page.postMessage(message.privateFrames ? message : { cdp: message })
+    );
     worker.onDisconnect.addListener(() => {
       if (cdpPort !== worker) return;
       cdpPort = undefined;
@@ -42,6 +44,19 @@ function serve(page) {
   }
   page.onmessage = ({ data }) => {
     const { id } = data;
+    if (data.privateFrames) {
+      try {
+        cdpWorker().postMessage({ privateFrames: data.privateFrames });
+      } catch {
+        page.postMessage({
+          privateFrames: {
+            id: data.privateFrames.id,
+            error: 'slicc: refused: frame list disconnected',
+          },
+        });
+      }
+      return;
+    }
     if (data.cdp) {
       try {
         cdpWorker().postMessage(data.cdp);

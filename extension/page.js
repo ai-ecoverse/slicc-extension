@@ -35,6 +35,10 @@
   }
 
   port1.onmessage = ({ data }) => {
+    if (data.privateFrames) {
+      deliver(data.privateFrames);
+      return;
+    }
     if (data.cdp) {
       deliver(data.cdp);
       return;
@@ -144,6 +148,14 @@
     });
   }
 
+  function frames(tabId) {
+    const id = ++next;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      port1.postMessage({ privateFrames: { id, tabId } });
+    });
+  }
+
   function signIn({ clientId, scopes, imsEnvironment } = {}) {
     const id = ++next;
     return new Promise((resolve, reject) => {
@@ -161,6 +173,7 @@
       version: _seven.version,
       fetch: relayFetch,
       signIn,
+      frames,
       cdp: Object.freeze({
         send,
         on(listener) {
