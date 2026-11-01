@@ -107,8 +107,13 @@ for (const protectedChild of [false, true]) {
     t.after(fixture.close);
     fixture.api.webNavigation.getAllFrames = async () => nativeFrames(protectedChild);
     const send = fixture.api.debugger.sendCommand;
-    fixture.api.debugger.sendCommand = (target, method, params) =>
-      method === 'DOM.getDocument' ? Promise.resolve(owners()) : send(target, method, params);
+    fixture.api.debugger.sendCommand = (target, method, params) => {
+      if (['frames', 'sliccExtension.frames', 'Slicc.frames', 'Unknown.control'].includes(method))
+        return Promise.reject(new Error(`'${method}' wasn't found`));
+      return method === 'DOM.getDocument'
+        ? Promise.resolve(owners())
+        : send(target, method, params);
+    };
     const before = structuredClone(fixture.messages);
     assert.equal(
       typeof fixture.connection.frames,
@@ -128,9 +133,11 @@ for (const protectedChild of [false, true]) {
       before,
       'private list must not enter any CDP response or event'
     );
-    for (const method of ['frames', 'sliccExtension.frames', 'Slicc.frames']) {
+    for (const method of ['Unknown.control', 'frames', 'sliccExtension.frames', 'Slicc.frames']) {
       const answer = await fixture.command(method, { tabId: 11 });
       assert.ok(answer.error, 'a CDP client cannot name the private frame reader');
+      assert.equal(answer.error, `'${method}' wasn't found`);
+      assert.doesNotMatch(answer.error, /private frame list/);
       assert.doesNotMatch(JSON.stringify(answer), /private-frame|other\.test|third\.test/);
     }
   });

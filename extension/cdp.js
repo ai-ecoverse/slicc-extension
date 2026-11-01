@@ -1755,8 +1755,6 @@ class Connection {
   }
 
   async dispatch(message) {
-    if (['frames', 'sliccExtension.frames', 'Slicc.frames'].includes(message.method))
-      throw new Error('slicc: refused: private frame list');
     const params = bag(message.params);
     const outright = refusedOutright(message.method, params, message.sessionId);
     if (outright) throw new Error(outright);
