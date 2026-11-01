@@ -414,6 +414,7 @@ class Connection {
       counter: 0,
     };
     this.closed = false;
+    this.frameTrees = new WeakMap();
     this.debuggerGate = new DebuggerGate(this);
     this.chain = Promise.resolve();
     this.pending = Promise.resolve();
@@ -487,7 +488,18 @@ class Connection {
   }
 
   send(tabId, method, params) {
-    return this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, method, params));
+    const frameEvents = this.tabState(tabId)?.frameEvents ?? 0;
+    return this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, method, params)).then(
+      (result) => {
+        if (
+          ['Page.getFrameTree', 'Page.getResourceTree'].includes(method) &&
+          result?.frameTree &&
+          typeof result.frameTree === 'object'
+        )
+          this.frameTrees.set(result.frameTree, frameEvents);
+        return result;
+      }
+    );
   }
 
   failedAt(tabId, url) {
@@ -820,6 +832,7 @@ class Connection {
         reroutes: new Map(),
         paused: new Map(),
         epoch: 0,
+        frameEvents: 0,
         debuggerChildren: new Set(),
         debuggerRevision: 0,
         wake: new Wake((method, params) => this.send(tabId, method, params)),
@@ -1930,7 +1943,8 @@ class Connection {
     return kind !== undefined;
   }
 
-  pruneFrames(tab, tree) {
+  pruneFrames(tab, tree, frameEvents = this.frameTrees.get(tree)) {
+    if (frameEvents !== undefined && frameEvents !== tab.frameEvents) return;
     if (!Array.isArray(tree?.childFrames)) return;
     tree.childFrames = tree.childFrames.filter((node) => {
       const frame = node?.frame ?? {};
@@ -1938,7 +1952,7 @@ class Connection {
       if (hidden && typeof frame.id === 'string') tab.frames.set(frame.id, true);
       return !hidden;
     });
-    for (const node of tree.childFrames) this.pruneFrames(tab, node);
+    for (const node of tree.childFrames) this.pruneFrames(tab, node, frameEvents);
   }
 
   quietProfilers(tabId) {
@@ -2006,6 +2020,8 @@ class Connection {
   touched(tabId, method, params) {
     const tab = this.tabState(tabId);
     if (tab && invalidates(method, params)) tab.epoch += 1;
+    if (tab && ['Page.frameAttached', 'Page.frameDetached', 'Page.frameNavigated'].includes(method))
+      tab.frameEvents += 1;
     return tab;
   }
 
@@ -2096,6 +2112,7 @@ class Connection {
   onCommit(details) {
     const tab = this.tabState(details?.tabId);
     if (!tab) return;
+    tab.frameEvents += 1;
     tab.debuggerRevision += 1;
     this.debuggerGate.revoke(details.tabId);
   }
@@ -2103,7 +2120,10 @@ class Connection {
   onFrames(details) {
     for (const tabId of [details?.tabId, details?.replacedTabId]) {
       const tab = this.tabState(tabId);
-      if (tab) tab.epoch += 1;
+      if (tab) {
+        tab.epoch += 1;
+        tab.frameEvents += 1;
+      }
     }
   }
 
