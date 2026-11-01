@@ -1,6 +1,59 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
+
+test('a private frame reply arriving after relay disconnect never reaches CDP listeners', async () => {
+  let port;
+  const sent = [];
+  const page = vm.createContext({
+    __sliccSeven: {
+      domain: 'sliccy.ai',
+      excludedLabels: [],
+      excludedLabelPrefixes: [],
+      version: '7.10.1',
+    },
+    location: { hostname: 'seven.sliccy.ai', origin: 'https://seven.sliccy.ai' },
+    MessageChannel: class {
+      constructor() {
+        this.port1 = port = { postMessage: (value) => sent.push(value) };
+        this.port2 = {};
+      }
+    },
+    postMessage() {},
+  });
+  vm.runInContext(
+    await readFile(new URL('../../extension/page.js', import.meta.url), 'utf8'),
+    page
+  );
+  const events = [];
+  page.sliccExtension.cdp.on((value) => events.push(value));
+  const secondListener = [];
+  page.sliccExtension.cdp.on((value) => secondListener.push(value));
+  const waiting = page.sliccExtension.frames(11);
+  const id = sent.at(-1).privateFrames.id;
+  port.onmessage({ data: { cdp: { error: 'slicc-extension: relay disconnected' } } });
+  await assert.rejects(waiting, /disconnected/);
+  port.onmessage({
+    data: {
+      privateFrames: {
+        id,
+        result: {
+          version: 1,
+          revision: 41,
+          rootDocumentId: 'private-native-root',
+          rootFrameId: 'private-cdp-root',
+          rootLoaderId: 'private-loader',
+          remoteOwners: ['private-owner'],
+          frames: [{ url: 'https://vault.sliccy.ai/private-document' }],
+        },
+      },
+    },
+  });
+  assert.deepEqual(events, [], 'private fields must be dropped, never dispatched as CDP events');
+  assert.deepEqual(secondListener, [], 'no public listener receives any private field');
+});
 
 function nativeFrames(protectedChild = false) {
   return [

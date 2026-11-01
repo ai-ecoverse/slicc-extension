@@ -36,7 +36,7 @@
 
   port1.onmessage = ({ data }) => {
     if (data.privateFrames) {
-      deliver(data.privateFrames);
+      if (pending.has(data.privateFrames.id)) deliver(data.privateFrames);
       return;
     }
     if (data.cdp) {
