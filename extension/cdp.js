@@ -1416,21 +1416,11 @@ class Connection {
       await demandTab(this.api, this.view(raw));
       return;
     }
-    let historyUrl;
-    try {
-      await demandTab(this.api, raw);
-      const url = textOf(raw.url);
-      if (protectedRules.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
-      if (raw.pendingUrl && raw.pendingUrl !== url) return;
-      await this.protectedHistory(tabId, (url) => {
-        historyUrl = url;
-      });
-    } catch (error) {
-      const tab = this.tabState(tabId);
-      if (error?.message !== protectedRules.refusal || !this.retryReady(tabId, tab)) throw error;
-      if (!this.commitMismatch(tab, raw, historyUrl)) throw error;
-      await this.retryTab(tabId, tab, error);
-    }
+    await demandTab(this.api, raw);
+    const url = textOf(raw.url);
+    if (protectedRules.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
+    if (raw.pendingUrl && raw.pendingUrl !== url) return;
+    await this.protectedHistory(tabId);
   }
 
   held(tab, method, params, sessionId) {
