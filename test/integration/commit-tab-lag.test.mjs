@@ -35,7 +35,8 @@ async function fixture(transport) {
   const send = async (method) => {
     forwarded.push(method);
     if (method === 'Page.getNavigationHistory') return history(++historyReads);
-    return method === 'Page.getFrameTree' ? tree(treeUrl) : {};
+    const url = typeof treeUrl === 'function' ? treeUrl(forwarded) : treeUrl;
+    return method === 'Page.getFrameTree' ? tree(url) : {};
   };
   let command;
   let commit;
@@ -289,6 +290,30 @@ for (const transport of ['seven', 'six-bridge']) {
     ]);
     await assert.rejects(f.command('Page.getFrameTree'), /^Error: slicc: refused:/);
     assert.ok(f.reads() <= 2);
+  });
+
+  for (const method of ['Page.captureSnapshot', 'DOM.getDocument', 'Runtime.evaluate']) {
+    test(`${transport}: ${method} retains its later protected-document check`, async (t) => {
+      const f = await fixture(transport);
+      t.after(f.close);
+      f.reset(() => ({ id: 1, url: ordinary, status: 'complete' }));
+      f.browserTree((methods) =>
+        methods.filter((method) => method === 'Page.getFrameTree').length >= 2
+          ? protectedUrl
+          : ordinary
+      );
+      await assert.rejects(f.command(method), /^Error: slicc: refused:/);
+      assert.equal(f.forwarded.filter((seen) => seen === method).length, 0);
+    });
+  }
+
+  test(`${transport}: missing live tab is not retried`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset(() => undefined);
+    await assert.rejects(f.command(), /^Error: slicc: refused:/);
+    assert.equal(f.reads(), 1);
+    assert.deepEqual(f.forwarded, []);
   });
 
   test(`${transport}: protected command destinations are not retried`, async (t) => {
