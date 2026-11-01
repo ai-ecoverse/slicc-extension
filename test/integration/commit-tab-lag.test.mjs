@@ -24,13 +24,18 @@ async function fixture(transport) {
   let reads = 0;
   const forwarded = [];
   let read = () => ({ id: 1, url: shown, status: 'complete' });
+  let historyReads = 0;
+  let history = () => ({ currentIndex: 0, entries: [{ id: 1, url: ordinary }] });
+  let treeUrl = ordinary;
+  let frames = () => [{ frameId: 'ROOT', parentFrameId: -1, url: ordinary, errorOccurred: false }];
   const readTab = async () => {
     reads += 1;
     return read(reads);
   };
   const send = async (method) => {
     forwarded.push(method);
-    return method === 'Page.getFrameTree' ? tree(ordinary) : {};
+    if (method === 'Page.getNavigationHistory') return history(++historyReads);
+    return method === 'Page.getFrameTree' ? tree(treeUrl) : {};
   };
   let command;
   let commit;
@@ -38,6 +43,7 @@ async function fixture(transport) {
   let close = () => {};
   let failed;
   let owner;
+  let start;
   if (transport === 'seven') {
     const connection = listen(
       {
@@ -49,6 +55,7 @@ async function fixture(transport) {
       'fixture',
       {
         tabs: { get: readTab, query: async () => [] },
+        webNavigation: { getAllFrames: async () => frames() },
         debugger: {
           onEvent: event(),
           onDetach: event(),
@@ -64,12 +71,13 @@ async function fixture(transport) {
     failed = () => connection.state.failed.set(1, protectedUrl);
     failed();
     commit = (url) => connection.watchFrame(1, tab, frame(url));
+    start = () => connection.onEvent({ tabId: 1 }, 'Page.frameStartedLoading', { frameId: 'ROOT' });
     commit(ordinary);
     assert.equal(connection.state.failed.has(1), false);
     matching = () => {
       tab.pageUrl = protectedUrl;
     };
-    command = (method = 'Page.getFrameTree', params = {}) =>
+    command = (method = 'Network.enable', params = {}) =>
       connection.dispatch({ method, params, sessionId });
     owner = () => {
       failed();
@@ -84,14 +92,22 @@ async function fixture(transport) {
   } else {
     const failedDocuments = new Bounded(200);
     failedDocuments.set(protectedUrl, true);
-    const shield = new TabShield(send, () => {}, failedDocuments, readTab);
+    const shield = new TabShield(
+      send,
+      () => {},
+      failedDocuments,
+      readTab,
+      undefined,
+      async () => frames()
+    );
     await shield.install();
     commit = (url) => shield.onEvent('Page.frameNavigated', { frame: frame(url) });
+    start = () => shield.onEvent('Page.frameStartedLoading', { frameId: 'ROOT' });
     commit(ordinary);
     matching = () => {
       shield.frames.set('ROOT', [protectedUrl, new URL(protectedUrl).origin]);
     };
-    command = (method = 'Page.getFrameTree', params = {}) => shield.command(method, params, send);
+    command = (method = 'Network.enable', params = {}) => shield.command(method, params, send);
     owner = () => {
       shield.forwarded.set('owned', true);
       shield.pausedUrls.set('owned', ordinary);
@@ -100,6 +116,7 @@ async function fixture(transport) {
   shown = protectedUrl;
   return {
     command,
+    start,
     commit,
     matching,
     owner,
@@ -109,6 +126,17 @@ async function fixture(transport) {
       read = next;
       reads = 0;
       forwarded.length = 0;
+    },
+    history(next) {
+      history = next;
+      historyReads = 0;
+    },
+    historyReads: () => historyReads,
+    browserTree(url) {
+      treeUrl = url;
+    },
+    frames(next) {
+      frames = next;
     },
     reads: () => reads,
   };
@@ -120,12 +148,9 @@ for (const transport of ['seven', 'six-bridge']) {
     t.after(f.close);
     f.reset((reads) => ({ id: 1, url: reads <= 3 ? protectedUrl : ordinary, status: 'complete' }));
     const result = await f.command();
-    assert.deepEqual(result, tree(ordinary));
+    assert.deepEqual(result, {});
     assert.ok(f.reads() >= 4);
-    assert.equal(
-      f.forwarded.filter((method) => method === 'Page.getFrameTree').length,
-      transport === 'seven' ? 1 : 2
-    );
+    assert.equal(f.forwarded.filter((method) => method === 'Network.enable').length, 1);
   });
 
   test(`${transport}: an unchanged protected tab exhausts the bound without forwarding`, async (t) => {
@@ -158,6 +183,103 @@ for (const transport of ['seven', 'six-bridge']) {
     });
     await assert.rejects(f.command(), /^Error: slicc: refused:/);
     assert.deepEqual(f.forwarded, transport === 'seven' ? [] : ['Page.getFrameTree']);
+  });
+
+  test(`${transport}: stale protected pending url requires a fresh passing read`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset((reads) => ({
+      id: 1,
+      url: ordinary,
+      pendingUrl: reads <= 3 ? protectedUrl : '',
+      status: 'complete',
+    }));
+    assert.deepEqual(await f.command(), {});
+    assert.ok(f.reads() >= 4);
+  });
+
+  test(`${transport}: fresh ordinary tab and stale protected history both must pass`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset(() => ({ id: 1, url: ordinary, status: 'loading' }));
+    f.history((reads) => ({
+      currentIndex: 0,
+      entries: [{ id: 1, url: reads <= 3 ? protectedUrl : ordinary }],
+    }));
+    assert.deepEqual(await f.command(), {});
+    assert.ok(f.reads() >= 4);
+    assert.ok(f.historyReads() >= 4);
+  });
+
+  test(`${transport}: persistently protected history refuses without forwarding the command`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset(() => ({ id: 1, url: ordinary, status: 'loading' }));
+    f.history(() => ({ currentIndex: 0, entries: [{ id: 1, url: protectedUrl }] }));
+    await assert.rejects(f.command(), /^Error: slicc: refused:/);
+    assert.ok(f.reads() > 1);
+    assert.equal(f.forwarded.filter((method) => method === 'Network.enable').length, 0);
+  });
+
+  test(`${transport}: missing history remains immediately fail closed`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset(() => ({ id: 1, url: ordinary, status: 'loading' }));
+    f.history(() => ({}));
+    await assert.rejects(f.command(), /navigation not settled/);
+    assert.equal(f.reads(), 1);
+  });
+
+  test(`${transport}: navigation already in flight does not start a retry`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    await f.start();
+    f.reset(() => ({ id: 1, url: ordinary, pendingUrl: protectedUrl, status: 'loading' }));
+    await assert.rejects(f.command(), /^Error: slicc: refused:/);
+    assert.equal(f.reads(), 1);
+  });
+
+  test(`${transport}: navigation starting during a retry stops it`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset((reads) => {
+      if (reads === 2) f.start();
+      return { id: 1, url: reads >= 2 ? ordinary : protectedUrl, status: 'complete' };
+    });
+    await assert.rejects(f.command(), /^Error: slicc: refused:/);
+    assert.ok(f.reads() <= 2);
+  });
+
+  test(`${transport}: protected content evidence is not retried from a commit hint`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset(() => ({ id: 1, url: ordinary, status: 'complete' }));
+    f.browserTree(protectedUrl);
+    await assert.rejects(f.command('Page.getFrameTree'), /^Error: slicc: refused:/);
+    assert.ok(f.reads() <= 2);
+  });
+
+  test(`${transport}: a failed protected frame inventory still refuses immediately`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset(() => ({ id: 1, url: ordinary, status: 'complete' }));
+    f.frames(() => [
+      { frameId: 'ROOT', parentFrameId: -1, url: protectedUrl, errorOccurred: true },
+    ]);
+    await assert.rejects(f.command('Page.getFrameTree'), /^Error: slicc: refused:/);
+    assert.ok(f.reads() <= 2);
+  });
+
+  test(`${transport}: protected command destinations are not retried`, async (t) => {
+    const f = await fixture(transport);
+    t.after(f.close);
+    f.reset(() => ({ id: 1, url: ordinary, status: 'complete' }));
+    await assert.rejects(
+      f.command('Page.navigate', { url: protectedUrl }),
+      /^Error: slicc: refused:/
+    );
+    assert.equal(f.reads(), 1);
+    assert.deepEqual(f.forwarded, []);
   });
 
   test(`${transport}: plain owned continue does not wait for tabs to catch up`, async (t) => {

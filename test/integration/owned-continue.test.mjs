@@ -227,6 +227,18 @@ async function row(t, chrome, sw, site, transport, gate) {
       })()`);
       assert.equal(claimed, opened.sessionId);
     }
+    if (name === 'plain owner continue') {
+      const history = await sw.evaluate(`(async () => {
+        let timer;
+        try {
+          return await Promise.race([
+            chrome.debugger.sendCommand({tabId:${tabId}}, 'Page.getNavigationHistory', {}),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('history waited on a paused renderer')), 1000); })
+          ]);
+        } finally { clearTimeout(timer); }
+      })()`);
+      assert.equal(history.entries[history.currentIndex].url, site.protectedUrl);
+    }
     await sw.evaluate(`globalThis.__continueGate = {tabId:${tabId}, trees:0, forwarded:[]}; true`);
     const answer = await send(
       method,

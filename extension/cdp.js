@@ -1297,13 +1297,16 @@ class Connection {
     if (treeNamesProtected(tree?.frameTree, anyProtected)) refusal();
   }
 
-  async protectedHistory(tabId) {
+  async protectedHistory(tabId, onRefused) {
     const history = await this.send(tabId, 'Page.getNavigationHistory', {}).catch(() =>
       unsettled()
     );
     const entry = history?.entries?.[history.currentIndex];
     if (!entry || typeof entry.url !== 'string' || !entry.url) unsettled();
-    if (urlProtected(guard, entry.url)) refusal();
+    if (urlProtected(guard, entry.url)) {
+      onRefused?.(entry.url);
+      refusal();
+    }
   }
 
   async confirmedError(tabId, tab) {
@@ -1316,8 +1319,61 @@ class Connection {
     );
   }
 
+  async retryTab(tabId, tab, error) {
+    const deadline = Date.now() + 250;
+    const check = () => {
+      if (!this.retryReady(tabId, tab) || Date.now() >= deadline) throw error;
+    };
+    const work = async () => {
+      for (;;) {
+        check();
+        await new Promise((resolve) => setTimeout(resolve, Math.min(10, deadline - Date.now())));
+        check();
+        const raw = await readTab(this.api, tabId);
+        check();
+        let historyUrl;
+        try {
+          const seen = await demandTab(this.api, raw);
+          if (raw.status === 'loading') {
+            await this.protectedHistory(tabId, (url) => {
+              historyUrl = url;
+            });
+          }
+          check();
+          return { raw, seen };
+        } catch (next) {
+          if (next?.message !== protectedRules.refusal) throw error;
+          if (!this.commitMismatch(tab, raw, historyUrl)) throw error;
+        }
+      }
+    };
+    return bounded(work(), 250, 'live tab').catch(() => {
+      throw error;
+    });
+  }
+
+  retryReady(tabId, tab) {
+    return Boolean(
+      tab &&
+        !this.closed &&
+        this.tabState(tabId) === tab &&
+        !this.state.failed.has(tabId) &&
+        tab.pageUrl !== ERROR_PAGE &&
+        tab.pendingFrames.size === 0 &&
+        tab.startedFrames.size === 0
+    );
+  }
+
+  commitMismatch(tab, raw, historyUrl) {
+    if (tab?.pageUrl === raw.url && blocked(raw.url, 'unprotected')) return false;
+    const pending = historyUrl || raw.pendingUrl;
+    return Boolean(
+      tab?.pageUrl && (tab.pageUrl !== raw.url || (pending && tab.pageUrl !== pending))
+    );
+  }
+
   async admit(tabId, tab, method, params, sessionId) {
-    const raw = await readTab(this.api, tabId);
+    let raw = await readTab(this.api, tabId);
     const pause = tab?.paused.get(textOf(params?.requestId));
     const replying =
       method === 'Fetch.continueRequest' &&
@@ -1338,8 +1394,21 @@ class Connection {
         return demandTab(this.api, { ...view, pendingUrl: '' });
       }
     }
-    const seen = await demandTab(this.api, view);
-    if (raw.status === 'loading' && view === raw) await this.protectedHistory(tabId);
+    let seen;
+    let historyUrl;
+    try {
+      seen = await demandTab(this.api, view);
+      if (raw.status === 'loading' && view === raw) {
+        await this.protectedHistory(tabId, (url) => {
+          historyUrl = url;
+        });
+      }
+    } catch (error) {
+      if (error?.message !== protectedRules.refusal) throw error;
+      if (replying || view !== raw || !this.retryReady(tabId, tab)) throw error;
+      if (!this.commitMismatch(tab, raw, historyUrl)) throw error;
+      ({ raw, seen } = await this.retryTab(tabId, tab, error));
+    }
     return seen;
   }
 
