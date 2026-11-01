@@ -39,16 +39,42 @@ export class DebuggerGate {
     this.placements = new Map();
   }
 
+  childKey(tab) {
+    return JSON.stringify(
+      [...tab.debuggerChildren].sort().map((id) => [id, tab.debuggerChildInfo?.get(id)])
+    );
+  }
+
+  knownChildren(tab) {
+    const c = this.connection;
+    return [...tab.debuggerChildren].every((id) => {
+      const info = tab.debuggerChildInfo?.get(id);
+      return Boolean(
+        info &&
+          typeof info.target === 'string' &&
+          info.target &&
+          info.generation === tab.documents.frames.get(tab.mainFrameId)?.loaderId &&
+          info.revision === tab.debuggerRevision &&
+          (info.type === 'iframe' || info.type === 'worker') &&
+          typeof info.url === 'string' &&
+          /^https?:\/\//.test(info.url) &&
+          URL.canParse(info.url) &&
+          !c.protectedOrigin(info.url)
+      );
+    });
+  }
+
   childrenPlaced(tabId) {
     const tab = this.connection.tabState(tabId);
     if (!tab?.debuggerChildren.size) return true;
     const placed = this.placements.get(tabId);
     return Boolean(
       placed &&
+        this.knownChildren(tab) &&
         placed.revision === tab.debuggerRevision &&
         placed.frames === tab.frameEvents &&
         placed.generation === tab.documents.frames.get(tab.mainFrameId)?.loaderId &&
-        placed.children === JSON.stringify([...tab.debuggerChildren].sort())
+        placed.children === this.childKey(tab)
     );
   }
 
@@ -56,18 +82,20 @@ export class DebuggerGate {
     const c = this.connection;
     const tab = c.tabState(tabId);
     if (!tab.debuggerChildren.size) return;
+    if (!this.knownChildren(tab)) refused();
     const revision = tab.debuggerRevision;
-    const children = JSON.stringify([...tab.debuggerChildren].sort());
+    const children = this.childKey(tab);
     const list = await bounded(c.frames(tabId));
     if (
       c.tabState(tabId) !== tab ||
       tab.debuggerRevision !== revision ||
-      JSON.stringify([...tab.debuggerChildren].sort()) !== children ||
+      this.childKey(tab) !== children ||
       list.revision !== tab.frameEvents ||
       list.rootFrameId !== tab.mainFrameId ||
       list.rootLoaderId !== tab.documents.frames.get(tab.mainFrameId)?.loaderId ||
       list.remoteOwners.length >= list.frames.length ||
-      tab.debuggerChildren.size >= list.frames.length ||
+      [...tab.debuggerChildren].filter((id) => tab.debuggerChildInfo.get(id)?.type === 'iframe')
+        .length >= list.frames.length ||
       !list.frames.every((frame) => /^https?:\/\//.test(frame.url) && !c.protectedOrigin(frame.url))
     )
       refused();

@@ -77,6 +77,48 @@ test('675 extension debugger still refuses a protected child among ordinary cros
   );
 });
 
+test('675 extension debugger admits a concrete ordinary dedicated worker while publishing only root pauses', async (t) => {
+  const fixture = await children(t, []);
+  await fixture.emit('Target.attachedToTarget', {
+    sessionId: 'worker',
+    targetInfo: {
+      targetId: 'worker-target',
+      type: 'worker',
+      url: 'https://ordinary.test/worker.js',
+    },
+  });
+  await fixture.lease();
+  const before = fixture.messages.length;
+  await fixture.api.debugger.onEvent.emit({ tabId: 11, sessionId: 'worker' }, 'Debugger.paused', {
+    reason: 'instrumentation',
+    callFrames: [],
+  });
+  assert.equal(fixture.messages.length, before);
+});
+
+test('675 extension debugger never certifies an unknown child using ordinary frame-list counts', async (t) => {
+  for (const [type, url] of [
+    ['other', 'https://ordinary.test/worker.js'],
+    ['worker', ''],
+    ['worker', 'blob:https://ordinary.test/no-owner'],
+    ['worker', 'data:text/javascript,1'],
+    ['worker', 'https://vault.sliccy.ai/private'],
+  ]) {
+    const fixture = await children(t, ['https://other.test/', 'https://third.test/']);
+    await fixture.emit('Target.detachedFromTarget', { sessionId: 'child-1' });
+    await fixture.emit('Target.attachedToTarget', {
+      sessionId: 'worker',
+      targetInfo: { targetId: 'worker-target', type, url },
+    });
+    const before = fixture.calls.length;
+    assert.match((await fixture.command('Debugger.enable')).error ?? '', /slicc: refused:/);
+    assert.equal(
+      fixture.calls.slice(before).some(({ method }) => method === 'Debugger.enable'),
+      false
+    );
+  }
+});
+
 test('675 extension debugger refuses a missing native child snapshot and keeps the foreign-world latch', async (t) => {
   const fixture = await children(t, ['https://other.test/']);
   fixture.api.webNavigation.getAllFrames = async () => undefined;

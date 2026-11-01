@@ -920,6 +920,7 @@ class Connection {
         epoch: 0,
         frameEvents: 0,
         debuggerChildren: new Set(),
+        debuggerChildInfo: new Map(),
         debuggerRevision: 0,
         wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
@@ -1929,10 +1930,25 @@ class Connection {
 
   watchChild(tabId, method, p) {
     const tab = this.tabState(tabId);
-    const child = textOf(p.sessionId) || textOf(p.targetInfo?.targetId);
-    if (method === 'Target.detachedFromTarget') tab?.debuggerChildren.delete(child);
+    const child =
+      textOf(p.sessionId) ||
+      [...(tab?.debuggerChildInfo ?? [])].find(
+        ([, entry]) => entry.target === p.targetInfo?.targetId
+      )?.[0] ||
+      textOf(p.targetInfo?.targetId);
+    if (method === 'Target.detachedFromTarget') {
+      tab?.debuggerChildren.delete(child);
+      tab?.debuggerChildInfo.delete(child);
+    }
     if (method === 'Target.attachedToTarget' || method === 'Target.targetInfoChanged') {
       tab?.debuggerChildren.add(child);
+      tab?.debuggerChildInfo.set(child, {
+        target: p.targetInfo?.targetId,
+        type: p.targetInfo?.type,
+        url: p.targetInfo?.url,
+        generation: tab.documents.frames.get(tab.mainFrameId)?.loaderId,
+        revision: tab.debuggerRevision,
+      });
       this.debuggerGate.revoke(tabId);
     }
     const url = textOf(p.targetInfo?.url);
