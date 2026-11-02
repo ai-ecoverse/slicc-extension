@@ -283,12 +283,12 @@ export class DebuggerGate {
     return generation;
   }
 
-  context(tabId, state, id, unique) {
+  context(tabId, state, id, unique, requireCurrent = true) {
     const tab = this.connection.tabState(tabId);
     const entry = tab?.worlds.ids.get(id);
     const document = tab?.documents.contexts.get(id);
     return (
-      this.current(tabId, state) &&
+      (requireCurrent ? this.current(tabId, state) : this.convertible(tabId, state, false)) &&
       typeof unique === 'string' &&
       unique !== '' &&
       !entry?.hidden &&
@@ -541,12 +541,57 @@ export class DebuggerGate {
     );
   }
 
+  holdable(tabId, state, params) {
+    const pause = state?.pause;
+    const tab = this.connection.tabState(tabId);
+    return Boolean(
+      tab &&
+        params.reason !== 'instrumentation' &&
+        pause?.converted &&
+        !pause.published &&
+        !pause.verifying &&
+        Date.now() < pause.deadline &&
+        (tab.pendingFrames.size || state.suspension || !this.childrenPlaced(tabId)) &&
+        Array.isArray(params.callFrames) &&
+        params.callFrames.length &&
+        !this.connection.mentions(params) &&
+        JSON.stringify(params).length <= 1048576
+    );
+  }
+
+  holdPause(tabId, state, params) {
+    if (!this.holdable(tabId, state, params)) return false;
+    const pause = state.pause;
+    const contexts = new Map();
+    for (const frame of params.callFrames) {
+      const script = state.scripts.get(frame.location?.scriptId);
+      if (
+        !script ||
+        !this.context(tabId, state, script.context, script.unique, false) ||
+        objectContext(frame.callFrameId) !== script.context
+      )
+        return false;
+      contexts.set(script.context, script.unique);
+    }
+    if (!pause.holding) {
+      pause.holding = { params: structuredClone(params), contexts };
+      clearTimeout(pause.timer);
+      pause.deadline = Math.min(pause.deadline, Date.now() + 1000);
+      pause.timer = setTimeout(() => {
+        void this.resume(tabId, state);
+      }, pause.deadline - Date.now());
+    }
+    return true;
+  }
+
+  async pendingPause(tabId, state, params) {
+    if (!this.holdPause(tabId, state, params)) await this.resume(tabId, state);
+  }
+
   async paused(tabId, state, params) {
     const c = this.connection;
-    if (!(await this.pauseReady(tabId, state, params))) {
-      await this.resume(tabId, state);
-      return;
-    }
+    if (!(await this.pauseReady(tabId, state, params)))
+      return this.pendingPause(tabId, state, params);
     let pause = state.pause;
     if (!pause) {
       pause = {
@@ -636,7 +681,7 @@ export class DebuggerGate {
         if (this.states.get(tabId) === state && state.suspension === suspension)
           void this.drop(tabId);
       }, 5000);
-      if (state.pause) void this.resume(tabId, state);
+      if (state.pause && !state.pause.holding) void this.resume(tabId, state);
     }
     const suspension = state.suspension;
     if (suspension.reading) return;
@@ -655,6 +700,7 @@ export class DebuggerGate {
         ) {
           clearTimeout(suspension.timer);
           state.suspension = null;
+          this.revoke(tabId);
         }
       })
       .catch(() => undefined)
@@ -686,7 +732,18 @@ export class DebuggerGate {
       return;
     }
     const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
-    if (
+    const holding = state.pause?.holding;
+    if (holding && state.generation === generation) {
+      state.revision = tab.debuggerRevision;
+      if (
+        ![...holding.contexts].every(([id, unique]) =>
+          this.context(tabId, state, id, unique, false)
+        )
+      ) {
+        void this.drop(tabId);
+        return;
+      }
+    } else if (
       state.generation !== generation ||
       state.revision !== tab.debuggerRevision ||
       (state.pause?.published && !this.valid(tabId, state, state.pause))
@@ -711,5 +768,9 @@ export class DebuggerGate {
       !this.knownChildren(tab)
     )
       this.suspend(tabId, state);
+    if (holding && this.current(tabId, state)) {
+      state.pause.holding = null;
+      void this.paused(tabId, state, holding.params);
+    }
   }
 }
