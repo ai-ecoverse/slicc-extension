@@ -18,6 +18,8 @@ export function debuggerDomain(method) {
   );
 }
 
+class FrameWitnessMoved extends Error {}
+
 function refused() {
   throw new Error(protectedRules.refusal);
 }
@@ -93,7 +95,7 @@ export class DebuggerGate {
     });
   }
 
-  childrenPlaced(tabId) {
+  childrenPlaced(tabId, frameEvents) {
     const tab = this.connection.tabState(tabId);
     if (!tab) return false;
     if (!tab.debuggerChildren.size && ![...tab.frames.values()].some(Boolean)) return true;
@@ -102,7 +104,7 @@ export class DebuggerGate {
       placed &&
         this.knownChildren(tab) &&
         placed.revision === tab.debuggerRevision &&
-        placed.frames === tab.frameEvents &&
+        placed.frames === (frameEvents ?? tab.frameEvents) &&
         placed.marks === this.frameMarks(tab) &&
         placed.generation === tab.documents.frames.get(tab.mainFrameId)?.loaderId &&
         placed.children === this.childKey(tab)
@@ -236,6 +238,7 @@ export class DebuggerGate {
     const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
     const revision = tab.debuggerRevision;
     await this.placeChildren(tabId);
+    const frameEvents = tab.frameEvents;
     const [tree, frames] = await bounded(
       Promise.all([
         c.contentTree(tabId),
@@ -255,7 +258,6 @@ export class DebuggerGate {
       tab.worlds.foreign ||
       tab.debuggerFrameBlocks?.size ||
       tab.pendingFrames.size ||
-      !this.childrenPlaced(tabId) ||
       this.unplaced(tab) ||
       !this.placed(tab, tree.frameTree)
     )
@@ -278,6 +280,11 @@ export class DebuggerGate {
       if (!ordinary(frame) || !ordinary({ url: frame.securityOrigin })) refused();
       if (node.childFrames !== undefined && !Array.isArray(node.childFrames)) refused();
       pending.push(...(node.childFrames ?? []));
+    }
+    if (!this.childrenPlaced(tabId)) {
+      if (tab.frameEvents !== frameEvents && this.childrenPlaced(tabId, frameEvents))
+        throw new FrameWitnessMoved(protectedRules.refusal);
+      refused();
     }
     if (state && (!this.current(tabId, state) || state.generation !== generation)) refused();
     return generation;
@@ -588,6 +595,28 @@ export class DebuggerGate {
     if (!this.holdPause(tabId, state, params)) await this.resume(tabId, state);
   }
 
+  rehold(tabId, state, pause, params, error) {
+    if (
+      !(error instanceof FrameWitnessMoved) ||
+      state.pause !== pause ||
+      !this.convertible(tabId, state, false)
+    )
+      return false;
+    pause.verifying = false;
+    if (!this.holdPause(tabId, state, params)) return false;
+    pause.contexts.clear();
+    pause.frames.clear();
+    pause.scripts.clear();
+    this.suspend(tabId, state);
+    return true;
+  }
+
+  async failedPause(tabId, state, pause, params, error) {
+    if (this.rehold(tabId, state, pause, params, error)) return;
+    if (pause.converted && !pause.published) await this.drop(tabId);
+    else await this.resume(tabId, state);
+  }
+
   async paused(tabId, state, params) {
     const c = this.connection;
     if (!(await this.pauseReady(tabId, state, params)))
@@ -647,9 +676,8 @@ export class DebuggerGate {
         c.post({ method: script.method, params: script.params, sessionId: state.owner });
       c.post({ method: 'Debugger.paused', params, sessionId: state.owner });
       this.rememberPublished(state, pause);
-    } catch {
-      if (pause.converted && !pause.published) await this.drop(tabId);
-      else await this.resume(tabId, state);
+    } catch (error) {
+      await this.failedPause(tabId, state, pause, params, error);
     }
   }
 
