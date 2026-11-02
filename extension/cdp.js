@@ -1991,6 +1991,7 @@ class Connection {
   }
 
   watchFrame(tabId, tab, frame) {
+    this.debuggerGate.rememberFrame(tab, frame);
     tab.documents.frame(frame);
     tab.pendingFrames.delete(textOf(frame.id));
     tab.pendingFrames.delete('');
@@ -2050,6 +2051,7 @@ class Connection {
     if (!Array.isArray(tree?.childFrames)) return;
     tree.childFrames = tree.childFrames.filter((node) => {
       const frame = node?.frame ?? {};
+      this.debuggerGate.rememberFrame(tab, frame);
       const hidden = this.frameHidden(tab, frame);
       if (hidden && typeof frame.id === 'string') tab.frames.set(frame.id, true);
       return !hidden;

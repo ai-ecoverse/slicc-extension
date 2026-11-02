@@ -1,6 +1,6 @@
 import { debuggerRescue } from './debugger-rescue.js';
 import { protectedRules } from './protected-rules.js';
-import { frameIn, objectContext, PROFILED } from './shield.js';
+import { frameIn, objectContext, PROFILED, unknownFrame } from './shield.js';
 
 export const debuggerLifetimes = new Map([
   ['Debugger.enable', 'persistent'],
@@ -39,6 +39,35 @@ export class DebuggerGate {
     this.placements = new Map();
   }
 
+  frameBlocked(frame) {
+    const c = this.connection;
+    return Boolean(
+      c.protectedOrigin(frame.url) ||
+        c.protectedOrigin(frame.securityOrigin) ||
+        frame.errorOccurred ||
+        frame.unreachableUrl ||
+        frame.url?.startsWith('chrome-error:') ||
+        frame.url?.startsWith('chrome-extension:') ||
+        frame.securityOrigin?.startsWith('chrome-extension:')
+    );
+  }
+
+  rememberFrame(tab, frame) {
+    if (typeof frame.id !== 'string') return;
+    tab.debuggerFrameBlocks ??= new Set();
+    if (this.frameBlocked(frame)) tab.debuggerFrameBlocks.add(frame.id);
+    else if (!unknownFrame(frame)) tab.debuggerFrameBlocks.delete(frame.id);
+  }
+
+  frameMarks(tab) {
+    return JSON.stringify(
+      [...tab.frames]
+        .filter(([, hidden]) => hidden)
+        .map(([id]) => id)
+        .sort()
+    );
+  }
+
   childKey(tab) {
     return JSON.stringify(
       [...tab.debuggerChildren].sort().map((id) => [id, tab.debuggerChildInfo?.get(id)])
@@ -66,13 +95,15 @@ export class DebuggerGate {
 
   childrenPlaced(tabId) {
     const tab = this.connection.tabState(tabId);
-    if (!tab?.debuggerChildren.size) return true;
+    if (!tab) return false;
+    if (!tab.debuggerChildren.size && ![...tab.frames.values()].some(Boolean)) return true;
     const placed = this.placements.get(tabId);
     return Boolean(
       placed &&
         this.knownChildren(tab) &&
         placed.revision === tab.debuggerRevision &&
         placed.frames === tab.frameEvents &&
+        placed.marks === this.frameMarks(tab) &&
         placed.generation === tab.documents.frames.get(tab.mainFrameId)?.loaderId &&
         placed.children === this.childKey(tab)
     );
@@ -81,19 +112,22 @@ export class DebuggerGate {
   async placeChildren(tabId) {
     const c = this.connection;
     const tab = c.tabState(tabId);
-    if (!tab.debuggerChildren.size) return;
+    if (!tab.debuggerChildren.size && ![...tab.frames.values()].some(Boolean)) return;
     if (!this.knownChildren(tab)) refused();
     const revision = tab.debuggerRevision;
+    const marks = this.frameMarks(tab);
     const children = this.childKey(tab);
     const list = await bounded(c.frames(tabId));
     if (
       c.tabState(tabId) !== tab ||
       tab.debuggerRevision !== revision ||
+      this.frameMarks(tab) !== marks ||
       this.childKey(tab) !== children ||
       list.revision !== tab.frameEvents ||
       list.rootFrameId !== tab.mainFrameId ||
       list.rootLoaderId !== tab.documents.frames.get(tab.mainFrameId)?.loaderId ||
       list.remoteOwners.length >= list.frames.length ||
+      [...tab.frames.values()].filter(Boolean).length >= list.frames.length ||
       [...tab.debuggerChildren].filter((id) => tab.debuggerChildInfo.get(id)?.type === 'iframe')
         .length >= list.frames.length ||
       !list.frames.every((frame) => /^https?:\/\//.test(frame.url) && !c.protectedOrigin(frame.url))
@@ -102,6 +136,7 @@ export class DebuggerGate {
     this.placements.set(tabId, {
       revision,
       frames: list.revision,
+      marks,
       generation: list.rootLoaderId,
       children,
     });
@@ -152,12 +187,14 @@ export class DebuggerGate {
     const c = this.connection;
     const tab = c.tabState(tabId);
     return (
+      !state.suspension &&
       !c.closed &&
       this.states.get(tabId) === state &&
       c.state.sessions.get(state.owner)?.tabId === tabId &&
       tab?.documents.frames.get(tab.mainFrameId)?.loaderId === state.generation &&
       tab.debuggerRevision === state.revision &&
       !tab.worlds.foreign &&
+      !tab.debuggerFrameBlocks?.size &&
       tab.pendingFrames.size === 0 &&
       this.childrenPlaced(tabId) &&
       !this.unplaced(tab)
@@ -169,6 +206,7 @@ export class DebuggerGate {
     const tab = c.tabState(tabId);
     return (
       state?.enabled &&
+      (!requireWitness || !state.suspension) &&
       !c.closed &&
       this.states.get(tabId) === state &&
       c.state.sessions.get(state.owner)?.tabId === tabId &&
@@ -176,7 +214,7 @@ export class DebuggerGate {
       tab.debuggerRevision === state.revision &&
       !tab.worlds.foreign &&
       (!requireWitness || this.childrenPlaced(tabId)) &&
-      ![...tab.frames.values()].some(Boolean) &&
+      !tab.debuggerFrameBlocks?.size &&
       ![...tab.worlds.ids.values()].some((entry) => entry.hidden) &&
       ![...tab.documents.frames.values()].some(
         (frame) =>
@@ -193,7 +231,7 @@ export class DebuggerGate {
     const c = this.connection;
     const tab = c.tabState(tabId);
     if (tab?.worlds.foreign) throw new Error(PROFILED);
-    if (!tab?.pageObserved || tab.pendingFrames.size) refused();
+    if (!tab?.pageObserved || tab.pendingFrames.size || tab.debuggerFrameBlocks?.size) refused();
     if (this.unplaced(tab)) refused();
     const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
     const revision = tab.debuggerRevision;
@@ -215,6 +253,7 @@ export class DebuggerGate {
       tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation ||
       tree.sealed ||
       tab.worlds.foreign ||
+      tab.debuggerFrameBlocks?.size ||
       tab.pendingFrames.size ||
       !this.childrenPlaced(tabId) ||
       this.unplaced(tab) ||
@@ -431,6 +470,7 @@ export class DebuggerGate {
   async drop(tabId, owner) {
     const state = this.states.get(tabId);
     if (!state || (owner !== undefined && state.owner !== owner)) return;
+    if (state.suspension) clearTimeout(state.suspension.timer);
     this.placements.delete(tabId);
     this.states.delete(tabId);
     await this.resume(tabId, state);
@@ -485,7 +525,8 @@ export class DebuggerGate {
   }
 
   async pauseReady(tabId, state, params) {
-    if (!state?.enabled || this.privateInstrumentation(tabId, state, params)) return false;
+    if (!state?.enabled || state.suspension || this.privateInstrumentation(tabId, state, params))
+      return false;
     if (!this.childrenPlaced(tabId)) {
       try {
         await this.proof(tabId, state);
@@ -587,6 +628,41 @@ export class DebuggerGate {
     }
   }
 
+  suspend(tabId, state) {
+    if (!state.suspension) {
+      const suspension = { deadline: Date.now() + 5000 };
+      state.suspension = suspension;
+      suspension.timer = setTimeout(() => {
+        if (this.states.get(tabId) === state && state.suspension === suspension)
+          void this.drop(tabId);
+      }, 5000);
+      if (state.pause) void this.resume(tabId, state);
+    }
+    const suspension = state.suspension;
+    if (suspension.reading) return;
+    suspension.reading = true;
+    void this.proof(tabId)
+      .then(() => {
+        const tab = this.connection.tabState(tabId);
+        if (
+          this.states.get(tabId) === state &&
+          state.suspension === suspension &&
+          Date.now() < suspension.deadline &&
+          tab.documents.frames.get(tab.mainFrameId)?.loaderId === state.generation &&
+          tab.debuggerRevision === state.revision &&
+          !tab.debuggerFrameBlocks?.size &&
+          this.childrenPlaced(tabId)
+        ) {
+          clearTimeout(suspension.timer);
+          state.suspension = null;
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        suspension.reading = false;
+      });
+  }
+
   revoke(tabId) {
     const state = this.states.get(tabId);
     if (!state) return;
@@ -595,7 +671,7 @@ export class DebuggerGate {
       !tab ||
       this.connection.closed ||
       tab.worlds.foreign ||
-      [...tab.frames.values()].some(Boolean) ||
+      tab.debuggerFrameBlocks?.size ||
       [...tab.worlds.ids.values()].some((entry) => entry.hidden) ||
       [...tab.documents.frames.values()].some(
         (frame) =>
@@ -626,6 +702,14 @@ export class DebuggerGate {
       state.resuming = null;
       state.generation = generation;
       state.revision = tab.debuggerRevision;
+      if (state.suspension) clearTimeout(state.suspension.timer);
+      state.suspension = null;
     }
+    if (
+      state.suspension ||
+      ([...tab.frames.values()].some(Boolean) && !this.childrenPlaced(tabId)) ||
+      !this.knownChildren(tab)
+    )
+      this.suspend(tabId, state);
   }
 }
