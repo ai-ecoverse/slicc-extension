@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
-import { ownerSnapshot } from './fixtures/cdp-675-owner-snapshot.mjs';
 
 async function provisional(t) {
   const fixture = await backend();
@@ -50,13 +49,8 @@ test('675 extension complete same-generation ordinary placement lifts suspension
   ];
   const send = fixture.api.debugger.sendCommand;
   fixture.api.debugger.sendCommand = (source, method, params) =>
-    method === 'DOMSnapshot.getSnapshot'
-      ? Promise.resolve(
-          ownerSnapshot({
-            nodeName: '#document',
-            children: [{ nodeName: 'IFRAME', frameId: 'child' }],
-          })
-        )
+    method === 'DOM.getFrameOwner'
+      ? Promise.resolve({ backendNodeId: 10 })
       : send(source, method, params);
   await fixture.emit('Target.attachedToTarget', {
     sessionId: 'child-session',

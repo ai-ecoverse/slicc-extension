@@ -1,5 +1,4 @@
 import { listen } from '../../../extension/cdp.js';
-import { ownerSnapshot } from './cdp-675-owner-snapshot.mjs';
 
 function event() {
   const listeners = new Set();
@@ -43,7 +42,9 @@ export async function backend() {
     },
     windows: { onRemoved: event() },
     webNavigation: {
-      getAllFrames: async () => [{ frameId: 0, documentId: frame.loaderId, url: frame.url }],
+      getAllFrames: async () => [
+        { frameId: 0, parentFrameId: -1, documentId: frame.loaderId, url: frame.url },
+      ],
       onCreatedNavigationTarget: event(),
       onCommitted: event(),
     },
@@ -64,8 +65,6 @@ export async function backend() {
             },
           });
         }
-        if (method === 'DOMSnapshot.getSnapshot')
-          return ownerSnapshot({ nodeName: '#document', frameId: frame.id });
         if (method === 'Page.getFrameTree') {
           if (stall) return new Promise(() => {});
           return { frameTree: { frame: { ...frame } } };

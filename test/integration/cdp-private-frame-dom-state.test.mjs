@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
-import { ownerSnapshot } from './fixtures/cdp-675-owner-snapshot.mjs';
 
-async function memoryDom(t) {
+async function memoryDom(t, push = false) {
   const fixture = await backend();
   t.after(fixture.close);
   fixture.api.webNavigation.getAllFrames = async () => [
@@ -34,9 +33,51 @@ async function memoryDom(t) {
       if (params.nodeId !== node) throw new Error('Could not find node with given id');
       return { nodeIds: [node + 1000] };
     }
-    if (method === 'DOMSnapshot.getSnapshot') {
+    if (method === 'DOMSnapshot.getSnapshot')
+      return {
+        domNodes: [
+          { nodeType: 9, nodeName: '#document', frameId: 'root', backendNodeId: 100 },
+          {
+            nodeType: 1,
+            nodeName: 'IFRAME',
+            backendNodeId: 10,
+            attributes: [{ name: 'src', value: 'https://other.test/' }],
+          },
+        ],
+      };
+    if (method === 'DOM.getFrameOwner') {
       if (failure) throw new Error(failure);
-      return ownerSnapshot(root);
+      assert.equal(params.frameId, 'child');
+      if (push && node) {
+        await fixture.emit('DOM.setChildNodes', {
+          parentId: node,
+          nodes: [
+            {
+              nodeId: node + 1,
+              backendNodeId: 10,
+              nodeType: 1,
+              nodeName: 'IFRAME',
+              nodeValue: '',
+              frameId: 'child',
+              attributes: ['src', 'https://other.test/'],
+            },
+          ],
+        });
+        await fixture.emit('DOM.setChildNodes', {
+          parentId: node,
+          nodes: [
+            {
+              nodeId: node + 2,
+              backendNodeId: 20,
+              nodeType: 9,
+              nodeName: '#document',
+              nodeValue: '',
+              documentURL: 'https://vault.sliccy.ai/private-push',
+            },
+          ],
+        });
+      }
+      return { backendNodeId: 10, ...(node ? { nodeId: node + 1 } : {}) };
     }
     return original(source, method, params);
   };
@@ -47,7 +88,7 @@ async function memoryDom(t) {
   });
   return {
     ...fixture,
-    snapshotFailure(value) {
+    ownerFailure(value) {
       failure = value;
     },
   };
@@ -59,7 +100,7 @@ test('client frontend DOM node survives a private frame closure read on the shar
   assert.equal(document.error, undefined);
   const before = fixture.messages.length;
   const privateRead = await fixture.connection.frames(11);
-  assert.deepEqual(privateRead.remoteOwners, ['child']);
+  assert.deepEqual(privateRead.remoteOwners, [{ frameId: 'child', backendNodeId: 10 }]);
   assert.equal(fixture.messages.length, before);
   const listed = await fixture.command('DOM.querySelectorAll', {
     nodeId: document.result.root.nodeId,
@@ -69,11 +110,35 @@ test('client frontend DOM node survives a private frame closure read on the shar
   assert.equal(listed.result.nodeIds.length, 1);
 });
 
-for (const failure of ["'DOMSnapshot.getSnapshot' wasn't found", 'snapshot failed']) {
-  test(`a missing or erroring private snapshot refuses admission and rescues an owned pause: ${failure}`, async (t) => {
+test('private owner frontend pushes traverse the existing event scrub and never publish a protected document', async (t) => {
+  const fixture = await memoryDom(t, true);
+  await fixture.command('DOM.getDocument', { depth: 1, pierce: false });
+  const scrub = fixture.connection.sealEvent.bind(fixture.connection);
+  let pushes = 0;
+  fixture.connection.sealEvent = async (...args) => {
+    if (args[2] === 'DOM.setChildNodes') pushes++;
+    return scrub(...args);
+  };
+  const before = fixture.messages.length;
+  const proof = await fixture.connection.frames(11);
+  assert.deepEqual(proof.remoteOwners, [{ frameId: 'child', backendNodeId: 10 }]);
+  assert.equal(pushes, 2);
+  const events = fixture.messages
+    .slice(before)
+    .filter(({ method }) => method === 'DOM.setChildNodes');
+  assert.ok(events.some(({ params }) => params.nodes.some((node) => node.backendNodeId === 10)));
+  assert.doesNotMatch(JSON.stringify(events), /vault|private-push/);
+  assert.equal(
+    events.some(({ params }) => params.nodes.some((node) => node.backendNodeId === 20)),
+    false
+  );
+});
+
+for (const failure of ["'DOM.getFrameOwner' wasn't found", 'owner no longer belongs to parent']) {
+  test(`a missing or stale private frame owner refuses admission and rescues an owned pause: ${failure}`, async (t) => {
     const fixture = await memoryDom(t);
     await fixture.lease();
-    fixture.snapshotFailure(failure);
+    fixture.ownerFailure(failure);
     await assert.rejects(fixture.connection.frames(11), /refused|unsettled/);
     await fixture.emit('Debugger.scriptParsed', {
       scriptId: 'script',

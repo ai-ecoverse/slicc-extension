@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
-import { ownerSnapshot } from './fixtures/cdp-675-owner-snapshot.mjs';
 
 async function witnessedWorker(t) {
   const fixture = await children(t, []);
@@ -92,13 +91,8 @@ async function children(t, urls) {
   ];
   const send = fixture.api.debugger.sendCommand;
   fixture.api.debugger.sendCommand = (source, method, params) =>
-    method === 'DOMSnapshot.getSnapshot'
-      ? Promise.resolve(
-          ownerSnapshot({
-            nodeName: '#document',
-            children: urls.map((_, index) => ({ nodeName: 'IFRAME', frameId: `remote-${index}` })),
-          })
-        )
+    method === 'DOM.getFrameOwner'
+      ? Promise.resolve({ backendNodeId: Number(params.frameId.split('-').at(-1)) + 10 })
       : send(source, method, params);
   for (let index = 0; index < urls.length; index++)
     await fixture.emit('Target.attachedToTarget', {

@@ -465,15 +465,35 @@ class Connection {
     };
     if (this.closed || !Number.isSafeInteger(tabId) || !tab) refuse();
     const revision = tab.frameEvents;
-    const [frames, tree, snapshot] = await bounded(
-      Promise.all([
-        this.api.webNavigation?.getAllFrames?.({ tabId }),
-        this.send(tabId, 'Page.getFrameTree', {}),
-        this.send(tabId, 'DOMSnapshot.getSnapshot', {
-          computedStyleWhitelist: [],
-          includeUserAgentShadowTree: true,
-        }),
-      ]),
+    const debuggerRevision = tab.debuggerRevision;
+    const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
+    const children = this.debuggerGate.childKey(tab);
+    const [frames, tree, remoteOwners] = await bounded(
+      (async () => {
+        if (!generation || !this.debuggerGate.knownChildren(tab)) refuse();
+        const entries = [...tab.debuggerChildInfo.values()].filter(
+          (info) => info.type === 'iframe'
+        );
+        const targets = new Set(entries.map((info) => info.target));
+        if (
+          targets.size !== entries.length ||
+          tab.debuggerChildInfo.size !== tab.debuggerChildren.size
+        )
+          refuse();
+        const [native, page, owners] = await Promise.all([
+          this.api.webNavigation?.getAllFrames?.({ tabId }),
+          this.send(tabId, 'Page.getFrameTree', {}),
+          Promise.all(
+            entries.map(async (info) => {
+              const owner = await this.send(tabId, 'DOM.getFrameOwner', { frameId: info.target });
+              if (!Number.isSafeInteger(owner?.backendNodeId) || owner.backendNodeId <= 0) refuse();
+              return { frameId: info.target, backendNodeId: owner.backendNodeId };
+            })
+          ),
+        ]);
+        if (new Set(owners.map((owner) => owner.backendNodeId)).size !== owners.length) refuse();
+        return [native, page, owners];
+      })(),
       2000,
       'frame list'
     ).catch(refuse);
@@ -481,6 +501,9 @@ class Connection {
       this.closed ||
       this.tabState(tabId) !== tab ||
       tab.frameEvents !== revision ||
+      tab.debuggerRevision !== debuggerRevision ||
+      tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation ||
+      this.debuggerGate.childKey(tab) !== children ||
       !Array.isArray(frames) ||
       !frames.length
     )
@@ -518,7 +541,30 @@ class Connection {
       typeof frame?.id !== 'string' ||
       !frame.id ||
       typeof frame.loaderId !== 'string' ||
-      !frame.loaderId
+      !frame.loaderId ||
+      frame.id !== tab.mainFrameId ||
+      frame.loaderId !== generation
+    )
+      refuse();
+    const localFrames = [];
+    const pending = [tree.frameTree];
+    while (pending.length) {
+      const entry = pending.pop();
+      if (
+        typeof entry?.frame?.id !== 'string' ||
+        !entry.frame.id ||
+        typeof entry.frame.loaderId !== 'string' ||
+        !entry.frame.loaderId ||
+        (entry.childFrames !== undefined && !Array.isArray(entry.childFrames))
+      )
+        refuse();
+      localFrames.push(entry.frame.id);
+      pending.push(...(entry.childFrames ?? []));
+    }
+    if (
+      new Set(localFrames).size !== localFrames.length ||
+      remoteOwners.some((owner) => localFrames.includes(owner.frameId)) ||
+      localFrames.length + remoteOwners.length !== frames.length
     )
       refuse();
     return {
@@ -528,34 +574,9 @@ class Connection {
       rootFrameId: frame.id,
       rootLoaderId: frame.loaderId,
       frames,
-      remoteOwners: this.snapshotOwners(snapshot, frame.id),
+      localFrames,
+      remoteOwners,
     };
-  }
-
-  snapshotOwners(snapshot, frameId) {
-    const refuse = () => {
-      throw new Error('slicc: refused: unsettled frame list');
-    };
-    if (
-      !Array.isArray(snapshot?.domNodes) ||
-      snapshot.domNodes[0]?.nodeType !== 9 ||
-      snapshot.domNodes[0]?.frameId !== frameId
-    )
-      refuse();
-    const remoteOwners = new Set();
-    for (const node of snapshot.domNodes) {
-      if (!node || typeof node.nodeName !== 'string') refuse();
-      if (!['IFRAME', 'FRAME'].includes(node.nodeName)) continue;
-      if (typeof node.frameId !== 'string' || !node.frameId) refuse();
-      if (node.contentDocumentIndex === undefined) remoteOwners.add(node.frameId);
-      else if (
-        !Number.isSafeInteger(node.contentDocumentIndex) ||
-        snapshot.domNodes[node.contentDocumentIndex]?.nodeType !== 9 ||
-        snapshot.domNodes[node.contentDocumentIndex]?.frameId !== node.frameId
-      )
-        refuse();
-    }
-    return [...remoteOwners];
   }
 
   sessionsOf(tabId) {

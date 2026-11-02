@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
-import { ownerSnapshot } from './fixtures/cdp-675-owner-snapshot.mjs';
 
 test('a private frame reply arriving after relay disconnect never reaches CDP listeners', async () => {
   let port;
@@ -82,26 +81,6 @@ function nativeFrames(protectedChild = false) {
   ];
 }
 
-function owners() {
-  return {
-    root: {
-      nodeName: '#document',
-      children: [
-        {
-          nodeName: 'IFRAME',
-          frameId: 'remote-one',
-          attributes: ['src', 'https://other.test/one'],
-        },
-        {
-          nodeName: 'IFRAME',
-          frameId: 'remote-two',
-          attributes: ['src', 'https://third.test/two'],
-        },
-      ],
-    },
-  };
-}
-
 for (const protectedChild of [false, true]) {
   test(`private frame snapshot contains the complete guard-owned native closure, including ${protectedChild ? 'a protected frame among ordinary ones' : 'ordinary cross-origin children'}, without publishing its URLs`, async (t) => {
     const fixture = await backend();
@@ -111,10 +90,15 @@ for (const protectedChild of [false, true]) {
     fixture.api.debugger.sendCommand = (target, method, params) => {
       if (['frames', 'sliccExtension.frames', 'Slicc.frames', 'Unknown.control'].includes(method))
         return Promise.reject(new Error(`'${method}' wasn't found`));
-      return method === 'DOMSnapshot.getSnapshot'
-        ? Promise.resolve(ownerSnapshot(owners().root))
+      return method === 'DOM.getFrameOwner'
+        ? Promise.resolve({ backendNodeId: params.frameId === 'remote-one' ? 10 : 11 })
         : send(target, method, params);
     };
+    for (const [index, frameId] of ['remote-one', 'remote-two'].entries())
+      await fixture.emit('Target.attachedToTarget', {
+        sessionId: `private-child-${index}`,
+        targetInfo: { targetId: frameId, type: 'iframe', url: 'https://ordinary.test/' },
+      });
     const before = structuredClone(fixture.messages);
     assert.equal(
       typeof fixture.connection.frames,
@@ -128,7 +112,11 @@ for (const protectedChild of [false, true]) {
     assert.equal(snapshot.rootLoaderId, 'ordinary-document');
     assert.ok(Number.isSafeInteger(snapshot.revision));
     assert.deepEqual(snapshot.frames, nativeFrames(protectedChild));
-    assert.deepEqual(snapshot.remoteOwners.sort(), ['remote-one', 'remote-two']);
+    assert.deepEqual(snapshot.localFrames, ['root']);
+    assert.deepEqual(snapshot.remoteOwners, [
+      { frameId: 'remote-one', backendNodeId: 10 },
+      { frameId: 'remote-two', backendNodeId: 11 },
+    ]);
     assert.deepEqual(
       fixture.messages,
       before,
