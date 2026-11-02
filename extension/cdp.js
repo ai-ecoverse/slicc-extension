@@ -2217,6 +2217,10 @@ class Connection {
     const tab = this.tabState(details?.tabId);
     if (!tab) return;
     tab.frameEvents += 1;
+    if (Number.isInteger(details.frameId) && details.frameId > 0) {
+      this.debuggerGate.childCommit(details.tabId, details);
+      return;
+    }
     tab.debuggerRevision += 1;
     this.debuggerGate.revoke(details.tabId);
   }

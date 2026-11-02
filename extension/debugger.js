@@ -548,7 +548,7 @@ export class DebuggerGate {
     );
   }
 
-  holdable(tabId, state, params) {
+  holdable(tabId, state, params, commit = false) {
     const pause = state?.pause;
     const tab = this.connection.tabState(tabId);
     return Boolean(
@@ -558,7 +558,7 @@ export class DebuggerGate {
         !pause.published &&
         !pause.verifying &&
         Date.now() < pause.deadline &&
-        (tab.pendingFrames.size || state.suspension || !this.childrenPlaced(tabId)) &&
+        (commit || tab.pendingFrames.size || state.suspension || !this.childrenPlaced(tabId)) &&
         Array.isArray(params.callFrames) &&
         params.callFrames.length &&
         !this.connection.mentions(params) &&
@@ -566,8 +566,8 @@ export class DebuggerGate {
     );
   }
 
-  holdPause(tabId, state, params) {
-    if (!this.holdable(tabId, state, params)) return false;
+  holdPause(tabId, state, params, commit = false) {
+    if (!this.holdable(tabId, state, params, commit)) return false;
     const pause = state.pause;
     const contexts = new Map();
     for (const frame of params.callFrames) {
@@ -617,10 +617,36 @@ export class DebuggerGate {
     else await this.resume(tabId, state);
   }
 
+  publicationScripts(tabId, state, pause, params) {
+    if (!Array.isArray(params.callFrames) || params.callFrames.length === 0) refused();
+    const scripts = [];
+    for (const frame of params.callFrames) {
+      const script = state.scripts.get(frame.location?.scriptId);
+      if (
+        !script ||
+        !this.context(tabId, state, script.context, script.unique) ||
+        objectContext(frame.callFrameId) !== script.context
+      )
+        refused();
+      pause.frames.add(frame.callFrameId);
+      pause.contexts.set(script.context, script.unique);
+      if (!pause.scripts.has(frame.location.scriptId)) scripts.push(script);
+      pause.scripts.add(frame.location.scriptId);
+    }
+    if (!this.ids(tabId, state, pause, params)) refused();
+    return scripts;
+  }
+
   async paused(tabId, state, params) {
     const c = this.connection;
-    if (!(await this.pauseReady(tabId, state, params)))
+    const revision = state?.revision;
+    if (params.reason !== 'instrumentation' && state?.pause?.converted && !state.pause.published)
+      state.pause.params = structuredClone(params);
+    if (!(await this.pauseReady(tabId, state, params))) {
+      if (state?.revision !== revision) return;
       return this.pendingPause(tabId, state, params);
+    }
+    if (state?.revision !== revision) return;
     let pause = state.pause;
     if (!pause) {
       pause = {
@@ -647,6 +673,7 @@ export class DebuggerGate {
           revision: state.revision,
         })
       );
+      if (state.revision !== revision) return;
       if (state.pause !== pause || Date.now() >= pause.deadline) refused();
       if (params.reason === 'instrumentation') {
         await this.convert(tabId, state, pause);
@@ -654,31 +681,47 @@ export class DebuggerGate {
       }
       pause.verifying = true;
       await this.proof(tabId, state);
-      if (!Array.isArray(params.callFrames) || params.callFrames.length === 0) refused();
-      const scripts = [];
-      for (const frame of params.callFrames) {
-        const script = state.scripts.get(frame.location?.scriptId);
-        if (
-          !script ||
-          !this.context(tabId, state, script.context, script.unique) ||
-          objectContext(frame.callFrameId) !== script.context
-        )
-          refused();
-        pause.frames.add(frame.callFrameId);
-        pause.contexts.set(script.context, script.unique);
-        if (!pause.scripts.has(frame.location.scriptId)) scripts.push(script);
-        pause.scripts.add(frame.location.scriptId);
-      }
-      if (!this.ids(tabId, state, pause, params)) refused();
+      if (state.revision !== revision) return;
+      const scripts = this.publicationScripts(tabId, state, pause, params);
       await this.proof(tabId, state);
+      if (state.revision !== revision) return;
       if (state.pause !== pause || Date.now() >= pause.deadline) refused();
       for (const script of scripts)
         c.post({ method: script.method, params: script.params, sessionId: state.owner });
       c.post({ method: 'Debugger.paused', params, sessionId: state.owner });
       this.rememberPublished(state, pause);
     } catch (error) {
+      if (state.revision !== revision) return;
       await this.failedPause(tabId, state, pause, params, error);
     }
+  }
+
+  childCommit(tabId, frame) {
+    const tab = this.connection.tabState(tabId);
+    const state = this.states.get(tabId);
+    const current = this.convertible(tabId, state, false);
+    tab.debuggerRevision += 1;
+    if (this.frameBlocked(frame)) {
+      void this.drop(tabId);
+      return;
+    }
+    if (!current) {
+      this.revoke(tabId);
+      return;
+    }
+    state.revision = tab.debuggerRevision;
+    const pause = state.pause;
+    if (pause?.converted && !pause.published && pause.params) {
+      pause.verifying = false;
+      if (!this.holdPause(tabId, state, pause.params, true)) {
+        void this.drop(tabId);
+        return;
+      }
+      pause.contexts.clear();
+      pause.frames.clear();
+      pause.scripts.clear();
+    }
+    this.suspend(tabId, state);
   }
 
   async event(tabId, method, params) {
