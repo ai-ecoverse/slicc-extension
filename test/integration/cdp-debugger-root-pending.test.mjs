@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
+import { ownerSnapshot } from './fixtures/cdp-675-owner-snapshot.mjs';
 
 async function pendingPause(t) {
   const fixture = await backend();
@@ -50,10 +51,13 @@ async function placedChild(fixture) {
   ];
   const send = fixture.api.debugger.sendCommand;
   fixture.api.debugger.sendCommand = (source, method, params) =>
-    method === 'DOM.getDocument'
-      ? Promise.resolve({
-          root: { nodeName: '#document', children: [{ nodeName: 'IFRAME', frameId: 'child' }] },
-        })
+    method === 'DOMSnapshot.getSnapshot'
+      ? Promise.resolve(
+          ownerSnapshot({
+            nodeName: '#document',
+            children: [{ nodeName: 'IFRAME', frameId: 'child' }],
+          })
+        )
       : send(source, method, params);
   await fixture.emit('Target.attachedToTarget', {
     sessionId: 'child-session',

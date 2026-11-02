@@ -465,15 +465,18 @@ class Connection {
     };
     if (this.closed || !Number.isSafeInteger(tabId) || !tab) refuse();
     const revision = tab.frameEvents;
-    const [frames, tree, document] = await bounded(
+    const [frames, tree, snapshot] = await bounded(
       Promise.all([
         this.api.webNavigation?.getAllFrames?.({ tabId }),
         this.send(tabId, 'Page.getFrameTree', {}),
-        this.send(tabId, 'DOM.getDocument', { depth: -1, pierce: true }),
+        this.send(tabId, 'DOMSnapshot.getSnapshot', {
+          computedStyleWhitelist: [],
+          includeUserAgentShadowTree: true,
+        }),
       ]),
       2000,
       'frame list'
-    );
+    ).catch(refuse);
     if (
       this.closed ||
       this.tabState(tabId) !== tab ||
@@ -515,24 +518,9 @@ class Connection {
       typeof frame?.id !== 'string' ||
       !frame.id ||
       typeof frame.loaderId !== 'string' ||
-      !frame.loaderId ||
-      !document?.root
+      !frame.loaderId
     )
       refuse();
-    const remoteOwners = new Set();
-    const visit = (node) => {
-      if (['IFRAME', 'FRAME'].includes(node.nodeName) && !node.contentDocument) {
-        if (typeof node.frameId !== 'string' || !node.frameId) refuse();
-        remoteOwners.add(node.frameId);
-      }
-      for (const child of [
-        ...(node.children ?? []),
-        ...(node.shadowRoots ?? []),
-        ...(node.contentDocument ? [node.contentDocument] : []),
-      ])
-        visit(child);
-    };
-    visit(document.root);
     return {
       version: 1,
       rootDocumentId: root.documentId,
@@ -540,8 +528,34 @@ class Connection {
       rootFrameId: frame.id,
       rootLoaderId: frame.loaderId,
       frames,
-      remoteOwners: [...remoteOwners],
+      remoteOwners: this.snapshotOwners(snapshot, frame.id),
     };
+  }
+
+  snapshotOwners(snapshot, frameId) {
+    const refuse = () => {
+      throw new Error('slicc: refused: unsettled frame list');
+    };
+    if (
+      !Array.isArray(snapshot?.domNodes) ||
+      snapshot.domNodes[0]?.nodeType !== 9 ||
+      snapshot.domNodes[0]?.frameId !== frameId
+    )
+      refuse();
+    const remoteOwners = new Set();
+    for (const node of snapshot.domNodes) {
+      if (!node || typeof node.nodeName !== 'string') refuse();
+      if (!['IFRAME', 'FRAME'].includes(node.nodeName)) continue;
+      if (typeof node.frameId !== 'string' || !node.frameId) refuse();
+      if (node.contentDocumentIndex === undefined) remoteOwners.add(node.frameId);
+      else if (
+        !Number.isSafeInteger(node.contentDocumentIndex) ||
+        snapshot.domNodes[node.contentDocumentIndex]?.nodeType !== 9 ||
+        snapshot.domNodes[node.contentDocumentIndex]?.frameId !== node.frameId
+      )
+        refuse();
+    }
+    return [...remoteOwners];
   }
 
   sessionsOf(tabId) {

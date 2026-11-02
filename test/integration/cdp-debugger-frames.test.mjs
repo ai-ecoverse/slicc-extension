@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
+import { ownerSnapshot } from './fixtures/cdp-675-owner-snapshot.mjs';
 
 async function witnessedWorker(t) {
   const fixture = await children(t, []);
@@ -62,7 +63,12 @@ test('675 extension R1 resumes a known evaluation before any invalidated child-w
   assert.equal(calls.filter(({ method }) => method === 'Debugger.resume').length, 1);
   assert.equal(
     calls.some(({ method }) =>
-      ['Debugger.pause', 'Page.getFrameTree', 'DOM.getDocument'].includes(method)
+      [
+        'Debugger.pause',
+        'Page.getFrameTree',
+        'DOM.getDocument',
+        'DOMSnapshot.getSnapshot',
+      ].includes(method)
     ),
     false
   );
@@ -86,13 +92,13 @@ async function children(t, urls) {
   ];
   const send = fixture.api.debugger.sendCommand;
   fixture.api.debugger.sendCommand = (source, method, params) =>
-    method === 'DOM.getDocument'
-      ? Promise.resolve({
-          root: {
+    method === 'DOMSnapshot.getSnapshot'
+      ? Promise.resolve(
+          ownerSnapshot({
             nodeName: '#document',
             children: urls.map((_, index) => ({ nodeName: 'IFRAME', frameId: `remote-${index}` })),
-          },
-        })
+          })
+        )
       : send(source, method, params);
   for (let index = 0; index < urls.length; index++)
     await fixture.emit('Target.attachedToTarget', {

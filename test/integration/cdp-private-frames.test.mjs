@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
+import { ownerSnapshot } from './fixtures/cdp-675-owner-snapshot.mjs';
 
 test('a private frame reply arriving after relay disconnect never reaches CDP listeners', async () => {
   let port;
@@ -110,8 +111,8 @@ for (const protectedChild of [false, true]) {
     fixture.api.debugger.sendCommand = (target, method, params) => {
       if (['frames', 'sliccExtension.frames', 'Slicc.frames', 'Unknown.control'].includes(method))
         return Promise.reject(new Error(`'${method}' wasn't found`));
-      return method === 'DOM.getDocument'
-        ? Promise.resolve(owners())
+      return method === 'DOMSnapshot.getSnapshot'
+        ? Promise.resolve(ownerSnapshot(owners().root))
         : send(target, method, params);
     };
     const before = structuredClone(fixture.messages);
