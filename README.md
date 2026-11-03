@@ -74,6 +74,8 @@ npm run pack
 
 `six/extension/` is slicc's `packages/chrome-extension/src` and `six/shared-ts/` the `packages/shared-ts` modules it reaches, both imported from the slicc commit in [`six/upstream.json`](six/upstream.json) and edited here from then on. [`six/manifest.json`](six/manifest.json) is that release's manifest, the permission baseline when the live listing is unreachable; `six/upstream.json` pins its sha256. `@slicc/shared-ts` resolves through `paths` in `tsconfig.json`, which esbuild reads too; cherry is the exact-pinned npm package `@ai-ecoverse/cherry`, bundled at build time.
 
+`CHROME_WEB_STORE_MODE` defaults to `publish`, which uploads and submits the release. Set the repository variable to `upload` to upload a draft without submitting it, then fill in the permission justifications in the store dashboard. Unset the variable and re-run the release’s `cws` job to upload and publish; the API documentation does not confirm that replacing an unsubmitted draft with the same version is allowed, so if the store refuses the repeated upload, submit the existing draft in the dashboard. Other mode values are rejected.
+
 Releases roll forward only. Before publishing, `scripts/check-six-floor.mjs` refuses a release based on an older six than the live listing carries. Once the live build comes from `six/`, it refuses legacy `(six vX)` builds and any release that isn't newer than the live one, and `scripts/cws-publish.mjs` checks the version against the store again.
 
 ## Permissions
