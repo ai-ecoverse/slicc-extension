@@ -1,3 +1,4 @@
+import { setTimeout } from 'node:timers/promises';
 import { createInflateRaw } from 'node:zlib';
 
 export const LIVE_UPDATE_XML_URL =
@@ -89,22 +90,36 @@ export function extractManifestFromZip(zipBuf) {
   throw new Error('manifest.json not found in CRX/ZIP');
 }
 
-export async function fetchLiveVersion(opts = {}) {
+async function fetchBody(url, label, method, opts) {
   const f = opts.fetchImpl ?? fetch;
-  const url = opts.url ?? LIVE_UPDATE_XML_URL;
-  const response = await f(url);
-  if (!response.ok) {
-    throw new Error(`Update XML fetch failed: ${response.status} ${response.statusText}`);
+  const sleep = opts.sleepImpl ?? setTimeout;
+  for (let attempt = 1; ; attempt++) {
+    let retryable = false;
+    try {
+      const response = await f(url);
+      if (!response.ok) {
+        retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+        await response.body?.cancel();
+        throw new Error(`${label}: ${response.status} ${response.statusText}`);
+      }
+      return await response[method]();
+    } catch (err) {
+      retryable ||= err instanceof TypeError && /^(fetch failed|terminated)$/.test(err.message);
+      if (!retryable || attempt === 3) {
+        throw new Error(`${err.message} (${attempt} attempt${attempt === 1 ? '' : 's'})`, {
+          cause: err,
+        });
+      }
+      await sleep(attempt === 1 ? 1000 : 3000);
+    }
   }
-  return response.text();
+}
+
+export async function fetchLiveVersion(opts = {}) {
+  return fetchBody(opts.url ?? LIVE_UPDATE_XML_URL, 'Update XML fetch failed', 'text', opts);
 }
 
 export async function fetchCrxManifest(codebaseUrl, opts = {}) {
-  const f = opts.fetchImpl ?? fetch;
-  const response = await f(codebaseUrl);
-  if (!response.ok) {
-    throw new Error(`CRX download failed: ${response.status} ${response.statusText}`);
-  }
-  const buf = Buffer.from(await response.arrayBuffer());
+  const buf = Buffer.from(await fetchBody(codebaseUrl, 'CRX download failed', 'arrayBuffer', opts));
   return extractManifestFromCrx(buf);
 }
