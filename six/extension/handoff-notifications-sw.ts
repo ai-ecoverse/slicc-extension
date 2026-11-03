@@ -166,7 +166,10 @@ function onHandoffHeaders(details: {
   if (details.tabId >= 0) {
     chrome.tabs
       .get(details.tabId)
-      .then((tab) => dispatch(tab.title))
+      .then((tab) => {
+        if (!handoffUrlAllowed(tab.url ?? '') || isProtectedUrl(tab.pendingUrl)) return;
+        dispatch(tab.url?.split('#')[0] === details.url.split('#')[0] ? tab.title : undefined);
+      })
       .catch(() => dispatch());
   } else {
     dispatch();
