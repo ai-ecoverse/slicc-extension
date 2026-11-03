@@ -599,6 +599,36 @@ class Connection {
     };
   }
 
+  frameKind(frame) {
+    const url = frame.url;
+    if (frame.errorOccurred || url?.startsWith('chrome-error:')) return 'error';
+    if (typeof url !== 'string' || !/^https?:\/\//.test(url) || !URL.canParse(url))
+      return 'unknown';
+    if (this.protectedOrigin(url)) return 'protected';
+    return frame.documentLifecycle === undefined || frame.documentLifecycle === 'active'
+      ? 'ordinary'
+      : 'unknown';
+  }
+
+  frameReply(snapshot) {
+    return {
+      version: 2,
+      revision: snapshot.revision,
+      rootFrameId: snapshot.rootFrameId,
+      rootLoaderId: snapshot.rootLoaderId,
+      frames: snapshot.frames.map((frame) => ({
+        frameId: frame.frameId,
+        parentFrameId: frame.parentFrameId,
+        kind: this.frameKind(frame),
+      })),
+      localFrames: [...snapshot.localFrames],
+      remoteOwners: snapshot.remoteOwners.map(({ frameId, backendNodeId }) => ({
+        frameId,
+        backendNodeId,
+      })),
+    };
+  }
+
   sessionsOf(tabId) {
     return [...(this.tabState(tabId)?.sessions ?? [])];
   }
@@ -2383,7 +2413,8 @@ class Connection {
       const { id, tabId } = message.privateFrames;
       const task = this.frames(tabId)
         .then(
-          (result) => this.port.postMessage({ privateFrames: { id, result } }),
+          (result) =>
+            this.port.postMessage({ privateFrames: { id, result: this.frameReply(result) } }),
           () =>
             this.port.postMessage({
               privateFrames: { id, error: 'slicc: refused: unsettled frame list' },

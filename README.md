@@ -14,6 +14,8 @@ Chrome MV3 extension that serves both six (the hosted leader tab on `www.sliccy.
 
 All tabs on one CDP connection share a 64 MiB retained-byte limit for script metadata, cached script events and held pause data. A debugger owner that would exceed it drops its records and resumes privately; commit and drop release its bytes, and the next ordinary document can start again.
 
+`sliccExtension.frames(tabId)` returns a URL-free placement snapshot for an attached tab. Version 2 contains `revision`, `rootFrameId`, `rootLoaderId`, `frames` with numeric `frameId`, `parentFrameId` and a worker-computed `kind` (`ordinary`, `protected`, `error` or `unknown`), `localFrames` and `remoteOwners` with `frameId` and `backendNodeId`. Counts are the lengths of those lists. The worker checks the current generation and complete native frame closure before replying and classifies origins with its existing protected matcher. URLs, origins and native document IDs never leave the worker on this API; root identity uses the verified frame and loader IDs. Replies use their dedicated channel and never reach `cdp.on` listeners. Missing, stale or incomplete placement evidence still refuses.
+
 ## Six — hosted leader tab
 
 The extension manages a pinned leader tab at `https://www.sliccy.ai/?slicc=leader`. The leader tab connects via `externally_connectable` and gets:
