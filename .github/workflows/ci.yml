@@ -159,6 +159,7 @@ jobs:
       - name: Publish to the Chrome Web Store
         shell: bash
         env:
+          CHROME_WEB_STORE_MODE: ${{ vars.CHROME_WEB_STORE_MODE }}
           CHROME_WEB_STORE_PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
           CHROME_WEB_STORE_ITEM_ID: ${{ vars.CHROME_WEB_STORE_ITEM_ID }}
           CHROME_WEB_STORE_PUBLISH_TYPE: ${{ vars.CHROME_WEB_STORE_PUBLISH_TYPE }}

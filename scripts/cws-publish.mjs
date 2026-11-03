@@ -37,6 +37,9 @@ function parsePublishType(value) {
 }
 
 export function readConfig(envObj) {
+  const mode = getEnv(envObj, 'CHROME_WEB_STORE_MODE') ?? 'publish';
+  if (mode !== 'publish' && mode !== 'upload')
+    throw new Error('CHROME_WEB_STORE_MODE must be publish or upload.');
   const publisherId = getEnv(envObj, 'CHROME_WEB_STORE_PUBLISHER_ID');
   const itemId = getEnv(envObj, 'CHROME_WEB_STORE_ITEM_ID');
   const saJson = getEnv(envObj, 'CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON');
@@ -56,6 +59,7 @@ export function readConfig(envObj) {
   if (!sa.client_email || !sa.private_key)
     throw new Error('Service account must include client_email and private_key.');
   return {
+    mode,
     publisherId,
     itemId,
     version,
@@ -245,6 +249,11 @@ export async function publishRelease(opts = {}) {
         throw new Error(`Async upload did not complete after ${maxAttempts} checks.`);
       await waitMs(pollMs);
     }
+  }
+
+  if (config.mode === 'upload') {
+    log.log(`uploaded ${config.version} as a draft, not submitted`);
+    return { itemId: config.itemId, uploadState: 'SUCCEEDED' };
   }
 
   const body = {};
