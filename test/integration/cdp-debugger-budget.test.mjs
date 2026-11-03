@@ -60,3 +60,69 @@ test('debugger script flood frees the shared budget and the next ordinary docume
   await f.command('Debugger.disable');
   assert.equal(gate.retainedBytes, 0);
 });
+
+async function published(f) {
+  await f.emit('Debugger.scriptParsed', parsed);
+  await f.emit('Debugger.paused', paused);
+  const gate = f.connection.debuggerGate;
+  const state = gate.states.get(11);
+  assert.equal(state.pause.published, true);
+  gate.clearScripts(state);
+  assert.ok(gate.retainedBytes > 0);
+  return { gate, state, pause: state.pause };
+}
+
+async function clientResume(f) {
+  const reply = await f.command('Debugger.resume');
+  assert.equal(reply.error, undefined);
+  await f.emit('Debugger.resumed', {});
+}
+
+test('published pause client resume refunds its reservation and preserves owned resumed publication', async (t) => {
+  const f = await backend();
+  t.after(f.close);
+  await f.lease();
+  const { gate, state, pause } = await published(f);
+  await clientResume(f);
+  assert.equal(gate.retainedBytes, 0);
+  assert.equal(state.retainedBytes, 0);
+  assert.equal(state.pause, null);
+  assert.equal(state.resuming, null);
+  assert.equal(pause.data, null);
+  assert.deepEqual(pause.retained, {});
+  assert.equal(pause.contexts.get(1), 'ordinary-context');
+  assert.equal(f.messages.filter(({ method }) => method === 'Debugger.resumed').length, 1);
+  assert.equal(
+    f.messages.find(({ method }) => method === 'Debugger.resumed').sessionId,
+    f.sessionId
+  );
+});
+
+test('three ordinary published pause client resume cycles leave no shared reservation debt', async (t) => {
+  const f = await backend();
+  t.after(f.close);
+  await f.lease();
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const { gate, state } = await published(f);
+    await clientResume(f);
+    assert.equal(gate.retainedBytes, 0);
+    assert.equal(state.retainedBytes, 0);
+    assert.equal(state.pause, null);
+    assert.equal(state.resuming, null);
+  }
+  assert.equal(f.messages.filter(({ method }) => method === 'Debugger.resumed').length, 3);
+});
+
+test('new document revoke leaves no completed client resume reservation behind', async (t) => {
+  const f = await backend();
+  t.after(f.close);
+  await f.lease();
+  const { gate, state } = await published(f);
+  await clientResume(f);
+  await f.commit();
+  assert.equal(state.generation, 'next-document');
+  assert.equal(gate.retainedBytes, 0);
+  assert.equal(state.retainedBytes, 0);
+  assert.equal(state.pause, null);
+  assert.equal(state.resuming, null);
+});

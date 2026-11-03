@@ -455,6 +455,8 @@ export class DebuggerGate {
     if (method === 'Debugger.removeBreakpoint' && !state.breakpoints.has(params.breakpointId))
       refused();
     if (method === 'Debugger.resume') {
+      this.releasePause(state, state.resuming);
+      this.releasePause(state, pause);
       state.resuming = pause;
       state.pause = null;
     }
@@ -829,6 +831,7 @@ export class DebuggerGate {
     }
     if (method === 'Debugger.resumed' && state?.resuming) {
       const pause = state.resuming;
+      this.releasePause(state, pause);
       state.resuming = null;
       if (
         pause.published &&
