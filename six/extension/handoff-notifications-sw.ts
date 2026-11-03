@@ -131,7 +131,6 @@ function dispatchHandoffLick(payload: NavigateLickMsg): void {
     ...(payload.instruction ? { instruction: payload.instruction } : {}),
     ...(payload.branch ? { branch: payload.branch } : {}),
     ...(payload.path ? { path: payload.path } : {}),
-    ...(payload.title ? { title: payload.title } : {}),
   });
   chrome.runtime.sendMessage({ source: 'service-worker' as const, payload }).catch(() => {});
 }
@@ -158,22 +157,8 @@ function onHandoffHeaders(details: {
   const alreadyNotified = notifiedHandoffFingerprints.has(fingerprint);
   notifiedHandoffFingerprints.add(fingerprint);
   const payload = buildNavigateLick(match, details.url, details.tabId);
-  const dispatch = (title?: string): void => {
-    if (title) payload.title = title;
-    dispatchHandoffLick(payload);
-  };
   if (!alreadyNotified) queueHandoffNotification(fingerprint, match, details.url);
-  if (details.tabId >= 0) {
-    chrome.tabs
-      .get(details.tabId)
-      .then((tab) => {
-        if (!handoffUrlAllowed(tab.url ?? '') || isProtectedUrl(tab.pendingUrl)) return;
-        dispatch(tab.url?.split('#')[0] === details.url.split('#')[0] ? tab.title : undefined);
-      })
-      .catch(() => dispatch());
-  } else {
-    dispatch();
-  }
+  dispatchHandoffLick(payload);
 }
 
 export function installHandoffNotifications(): void {

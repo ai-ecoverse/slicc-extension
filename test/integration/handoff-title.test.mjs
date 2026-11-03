@@ -5,12 +5,12 @@ import { test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { extId, openExtensionPage } from './extension-page.mjs';
 
-test('six handoff messages use the resolved tab state', async (t) => {
+test('six handoffs send response metadata without a tab title', async (t) => {
   const chrome = await launch({
     prepare: async (paths) => {
       await appendFile(
         join(paths[0], 'six-sw.js'),
-        '\nglobalThis.handoffTest = { headers: onHandoffHeaders, post: postLickToWelcomedLeaderPorts };\n'
+        '\nglobalThis.handoffTest = { headers: onHandoffHeaders };\n'
       );
     },
   });
@@ -33,134 +33,109 @@ test('six handoff messages use the resolved tab state', async (t) => {
     await panel.evaluate(`globalThis.handoffMessages = []; chrome.runtime.onMessage.addListener((message) => {
       if (message.source === 'service-worker') globalThis.handoffMessages.push(message.payload);
     }); true`);
-    const { targetInfos } = await chrome.cdp.send('Target.getTargets');
-    const worker = targetInfos.find(
-      (info) =>
-        info.type === 'service_worker' && info.url === `chrome-extension://${extId}/background.js`
-    );
-    assert.ok(worker);
-    const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
-      targetId: worker.targetId,
-      flatten: true,
-    });
-    const url = 'https://ordinary.test/linked?n=title';
-    const rows = [
-      ['current vault', { url: 'https://vault.sliccy.ai/private', title: 'Vault title' }, false],
-      [
-        'navigation while lookup waits',
-        { navigateTo: 'https://vault.sliccy.ai/private' },
-        false,
-        undefined,
-        'https://ordinary.test/marker',
-      ],
-      ['current seven', { url: 'https://seven.sliccy.ai/', title: 'Seven title' }, false],
-      [
-        'pending vault',
-        { url, pendingUrl: 'https://vault.sliccy.ai/private', title: 'Page title' },
-        false,
-      ],
-      ['same page', { url, title: 'Page title' }, true, 'Page title'],
-      ['fragment', { url: `${url}#section`, title: 'Page title' }, true, 'Page title'],
-      [
-        'ordinary navigation',
-        { url: 'https://ordinary.test/elsewhere', title: 'Other title' },
-        true,
-      ],
-      ['lookup failure', null, true],
-      [
-        'www handoff',
-        { url: 'https://www.sliccy.ai/handoff#part', title: 'Handoff title' },
-        true,
-        'Handoff title',
-        'https://www.sliccy.ai/handoff',
-      ],
-    ];
-    for (const [name, tab, sent, title, responseUrl = url] of rows) {
+    const received = async (target, url, instruction) => {
+      assert.equal(
+        await leader.until(
+          (target) => window.handoffMessages.some((m) => m.target === target),
+          target
+        ),
+        true
+      );
+      assert.equal(
+        await panel.until(
+          `globalThis.handoffMessages.some((m) => m.target === ${JSON.stringify(target)})`
+        ),
+        true
+      );
+      const messages = [
+        await leader.evaluate(
+          (target) => window.handoffMessages.filter((m) => m.target === target),
+          target
+        ),
+        await panel.evaluate(
+          `globalThis.handoffMessages.filter((m) => m.target === ${JSON.stringify(target)})`
+        ),
+      ];
+      for (const licks of messages) {
+        assert.equal(licks.length, 1);
+        assert.equal(Object.hasOwn(licks[0], 'title'), false);
+        assert.equal(licks[0].url, url);
+        assert.equal(licks[0].verb, 'handoff');
+        assert.equal(licks[0].instruction, instruction);
+      }
+    };
+    for (const [name, source, destination] of [
+      ['ordinary', 'https://ordinary.test/', 'https://ordinary.test/linked'],
+      ['seven', 'https://seven.sliccy.ai/', 'https://ordinary.test/linked'],
+      ['www', 'https://www.sliccy.ai/', 'https://ordinary.test/linked'],
+      ['vault', 'https://vault.sliccy.ai/', 'https://ordinary.test/linked'],
+      ['www handoff', 'https://www.sliccy.ai/', 'https://www.sliccy.ai/handoff'],
+    ]) {
       await t.test(name, async () => {
-        const marker = `https://upstream.test/done-${encodeURIComponent(name)}`;
+        const page = await chrome.visit(t, source);
+        await page.evaluate(() => {
+          document.title = 'Source page title';
+        });
+        const stamp = `${Date.now()}-${name.replaceAll(' ', '-')}`;
+        const url = `${destination}?n=${stamp}`;
+        await page.evaluate((url) => {
+          location.href = url;
+        }, url);
+        await page.until((url) => location.href === url && document.readyState === 'complete', url);
+        await received(`https://upstream.test/handoff-${stamp}`, url, `handoff ${stamp}`);
+      });
+    }
+    await t.test(
+      'delivery does not wait for a tab lookup or depend on later navigation',
+      async () => {
+        const page = await chrome.visit(t, 'https://ordinary.test/marker');
+        const { targetInfos } = await chrome.cdp.send('Target.getTargets');
+        const worker = targetInfos.find(
+          (info) =>
+            info.type === 'service_worker' &&
+            info.url === `chrome-extension://${extId}/background.js`
+        );
+        assert.ok(worker);
+        const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
+          targetId: worker.targetId,
+          flatten: true,
+        });
         const result = await chrome.cdp.send(
           'Runtime.evaluate',
           {
-            expression: `(${async function (tab, responseUrl, marker) {
-              const original = chrome.tabs.get;
-              const moving = tab?.navigateTo
-                ? await chrome.tabs.create({ url: responseUrl })
-                : undefined;
-              const tabId = moving?.id ?? 987654;
-              let resolve;
-              let reject;
-              const pending = new Promise((yes, no) => {
-                resolve = yes;
-                reject = no;
-              });
-              chrome.tabs.get = (id) => (id === tabId ? pending : original.call(chrome.tabs, id));
-              try {
-                handoffTest.headers({
-                  url: responseUrl,
-                  tabId,
-                  responseHeaders: [
-                    {
-                      name: 'Link',
-                      value:
-                        '<https://upstream.test/title-target>; rel="https://www.sliccy.ai/rel/handoff"',
-                    },
-                  ],
-                });
-                if (moving) {
-                  await new Promise((done) => {
-                    const listener = (id, change) => {
-                      if (id === tabId && change.status === 'complete') {
-                        chrome.tabs.onUpdated.removeListener(listener);
-                        done();
-                      }
-                    };
-                    chrome.tabs.onUpdated.addListener(listener);
-                    chrome.tabs.update(tabId, { url: tab.navigateTo });
-                  });
-                  resolve(await original.call(chrome.tabs, tabId));
-                } else if (tab) resolve(tab);
-                else reject(new Error('Tab closed'));
-                await pending.catch(() => {});
-                await Promise.resolve();
-                await Promise.resolve();
-                const payload = { kind: 'extension.lick', type: 'navigate-lick', target: marker };
-                handoffTest.post(payload);
-                await chrome.runtime
-                  .sendMessage({ source: 'service-worker', payload })
-                  .catch(() => {});
-              } finally {
-                chrome.tabs.get = original;
-                if (moving) await chrome.tabs.remove(tabId);
-              }
-            }})(${JSON.stringify(tab)}, ${JSON.stringify(responseUrl)}, ${JSON.stringify(marker)})`,
-            awaitPromise: true,
+            expression: `(() => {
+          const original = chrome.tabs.get;
+          let lookups = 0;
+          chrome.tabs.get = (id) => {
+            if (id !== 987654) return original.call(chrome.tabs, id);
+            lookups += 1;
+            return new Promise(() => {});
+          };
+          try {
+            handoffTest.headers({
+              url: 'https://ordinary.test/marker',
+              tabId: 987654,
+              responseHeaders: [{ name: 'Link', value: '<https://upstream.test/without-lookup>; rel="https://www.sliccy.ai/rel/handoff"' }],
+            });
+            return lookups;
+          } finally {
+            chrome.tabs.get = original;
+          }
+        })()`,
             returnByValue: true,
           },
           sessionId
         );
         assert.equal(result.exceptionDetails, undefined);
-        await leader.until(
-          (marker) => window.handoffMessages.some((m) => m.target === marker),
-          marker
+        assert.equal(result.result.value, 0);
+        await page.goto('https://vault.sliccy.ai/');
+        await received(
+          'https://upstream.test/without-lookup',
+          'https://ordinary.test/marker',
+          undefined
         );
-        await panel.until(
-          `globalThis.handoffMessages.some((m) => m.target === ${JSON.stringify(marker)})`
-        );
-        const portMessages = await leader.evaluate(() => window.handoffMessages.splice(0));
-        const runtimeMessages = await panel.evaluate('globalThis.handoffMessages.splice(0)');
-        for (const messages of [portMessages, runtimeMessages]) {
-          const licks = messages.filter(
-            (message) => message.target === 'https://upstream.test/title-target'
-          );
-          assert.equal(licks.length, sent ? 1 : 0);
-          if (sent) {
-            assert.equal(licks[0].title, title);
-            assert.equal(licks[0].url, responseUrl);
-            assert.equal(licks[0].verb, 'handoff');
-          }
-        }
-      });
-    }
+      }
+    );
   } finally {
     await chrome.close();
   }

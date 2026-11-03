@@ -22,7 +22,6 @@ export interface NavigateLickMsg {
   instruction?: string;
   branch?: string;
   path?: string;
-  title?: string;
   tabId?: number;
 }
 

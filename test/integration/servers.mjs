@@ -78,7 +78,7 @@ export async function pages(tls) {
       request.socket.destroy();
       return;
     }
-    if (pathname === '/linked') {
+    if (pathname === '/linked' || pathname === '/handoff') {
       const n = searchParams.get('n') ?? '';
       const link = [
         `<https://upstream.test/handoff-${n}>; rel="https://www.sliccy.ai/rel/handoff"; title="handoff ${n}"`,
