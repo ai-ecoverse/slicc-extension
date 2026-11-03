@@ -83,6 +83,7 @@ Releases roll forward only. Before publishing, `scripts/check-six-floor.mjs` ref
 | Permission                            | Used by | Justification                                           |
 | ------------------------------------- | ------- | ------------------------------------------------------- |
 | `debugger`                            | Both    | CDP proxy for seven pages and six bridge                |
+| `alarms`                              | Seven   | Wakes the service worker to detach a stuck debugger session |
 | `tabs`                                | Six     | Leader tab management, tab queries for bridge CDP       |
 | `tabGroups`                           | Six     | Tab group management for leader tab                     |
 | `identity`                            | Both    | Adobe IMS sign-in via launchWebAuthFlow                 |
