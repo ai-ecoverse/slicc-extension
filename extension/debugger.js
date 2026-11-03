@@ -2,6 +2,8 @@ import { debuggerRescue } from './debugger-rescue.js';
 import { protectedRules } from './protected-rules.js';
 import { frameIn, objectContext, PROFILED, unknownFrame } from './shield.js';
 
+const retainedLimit = 64 * 1024 * 1024;
+
 export const debuggerLifetimes = new Map([
   ['Debugger.enable', 'persistent'],
   ['Debugger.setInstrumentationBreakpoint', 'persistent'],
@@ -39,6 +41,68 @@ export class DebuggerGate {
     this.connection = connection;
     this.states = new Map();
     this.placements = new Map();
+    this.retainedBytes = 0;
+  }
+
+  releaseBytes(state, bytes) {
+    state.retainedBytes -= bytes;
+    this.retainedBytes -= bytes;
+  }
+
+  clearScripts(state) {
+    let bytes = 0;
+    for (const info of state.scriptInfo.values()) bytes += info.retainedBytes ?? 0;
+    for (const script of state.scripts.values()) bytes += script.retainedBytes ?? 0;
+    this.releaseBytes(state, bytes);
+    state.scriptInfo.clear();
+    state.scripts.clear();
+  }
+
+  releasePauseSlot(state, pause, key) {
+    this.releaseBytes(state, pause.retained?.[key] ?? 0);
+    if (pause.retained) delete pause.retained[key];
+  }
+
+  releasePause(state, pause) {
+    if (!pause) return;
+    for (const key of Object.keys(pause.retained ?? {})) this.releasePauseSlot(state, pause, key);
+    pause.data = null;
+    pause.params = null;
+    pause.holding = null;
+  }
+
+  releaseState(state) {
+    this.clearScripts(state);
+    this.releasePause(state, state.pause);
+    this.releasePause(state, state.resuming);
+    this.releaseBytes(state, state.retainedBytes);
+  }
+
+  full(tabId, state) {
+    state.full = true;
+    if (state.suspension) clearTimeout(state.suspension.timer);
+    state.suspension = null;
+    this.releaseState(state);
+    void this.resume(tabId, state);
+  }
+
+  reserve(tabId, state, bytes, replaced = 0) {
+    const added = bytes - replaced;
+    if (this.retainedBytes + added > retainedLimit) {
+      this.full(tabId, state);
+      return false;
+    }
+    state.retainedBytes += added;
+    this.retainedBytes += added;
+    return true;
+  }
+
+  retainPause(tabId, state, pause, key, params, clone = true) {
+    const bytes = JSON.stringify(params).length * 2;
+    if (!this.reserve(tabId, state, bytes, pause.retained?.[key] ?? 0)) return undefined;
+    pause.retained ??= {};
+    pause.retained[key] = bytes;
+    return clone ? structuredClone(params) : params;
   }
 
   frameBlocked(frame) {
@@ -189,6 +253,7 @@ export class DebuggerGate {
     const c = this.connection;
     const tab = c.tabState(tabId);
     return (
+      !state.full &&
       !state.suspension &&
       !c.closed &&
       this.states.get(tabId) === state &&
@@ -208,6 +273,7 @@ export class DebuggerGate {
     const tab = c.tabState(tabId);
     return (
       state?.enabled &&
+      !state.full &&
       (!requireWitness || !state.suspension) &&
       !c.closed &&
       this.states.get(tabId) === state &&
@@ -344,6 +410,8 @@ export class DebuggerGate {
       revision: this.connection.tabState(tabId).debuggerRevision,
       token: crypto.randomUUID(),
       enabled: false,
+      full: false,
+      retainedBytes: 0,
       scripts: new Map(),
       scriptInfo: new Map(),
       publishedContexts: new Map(),
@@ -387,6 +455,8 @@ export class DebuggerGate {
     if (method === 'Debugger.removeBreakpoint' && !state.breakpoints.has(params.breakpointId))
       refused();
     if (method === 'Debugger.resume') {
+      this.releasePause(state, state.resuming);
+      this.releasePause(state, pause);
       state.resuming = pause;
       state.pause = null;
     }
@@ -411,20 +481,32 @@ export class DebuggerGate {
   script(tabId, state, method, params) {
     const c = this.connection;
     if (!this.convertible(tabId, state, false) || c.mentions(params)) return;
+    const serialized = JSON.stringify(params);
     if (
       typeof params.scriptId !== 'string' ||
       !params.scriptId ||
       !Number.isSafeInteger(params.executionContextId) ||
       params.executionContextId <= 0 ||
       state.scriptInfo.size >= 1000 ||
-      JSON.stringify(params).length > 1048576
+      serialized.length > 1048576
     )
       return;
-    state.scriptInfo.set(params.scriptId, {
+    const info = {
       url: params.url,
       embedderName: params.embedderName,
       context: params.executionContextId,
-    });
+    };
+    const infoBytes = (JSON.stringify(info).length + params.scriptId.length) * 2;
+    if (
+      !this.reserve(
+        tabId,
+        state,
+        infoBytes,
+        state.scriptInfo.get(params.scriptId)?.retainedBytes ?? 0
+      )
+    )
+      return;
+    state.scriptInfo.set(params.scriptId, { ...info, retainedBytes: infoBytes });
     const tab = c.tabState(tabId);
     const context = tab.worlds.ids.get(params.executionContextId)?.context;
     const document = tab.documents.contexts.get(params.executionContextId);
@@ -440,10 +522,14 @@ export class DebuggerGate {
       typeof params.scriptId !== 'string' ||
       !params.scriptId ||
       state.scripts.size >= 1000 ||
-      JSON.stringify(params).length > 1048576
+      serialized.length > 1048576
     )
       return;
+    const bytes = serialized.length * 2;
+    if (!this.reserve(tabId, state, bytes, state.scripts.get(params.scriptId)?.retainedBytes ?? 0))
+      return;
     state.scripts.set(params.scriptId, {
+      retainedBytes: bytes,
       method,
       params: structuredClone(params),
       context: context.id,
@@ -455,8 +541,10 @@ export class DebuggerGate {
     const c = this.connection;
     const pause = state?.pause;
     if (state) {
+      this.releasePause(state, state.resuming);
       state.resuming = publish && this.valid(tabId, state, pause) ? pause : null;
       state.pause = null;
+      this.releasePause(state, pause);
     }
     if (pause?.timer) clearTimeout(pause.timer);
     try {
@@ -480,6 +568,7 @@ export class DebuggerGate {
     if (state.suspension) clearTimeout(state.suspension.timer);
     this.placements.delete(tabId);
     this.states.delete(tabId);
+    this.releaseState(state);
     await this.resume(tabId, state);
     const rescue = debuggerRescue(this.connection.api);
     try {
@@ -581,7 +670,9 @@ export class DebuggerGate {
       contexts.set(script.context, script.unique);
     }
     if (!pause.holding) {
-      pause.holding = { params: structuredClone(params), contexts };
+      const copy = this.retainPause(tabId, state, pause, 'holding', params);
+      if (!copy) return false;
+      pause.holding = { params: copy, contexts };
       clearTimeout(pause.timer);
       pause.deadline = Math.min(pause.deadline, Date.now() + 1000);
       pause.timer = setTimeout(() => {
@@ -612,6 +703,7 @@ export class DebuggerGate {
   }
 
   async failedPause(tabId, state, pause, params, error) {
+    if (state.full) return;
     if (this.rehold(tabId, state, pause, params, error)) return;
     if (pause.converted && !pause.published) await this.drop(tabId);
     else await this.resume(tabId, state);
@@ -640,8 +732,11 @@ export class DebuggerGate {
   async paused(tabId, state, params) {
     const c = this.connection;
     const revision = state?.revision;
-    if (params.reason !== 'instrumentation' && state?.pause?.converted && !state.pause.published)
-      state.pause.params = structuredClone(params);
+    if (params.reason !== 'instrumentation' && state?.pause?.converted && !state.pause.published) {
+      const copy = this.retainPause(tabId, state, state.pause, 'params', params);
+      if (!copy) return;
+      state.pause.params = copy;
+    }
     if (!(await this.pauseReady(tabId, state, params))) {
       if (state?.revision !== revision) return;
       return this.pendingPause(tabId, state, params);
@@ -666,6 +761,9 @@ export class DebuggerGate {
     }
     try {
       if (pause.published || pause.verifying || Date.now() >= pause.deadline) refused();
+      const data = this.retainPause(tabId, state, pause, 'data', params, false);
+      if (!data) return;
+      pause.data = data;
       await bounded(
         debuggerRescue(c.api).pause(tabId, state.token, pause.deadline, {
           owner: state.owner,
@@ -733,6 +831,7 @@ export class DebuggerGate {
     }
     if (method === 'Debugger.resumed' && state?.resuming) {
       const pause = state.resuming;
+      this.releasePause(state, pause);
       state.resuming = null;
       if (
         pause.published &&
@@ -803,6 +902,8 @@ export class DebuggerGate {
       return;
     }
     const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
+    if (state.full && state.generation === generation) return;
+    state.full = false;
     const holding = state.pause?.holding;
     if (holding && state.generation === generation) {
       state.revision = tab.debuggerRevision;
@@ -824,9 +925,9 @@ export class DebuggerGate {
         return;
       }
       if (state.pause) void this.resume(tabId, state);
-      state.scripts.clear();
-      state.scriptInfo.clear();
+      this.clearScripts(state);
       state.publishedContexts.clear();
+      this.releasePause(state, state.resuming);
       state.resuming = null;
       state.generation = generation;
       state.revision = tab.debuggerRevision;
@@ -840,6 +941,7 @@ export class DebuggerGate {
     )
       this.suspend(tabId, state);
     if (holding && this.current(tabId, state)) {
+      this.releasePauseSlot(state, state.pause, 'holding');
       state.pause.holding = null;
       void this.paused(tabId, state, holding.params);
     }
