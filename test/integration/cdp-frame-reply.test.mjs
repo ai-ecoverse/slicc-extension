@@ -12,7 +12,7 @@ function nativeFrames(child = 'https://vault.sliccy.ai/FRAME_URL_CANARY') {
       securityOrigin: 'https://ordinary.test',
     },
     {
-      frameId: 1,
+      frameId: 791337,
       parentFrameId: 0,
       documentId: 'CHILD_DOCUMENT_CANARY',
       url: child,
@@ -30,7 +30,7 @@ function tree(fixture, child) {
       result.frameTree.childFrames = [
         {
           frame: {
-            id: 'child',
+            id: 'CHILD_FRAME_ID_CANARY',
             parentId: 'root',
             loaderId: 'child-loader',
             url: child,
@@ -56,17 +56,14 @@ for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
     const serialized = JSON.stringify({ reply, workerReplies: r.replies });
     assert.doesNotMatch(
       serialized,
-      /sliccy\.ai|ordinary\.test|DOCUMENT_CANARY|URL_CANARY|EXTRA_CANARY/
+      /sliccy\.ai|ordinary\.test|DOCUMENT_CANARY|URL_CANARY|EXTRA_CANARY|CHILD_FRAME_ID_CANARY|791337/
     );
     assert.equal(reply.version, 2);
-    assert.deepEqual(reply.frames, [
-      { frameId: 0, parentFrameId: -1, kind: 'ordinary' },
-      { frameId: 1, parentFrameId: 0, kind: 'protected' },
-    ]);
-    assert.equal(reply.rootFrameId, 'root');
+    assert.deepEqual(reply.frames, [{ kind: 'ordinary' }, { kind: 'protected' }]);
+    assert.equal(reply.rootFrameId, undefined);
     assert.equal(reply.rootLoaderId, 'ordinary-document');
     assert.equal(reply.rootDocumentId, undefined);
-    assert.deepEqual(reply.localFrames, ['root', 'child']);
+    assert.deepEqual(reply.localFrames, []);
     assert.deepEqual(reply.remoteOwners, []);
     assert.deepEqual(events, []);
     r.deliver({
