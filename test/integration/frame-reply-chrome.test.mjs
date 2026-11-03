@@ -1,6 +1,6 @@
-import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { launch } from './chrome.mjs';
+import { assertFrameReply, committedFrame } from './fixtures/frame-reply-control.mjs';
 
 let chrome;
 before(async () => {
@@ -10,13 +10,13 @@ after(() => chrome?.close());
 
 for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
   for (const protectedChild of [false, true]) {
-    test(`${host} real page API frame reply contains no URL, origin or document ID beside ${protectedChild ? 'a loaded vault' : 'an ordinary'} iframe`, async (t) => {
+    test(`${host} real page API ${protectedChild ? 'refuses a committed cross-process vault iframe without leaking frame data' : 'returns a URL-free complete ordinary cross-process frame reply'}`, async (t) => {
       const page = await chrome.visit(t, `https://${host}/`);
       const url = `https://ordinary.test/doc?frame-reply-${host}-${protectedChild}`;
       const target = await chrome.visit(t, url);
       const child = protectedChild
-        ? 'https://vault.sliccy.ai/doc?FRAME_REPLY_CANARY'
-        : 'https://other.test/doc?FRAME_REPLY_ORDINARY';
+        ? `https://vault.sliccy.ai/doc?FRAME_REPLY_CANARY=${host}`
+        : `https://other.test/doc?FRAME_REPLY_ORDINARY=${host}`;
       await target.evaluate(async (src) => {
         const iframe = document.createElement('iframe');
         const loaded = new Promise((resolve, reject) => {
@@ -27,14 +27,7 @@ for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
         document.body.append(iframe);
         await loaded;
       }, child);
-      const raw = await target.send('Page.getFrameTree');
-      const committedChild = raw.frameTree.childFrames?.find(
-        ({ frame }) => frame.url === child
-      )?.frame;
-      assert.ok(
-        committedChild?.id,
-        'raw control must prove the child committed before the extension attaches'
-      );
+      const committedChild = await committedFrame(chrome.cdp, target, child);
       const reply = await page.evaluate(async (url) => {
         const listed = await sliccExtension.cdp.send('Target.getTargets');
         const info = listed.targetInfos.find((entry) => entry.url === url);
@@ -49,43 +42,13 @@ for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
         try {
           const snapshot = await sliccExtension.frames(Number(info.targetId));
           return { snapshot, events };
+        } catch (error) {
+          return { error: error.message, events };
         } finally {
           off();
         }
       }, url);
-      const serialized = JSON.stringify(reply.snapshot);
-      assert.doesNotMatch(JSON.stringify(reply), /vault\.sliccy\.ai|FRAME_REPLY_CANARY/);
-      assert.doesNotMatch(
-        serialized,
-        /https?:\/\/|vault\.sliccy\.ai|ordinary\.test|other\.test|FRAME_REPLY_CANARY|FRAME_REPLY_ORDINARY/
-      );
-      assert.doesNotMatch(serialized, /"(?:url|origin|securityOrigin|documentId|rootDocumentId)"/);
-      assert.equal(reply.snapshot.version, 2);
-      assert.equal(reply.snapshot.frames.length, 2);
-      if (protectedChild) {
-        assert.ok(!JSON.stringify(reply).includes(committedChild.id));
-        assert.ok(
-          reply.snapshot.frames.every(
-            (frame) => Object.keys(frame).length === 1 && typeof frame.kind === 'string'
-          )
-        );
-        assert.equal(reply.snapshot.rootFrameId, undefined);
-        assert.deepEqual(reply.snapshot.localFrames, []);
-        assert.deepEqual(reply.snapshot.remoteOwners, []);
-      } else {
-        assert.equal(reply.snapshot.localFrames.length + reply.snapshot.remoteOwners.length, 2);
-      }
-      assert.ok(
-        reply.snapshot.frames.some(
-          (frame) => frame.kind === (protectedChild ? 'protected' : 'ordinary')
-        )
-      );
-      if (!protectedChild)
-        assert.ok(reply.snapshot.frames.every((frame) => frame.kind === 'ordinary'));
-      assert.equal(
-        reply.events.some((message) => message.privateFrames || message.result?.frames),
-        false
-      );
+      assertFrameReply(reply, committedChild, protectedChild);
     });
   }
 }
