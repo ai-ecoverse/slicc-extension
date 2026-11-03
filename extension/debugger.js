@@ -18,7 +18,7 @@ export function debuggerDomain(method) {
   );
 }
 
-class FrameWitnessMoved extends Error {}
+export class FrameWitnessMoved extends Error {}
 
 function refused() {
   throw new Error(protectedRules.refusal);

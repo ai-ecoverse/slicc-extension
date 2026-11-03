@@ -9,7 +9,7 @@ if (typeof URL.canParse !== 'function') {
   };
 }
 
-import { DebuggerGate, debuggerDomain } from './debugger.js';
+import { DebuggerGate, debuggerDomain, FrameWitnessMoved } from './debugger.js';
 import { protectedOrigins } from './protected.mjs';
 import { protectedRules } from './protected-rules.js';
 import { seven } from './seven.js';
@@ -458,6 +458,26 @@ class Connection {
     return this.state.tabs.get(tabId);
   }
 
+  checkFrameWitness(tab, frames, revision) {
+    if (tab.frameEvents === revision) return;
+    if (
+      !tab.worlds.foreign &&
+      !tab.pendingFrames.size &&
+      !tab.debuggerFrameBlocks?.size &&
+      this.debuggerGate.knownChildren(tab) &&
+      !this.debuggerGate.unplaced(tab) &&
+      ![...tab.documents.frames.values()].some((entry) => this.debuggerGate.frameBlocked(entry)) &&
+      frames.every(
+        (entry) =>
+          /^https?:\/\//.test(entry.url) &&
+          URL.canParse(entry.url) &&
+          !this.protectedOrigin(entry.url)
+      )
+    )
+      throw new FrameWitnessMoved(protectedRules.refusal);
+    throw new Error('slicc: refused: unsettled frame list');
+  }
+
   async frames(tabId) {
     const tab = this.tabState(tabId);
     const refuse = () => {
@@ -500,7 +520,6 @@ class Connection {
     if (
       this.closed ||
       this.tabState(tabId) !== tab ||
-      tab.frameEvents !== revision ||
       tab.debuggerRevision !== debuggerRevision ||
       tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation ||
       this.debuggerGate.childKey(tab) !== children ||
@@ -567,6 +586,7 @@ class Connection {
       localFrames.length + remoteOwners.length !== frames.length
     )
       refuse();
+    this.checkFrameWitness(tab, frames, revision);
     return {
       version: 1,
       rootDocumentId: root.documentId,
