@@ -12,6 +12,8 @@ Chrome MV3 extension that serves both six (the hosted leader tab on `www.sliccy.
 
 `sliccExtension.cdp` is a CDP command surface on the `slicc-fetch` port. The service worker accepts the port only when `trusted()` passes. Opening, attaching and navigating refuse protected origins (from `@ai-ecoverse/slicc-browsers` 1.5.0). Protected origins include all `*.sliccy.ai` hosts and `vault.sliccy.ai` specifically.
 
+All tabs on one CDP connection share a 64 MiB retained-byte limit for script metadata, cached script events and held pause data. A debugger owner that would exceed it drops its records and resumes privately; commit and drop release its bytes, and the next ordinary document can start again.
+
 ## Six — hosted leader tab
 
 The extension manages a pinned leader tab at `https://www.sliccy.ai/?slicc=leader`. The leader tab connects via `externally_connectable` and gets:
