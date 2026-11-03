@@ -12,6 +12,12 @@ Chrome MV3 extension that serves both six (the hosted leader tab on `www.sliccy.
 
 `sliccExtension.cdp` is a CDP command surface on the `slicc-fetch` port. The service worker accepts the port only when `trusted()` passes. Opening, attaching and navigating refuse protected origins (from `@ai-ecoverse/slicc-browsers` 1.5.0). Protected origins include all `*.sliccy.ai` hosts and `vault.sliccy.ai` specifically.
 
+All tabs on one CDP connection share a 64 MiB retained-byte limit for script metadata, cached script events and held pause data. A debugger owner that would exceed it drops its records and resumes privately; commit and drop release its bytes, and the next ordinary document can start again.
+
+Successful `sliccExtension.frames(tabId)` calls return a URL-free placement snapshot for an attached tab. A protected cross-process iframe refuses with `slicc: refused: unsettled frame list` instead of returning a snapshot; the worker's child-target closure check rejects it before serialization. Version 2 contains `revision`, `rootFrameId`, `rootLoaderId`, `frames` with numeric `frameId`, `parentFrameId` and a worker-computed `kind` (`ordinary`, `protected`, `error` or `unknown`), `localFrames` and `remoteOwners` with `frameId` and `backendNodeId`. Identifiers and owner records are included only when every frame is ordinary. Otherwise each frame carries only its kind, `rootFrameId` is omitted, and `localFrames` and `remoteOwners` are empty; revision and root loader generation stay. This also prevents a descendant parent ID from naming a protected frame. Counts are the lengths of the lists and are used for placement only on an all-ordinary reply. The worker checks the current generation and complete native frame closure before replying and classifies origins with its existing protected matcher. URLs, origins and native document IDs never leave the worker on this API; root identity uses the verified frame and loader IDs. Replies use their dedicated channel and never reach `cdp.on` listeners. Missing, stale or incomplete placement evidence still refuses.
+
+same-origin child frame tools do not work on the extension route yet ([#694](https://github.com/ai-ecoverse/slicc-cdp/issues/694)). A child Document response can arrive before its frame is placed, so the extension withholds the response and its policy headers. The ordinary root still lists and calls; the link route keeps requiring root and same-origin child tools.
+
 ## Six — hosted leader tab
 
 The extension manages a pinned leader tab at `https://www.sliccy.ai/?slicc=leader`. The leader tab connects via `externally_connectable` and gets:
@@ -83,6 +89,7 @@ Releases roll forward only. Before publishing, `scripts/check-six-floor.mjs` ref
 | Permission                            | Used by | Justification                                           |
 | ------------------------------------- | ------- | ------------------------------------------------------- |
 | `debugger`                            | Both    | CDP proxy for seven pages and six bridge                |
+| `alarms`                              | Seven   | Wakes the service worker to detach a stuck debugger session |
 | `tabs`                                | Six     | Leader tab management, tab queries for bridge CDP       |
 | `tabGroups`                           | Six     | Tab group management for leader tab                     |
 | `identity`                            | Both    | Adobe IMS sign-in via launchWebAuthFlow                 |

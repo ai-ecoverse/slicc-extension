@@ -9,6 +9,7 @@ if (typeof URL.canParse !== 'function') {
   };
 }
 
+import { DebuggerGate, debuggerDomain, FrameWitnessMoved } from './debugger.js';
 import { protectedOrigins } from './protected.mjs';
 import { protectedRules } from './protected-rules.js';
 import { seven } from './seven.js';
@@ -413,6 +414,8 @@ class Connection {
       counter: 0,
     };
     this.closed = false;
+    this.frameTrees = new WeakMap();
+    this.debuggerGate = new DebuggerGate(this);
     this.chain = Promise.resolve();
     this.pending = Promise.resolve();
     this.onEvent = this.onEvent.bind(this);
@@ -422,6 +425,7 @@ class Connection {
     this.onRemoved = this.onRemoved.bind(this);
     this.onSource = this.onSource.bind(this);
     this.onFrames = this.onFrames.bind(this);
+    this.onCommit = this.onCommit.bind(this);
     this.shutdown = this.shutdown.bind(this);
     api.debugger.onEvent.addListener(this.onEvent);
     api.debugger.onDetach.addListener(this.onDetach);
@@ -430,6 +434,7 @@ class Connection {
     api.tabs.onRemoved?.addListener(this.onRemoved);
     api.webNavigation?.onCreatedNavigationTarget?.addListener(this.onSource);
     for (const name of FRAME_EVENTS) api.webNavigation?.[name]?.addListener(this.onFrames);
+    api.webNavigation?.onCommitted?.addListener(this.onCommit);
     port.onDisconnect.addListener(this.shutdown);
   }
 
@@ -451,6 +456,177 @@ class Connection {
 
   tabState(tabId) {
     return this.state.tabs.get(tabId);
+  }
+
+  checkFrameWitness(tab, frames, revision) {
+    if (tab.frameEvents === revision) return;
+    if (
+      !tab.worlds.foreign &&
+      !tab.pendingFrames.size &&
+      !tab.debuggerFrameBlocks?.size &&
+      this.debuggerGate.knownChildren(tab) &&
+      !this.debuggerGate.unplaced(tab) &&
+      ![...tab.documents.frames.values()].some((entry) => this.debuggerGate.frameBlocked(entry)) &&
+      frames.every(
+        (entry) =>
+          /^https?:\/\//.test(entry.url) &&
+          URL.canParse(entry.url) &&
+          !this.protectedOrigin(entry.url)
+      )
+    )
+      throw new FrameWitnessMoved(protectedRules.refusal);
+    throw new Error('slicc: refused: unsettled frame list');
+  }
+
+  async frames(tabId) {
+    const tab = this.tabState(tabId);
+    const refuse = () => {
+      throw new Error('slicc: refused: unsettled frame list');
+    };
+    if (this.closed || !Number.isSafeInteger(tabId) || !tab) refuse();
+    const revision = tab.frameEvents;
+    const debuggerRevision = tab.debuggerRevision;
+    const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
+    const children = this.debuggerGate.childKey(tab);
+    const [frames, tree, remoteOwners] = await bounded(
+      (async () => {
+        if (!generation || !this.debuggerGate.knownChildren(tab)) refuse();
+        const entries = [...tab.debuggerChildInfo.values()].filter(
+          (info) => info.type === 'iframe'
+        );
+        const targets = new Set(entries.map((info) => info.target));
+        if (
+          targets.size !== entries.length ||
+          tab.debuggerChildInfo.size !== tab.debuggerChildren.size
+        )
+          refuse();
+        const [native, page, owners] = await Promise.all([
+          this.api.webNavigation?.getAllFrames?.({ tabId }),
+          this.send(tabId, 'Page.getFrameTree', {}),
+          Promise.all(
+            entries.map(async (info) => {
+              const owner = await this.send(tabId, 'DOM.getFrameOwner', { frameId: info.target });
+              if (!Number.isSafeInteger(owner?.backendNodeId) || owner.backendNodeId <= 0) refuse();
+              return { frameId: info.target, backendNodeId: owner.backendNodeId };
+            })
+          ),
+        ]);
+        if (new Set(owners.map((owner) => owner.backendNodeId)).size !== owners.length) refuse();
+        return [native, page, owners];
+      })(),
+      2000,
+      'frame list'
+    ).catch(refuse);
+    if (
+      this.closed ||
+      this.tabState(tabId) !== tab ||
+      tab.debuggerRevision !== debuggerRevision ||
+      tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation ||
+      this.debuggerGate.childKey(tab) !== children ||
+      !Array.isArray(frames) ||
+      !frames.length
+    )
+      refuse();
+    const ids = new Set(frames.map((frame) => frame?.frameId));
+    const root = frames.find((frame) => frame?.frameId === 0);
+    if (
+      ids.size !== frames.length ||
+      root?.parentFrameId !== -1 ||
+      !root.documentId ||
+      frames.some(
+        (frame) =>
+          !Number.isSafeInteger(frame.frameId) ||
+          typeof frame.documentId !== 'string' ||
+          !frame.documentId ||
+          typeof frame.url !== 'string' ||
+          !frame.url ||
+          frame.errorOccurred === true ||
+          (frame.documentLifecycle !== undefined && frame.documentLifecycle !== 'active')
+      )
+    )
+      refuse();
+    for (const frame of frames) {
+      const seen = new Set();
+      let current = frame;
+      while (current.frameId !== 0) {
+        if (seen.has(current.frameId)) refuse();
+        seen.add(current.frameId);
+        current = frames.find((candidate) => candidate.frameId === current.parentFrameId);
+        if (!current) refuse();
+      }
+    }
+    const frame = tree?.frameTree?.frame;
+    if (
+      typeof frame?.id !== 'string' ||
+      !frame.id ||
+      typeof frame.loaderId !== 'string' ||
+      !frame.loaderId ||
+      frame.id !== tab.mainFrameId ||
+      frame.loaderId !== generation
+    )
+      refuse();
+    const localFrames = [];
+    const pending = [tree.frameTree];
+    while (pending.length) {
+      const entry = pending.pop();
+      if (
+        typeof entry?.frame?.id !== 'string' ||
+        !entry.frame.id ||
+        typeof entry.frame.loaderId !== 'string' ||
+        !entry.frame.loaderId ||
+        (entry.childFrames !== undefined && !Array.isArray(entry.childFrames))
+      )
+        refuse();
+      localFrames.push(entry.frame.id);
+      pending.push(...(entry.childFrames ?? []));
+    }
+    if (
+      new Set(localFrames).size !== localFrames.length ||
+      remoteOwners.some((owner) => localFrames.includes(owner.frameId)) ||
+      localFrames.length + remoteOwners.length !== frames.length
+    )
+      refuse();
+    this.checkFrameWitness(tab, frames, revision);
+    return {
+      version: 1,
+      rootDocumentId: root.documentId,
+      revision,
+      rootFrameId: frame.id,
+      rootLoaderId: frame.loaderId,
+      frames,
+      localFrames,
+      remoteOwners,
+    };
+  }
+
+  frameKind(frame) {
+    const url = frame.url;
+    if (frame.errorOccurred || url?.startsWith('chrome-error:')) return 'error';
+    if (typeof url !== 'string' || !/^https?:\/\//.test(url) || !URL.canParse(url))
+      return 'unknown';
+    if (this.protectedOrigin(url)) return 'protected';
+    return frame.documentLifecycle === undefined || frame.documentLifecycle === 'active'
+      ? 'ordinary'
+      : 'unknown';
+  }
+
+  frameReply(snapshot) {
+    const kinds = snapshot.frames.map((frame) => this.frameKind(frame));
+    const ordinary = kinds.every((kind) => kind === 'ordinary');
+    return {
+      version: 2,
+      revision: snapshot.revision,
+      ...(ordinary ? { rootFrameId: snapshot.rootFrameId } : {}),
+      rootLoaderId: snapshot.rootLoaderId,
+      frames: snapshot.frames.map((frame, index) => ({
+        ...(ordinary ? { frameId: frame.frameId, parentFrameId: frame.parentFrameId } : {}),
+        kind: kinds[index],
+      })),
+      localFrames: ordinary ? [...snapshot.localFrames] : [],
+      remoteOwners: ordinary
+        ? snapshot.remoteOwners.map(({ frameId, backendNodeId }) => ({ frameId, backendNodeId }))
+        : [],
+    };
   }
 
   sessionsOf(tabId) {
@@ -483,7 +659,18 @@ class Connection {
   }
 
   send(tabId, method, params) {
-    return this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, method, params));
+    const frameEvents = this.tabState(tabId)?.frameEvents ?? 0;
+    return this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, method, params)).then(
+      (result) => {
+        if (
+          ['Page.getFrameTree', 'Page.getResourceTree'].includes(method) &&
+          result?.frameTree &&
+          typeof result.frameTree === 'object'
+        )
+          this.frameTrees.set(result.frameTree, frameEvents);
+        return result;
+      }
+    );
   }
 
   failedAt(tabId, url) {
@@ -531,6 +718,7 @@ class Connection {
   }
 
   forget(tabId) {
+    void this.debuggerGate.drop(tabId);
     this.drop(tabId);
     const tab = this.tabState(tabId);
     if (tab) for (const sessionId of tab.sessions) this.state.sessions.delete(sessionId);
@@ -815,6 +1003,10 @@ class Connection {
         reroutes: new Map(),
         paused: new Map(),
         epoch: 0,
+        frameEvents: 0,
+        debuggerChildren: new Set(),
+        debuggerChildInfo: new Map(),
+        debuggerRevision: 0,
         wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
       this.state.tabs.set(tabId, tab);
@@ -900,6 +1092,7 @@ class Connection {
     if (!session) return {};
     const { tabId } = session;
     const tab = this.tabState(tabId);
+    await this.debuggerGate.drop(tabId, sessionId);
     this.state.sessions.delete(sessionId);
     tab?.sessions.delete(sessionId);
     tab?.runtime.delete(sessionId);
@@ -1625,6 +1818,7 @@ class Connection {
   async learn(tabId, tab, method, result) {
     tab.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') tab.worlds.seen(result.executionContextId);
+    this.debuggerGate.revoke(tabId);
     if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
       await resolveFrameOrigins(result.frameTree, tab.uncertain ?? new Set(), (id) =>
         this.documentOrigin(tabId, id)
@@ -1671,6 +1865,11 @@ class Connection {
       case 'Browser.getVersion':
         return version();
       default:
+        if (debuggerDomain(message.method)) {
+          const { tabId } = this.sessionOf(message.sessionId);
+          this.checkParams(message.method, params, this.tabState(tabId));
+          return this.debuggerGate.command(tabId, message.sessionId, message.method, params);
+        }
         return this.sessionCommand(
           message,
           message.method === 'Runtime.addBinding' ? scopedBinding(params) : params
@@ -1815,6 +2014,28 @@ class Connection {
   }
 
   watchChild(tabId, method, p) {
+    const tab = this.tabState(tabId);
+    const child =
+      textOf(p.sessionId) ||
+      [...(tab?.debuggerChildInfo ?? [])].find(
+        ([, entry]) => entry.target === p.targetInfo?.targetId
+      )?.[0] ||
+      textOf(p.targetInfo?.targetId);
+    if (method === 'Target.detachedFromTarget') {
+      tab?.debuggerChildren.delete(child);
+      tab?.debuggerChildInfo.delete(child);
+    }
+    if (method === 'Target.attachedToTarget' || method === 'Target.targetInfoChanged') {
+      tab?.debuggerChildren.add(child);
+      tab?.debuggerChildInfo.set(child, {
+        target: p.targetInfo?.targetId,
+        type: p.targetInfo?.type,
+        url: p.targetInfo?.url,
+        generation: tab.documents.frames.get(tab.mainFrameId)?.loaderId,
+        revision: tab.debuggerRevision,
+      });
+      this.debuggerGate.revoke(tabId);
+    }
     const url = textOf(p.targetInfo?.url);
     const hidden = urlProtected(guard, url) || uiType(p.targetInfo?.type);
     if (method === 'Target.attachedToTarget') {
@@ -1855,6 +2076,7 @@ class Connection {
   }
 
   watchFrame(tabId, tab, frame) {
+    this.debuggerGate.rememberFrame(tab, frame);
     tab.documents.frame(frame);
     tab.pendingFrames.delete(textOf(frame.id));
     tab.pendingFrames.delete('');
@@ -1909,15 +2131,17 @@ class Connection {
     return kind !== undefined;
   }
 
-  pruneFrames(tab, tree) {
+  pruneFrames(tab, tree, frameEvents = this.frameTrees.get(tree)) {
+    if (frameEvents !== undefined && frameEvents !== tab.frameEvents) return;
     if (!Array.isArray(tree?.childFrames)) return;
     tree.childFrames = tree.childFrames.filter((node) => {
       const frame = node?.frame ?? {};
+      this.debuggerGate.rememberFrame(tab, frame);
       const hidden = this.frameHidden(tab, frame);
       if (hidden && typeof frame.id === 'string') tab.frames.set(frame.id, true);
       return !hidden;
     });
-    for (const node of tree.childFrames) this.pruneFrames(tab, node);
+    for (const node of tree.childFrames) this.pruneFrames(tab, node, frameEvents);
   }
 
   quietProfilers(tabId) {
@@ -1985,6 +2209,8 @@ class Connection {
   touched(tabId, method, params) {
     const tab = this.tabState(tabId);
     if (tab && invalidates(method, params)) tab.epoch += 1;
+    if (tab && ['Page.frameAttached', 'Page.frameDetached', 'Page.frameNavigated'].includes(method))
+      tab.frameEvents += 1;
     return tab;
   }
 
@@ -2014,7 +2240,13 @@ class Connection {
     }
     if (tab.wake.hides(method, p)) return;
     if (this.hop(tabId, tab, method, p)) return;
-    if (this.watch(tabId, tab, method, p)) return;
+    const watched = this.watch(tabId, tab, method, p);
+    this.debuggerGate.revoke(tabId);
+    if (debuggerDomain(method)) {
+      await this.debuggerGate.event(tabId, method, p);
+      return;
+    }
+    if (watched) return;
     if (profiled(method) && tab.worlds.foreign) return;
     if (tab.worlds.hides(p)) return;
     if (this.frameProtected(tab, p.frameId)) return;
@@ -2066,10 +2298,25 @@ class Connection {
     void this.announce(tab, true).catch(() => undefined);
   }
 
+  onCommit(details) {
+    const tab = this.tabState(details?.tabId);
+    if (!tab) return;
+    tab.frameEvents += 1;
+    if (Number.isInteger(details.frameId) && details.frameId > 0) {
+      this.debuggerGate.childCommit(details.tabId, details);
+      return;
+    }
+    tab.debuggerRevision += 1;
+    this.debuggerGate.revoke(details.tabId);
+  }
+
   onFrames(details) {
     for (const tabId of [details?.tabId, details?.replacedTabId]) {
       const tab = this.tabState(tabId);
-      if (tab) tab.epoch += 1;
+      if (tab) {
+        tab.epoch += 1;
+        tab.frameEvents += 1;
+      }
     }
   }
 
@@ -2151,15 +2398,32 @@ class Connection {
     this.api.tabs.onRemoved?.removeListener(this.onRemoved);
     this.api.webNavigation?.onCreatedNavigationTarget?.removeListener(this.onSource);
     for (const name of FRAME_EVENTS) this.api.webNavigation?.[name]?.removeListener(this.onFrames);
+    this.api.webNavigation?.onCommitted?.removeListener(this.onCommit);
     const owned = [...this.state.ownedTabs];
     for (const tabId of [...this.state.inflight.keys()]) this.drop(tabId);
     this.state.ownedTabs.clear();
     this.state.sessions.clear();
+    for (const tabId of this.state.tabs.keys()) void this.debuggerGate.drop(tabId);
     this.state.tabs.clear();
     for (const tabId of owned) this.api.debugger.detach({ tabId }).catch(() => undefined);
   }
 
   handle(message) {
+    if (message?.privateFrames && Number.isSafeInteger(message.privateFrames.id)) {
+      const { id, tabId } = message.privateFrames;
+      const task = this.frames(tabId)
+        .then(
+          (result) =>
+            this.port.postMessage({ privateFrames: { id, result: this.frameReply(result) } }),
+          () =>
+            this.port.postMessage({
+              privateFrames: { id, error: 'slicc: refused: unsettled frame list' },
+            })
+        )
+        .catch(() => undefined);
+      this.pending = Promise.all([this.pending, task]).then(() => undefined);
+      return true;
+    }
     if (!isCdp(message)) return false;
     if (!this.closed) {
       const serial =
