@@ -611,21 +611,21 @@ class Connection {
   }
 
   frameReply(snapshot) {
+    const kinds = snapshot.frames.map((frame) => this.frameKind(frame));
+    const ordinary = kinds.every((kind) => kind === 'ordinary');
     return {
       version: 2,
       revision: snapshot.revision,
-      rootFrameId: snapshot.rootFrameId,
+      ...(ordinary ? { rootFrameId: snapshot.rootFrameId } : {}),
       rootLoaderId: snapshot.rootLoaderId,
-      frames: snapshot.frames.map((frame) => ({
-        frameId: frame.frameId,
-        parentFrameId: frame.parentFrameId,
-        kind: this.frameKind(frame),
+      frames: snapshot.frames.map((frame, index) => ({
+        ...(ordinary ? { frameId: frame.frameId, parentFrameId: frame.parentFrameId } : {}),
+        kind: kinds[index],
       })),
-      localFrames: [...snapshot.localFrames],
-      remoteOwners: snapshot.remoteOwners.map(({ frameId, backendNodeId }) => ({
-        frameId,
-        backendNodeId,
-      })),
+      localFrames: ordinary ? [...snapshot.localFrames] : [],
+      remoteOwners: ordinary
+        ? snapshot.remoteOwners.map(({ frameId, backendNodeId }) => ({ frameId, backendNodeId }))
+        : [],
     };
   }
 

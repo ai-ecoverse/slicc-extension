@@ -28,8 +28,11 @@ for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
         await loaded;
       }, child);
       const raw = await target.send('Page.getFrameTree');
+      const committedChild = raw.frameTree.childFrames?.find(
+        ({ frame }) => frame.url === child
+      )?.frame;
       assert.ok(
-        raw.frameTree.childFrames?.some(({ frame }) => frame.url === child),
+        committedChild?.id,
         'raw control must prove the child committed before the extension attaches'
       );
       const reply = await page.evaluate(async (url) => {
@@ -59,7 +62,19 @@ for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
       assert.doesNotMatch(serialized, /"(?:url|origin|securityOrigin|documentId|rootDocumentId)"/);
       assert.equal(reply.snapshot.version, 2);
       assert.equal(reply.snapshot.frames.length, 2);
-      assert.equal(reply.snapshot.localFrames.length + reply.snapshot.remoteOwners.length, 2);
+      if (protectedChild) {
+        assert.ok(!JSON.stringify(reply).includes(committedChild.id));
+        assert.ok(
+          reply.snapshot.frames.every(
+            (frame) => Object.keys(frame).length === 1 && typeof frame.kind === 'string'
+          )
+        );
+        assert.equal(reply.snapshot.rootFrameId, undefined);
+        assert.deepEqual(reply.snapshot.localFrames, []);
+        assert.deepEqual(reply.snapshot.remoteOwners, []);
+      } else {
+        assert.equal(reply.snapshot.localFrames.length + reply.snapshot.remoteOwners.length, 2);
+      }
       assert.ok(
         reply.snapshot.frames.some(
           (frame) => frame.kind === (protectedChild ? 'protected' : 'ordinary')
