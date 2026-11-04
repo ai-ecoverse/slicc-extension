@@ -34,6 +34,7 @@ async function opened(page, url) {
       const listed = await h.attempt('Target.getTargetInfo', { targetId });
       return listed.result?.targetInfo?.url === url;
     });
+    await h.sleep(500);
     return targetId;
   }, url);
 }
@@ -43,6 +44,17 @@ async function attached(page, targetId) {
     const attach = await h.attempt('Target.attachToTarget', { targetId, flatten: true });
     return attach.result?.sessionId ?? attach;
   }, targetId);
+}
+
+async function fixtureFramePresent() {
+  for (let i = 0; i < 50; i++) {
+    const { targetInfos } = await chrome.cdp.send('Target.getTargets');
+    if (targetInfos.some((info) => info.type === 'iframe' && info.url.startsWith(`${fixture}/`))) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
 }
 
 function carries(value) {
@@ -69,6 +81,7 @@ for (const transport of transports) {
     const page = await client(t, transport);
     const url = `https://ordinary.test/doc?n=extension-frame-refuse-${transport}&fixture-frame`;
     const targetId = await opened(page, url);
+    assert.equal(await fixtureFramePresent(), true, 'fixture iframe is present before attach');
     const refused = await attached(page, targetId);
     assert.equal(refused?.error, FRAME, JSON.stringify(refused));
     assert.equal(Object.keys(refused).sort().join(','), 'error', JSON.stringify(refused));
