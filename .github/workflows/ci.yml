@@ -26,7 +26,6 @@ jobs:
     with:
       test-glob: test/integration/*.test.mjs
       shards: 4
-      chrome: 156.0.8078.80
       timeout-minutes: 30
       review-timeout-minutes: 90
       node-options: --max-old-space-size=4096
