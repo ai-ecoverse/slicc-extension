@@ -255,6 +255,45 @@ test('a newer Document response for the same pending frame replaces the older ho
   assert.equal(received[0].params.loaderId, LOADER);
 });
 
+test('a newer Document response that reuses the replaced requestId fails closed', async (t) => {
+  const fixture = await backend();
+  t.after(fixture.close);
+  await pendingChild(fixture);
+  await fixture.emit(
+    'Network.responseReceived',
+    documentResponse({
+      loaderId: 'old-loader',
+      response: {
+        url: 'https://ordinary.test/old',
+        status: 200,
+        headers: { 'permissions-policy': 'camera=()' },
+      },
+    })
+  );
+  await fixture.emit('Network.responseReceivedExtraInfo', {
+    requestId: REQUEST,
+    statusCode: 200,
+    headers: { 'permissions-policy': 'camera=()' },
+  });
+  await fixture.emit('Network.responseReceived', documentResponse());
+  await fixture.emit('Network.responseReceivedExtraInfo', {
+    requestId: REQUEST,
+    statusCode: 200,
+    headers: { 'permissions-policy': POLICY },
+  });
+  await fixture.emit('Page.frameNavigated', { frame: childFrame() });
+  await settle(fixture);
+  assert.equal(
+    events(fixture).some(
+      (message) =>
+        (message.method === 'Network.responseReceived' ||
+          message.method === 'Network.responseReceivedExtraInfo') &&
+        message.params?.requestId === REQUEST
+    ),
+    false
+  );
+});
+
 test('a 33rd hold evicts the oldest without delivering it or its ExtraInfo', async (t) => {
   const fixture = await backend();
   t.after(fixture.close);
