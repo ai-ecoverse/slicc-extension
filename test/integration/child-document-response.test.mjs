@@ -180,6 +180,28 @@ test('held child Document response is dropped when its parent stays protected', 
   );
 });
 
+test('held child Document response is dropped when its parent is sealed', async (t) => {
+  const fixture = await backend();
+  t.after(fixture.close);
+  const tab = await pendingChild(fixture);
+  tab.frames.set('root', false);
+  tab.seal = { sealed: new Set(['root']) };
+  await fixture.emit('Network.responseReceived', documentResponse());
+  await fixture.emit('Network.responseReceivedExtraInfo', {
+    requestId: REQUEST,
+    statusCode: 200,
+    headers: { 'permissions-policy': POLICY },
+  });
+  await fixture.emit('Page.frameNavigated', { frame: childFrame() });
+  await settle(fixture);
+  assert.equal(
+    events(fixture).some((message) =>
+      ['Network.responseReceived', 'Network.responseReceivedExtraInfo'].includes(message.method)
+    ),
+    false
+  );
+});
+
 test('a dropped held Document response never flushes its ExtraInfo', async (t) => {
   const fixture = await backend();
   t.after(fixture.close);
@@ -231,6 +253,101 @@ test('a newer Document response for the same pending frame replaces the older ho
   assert.equal(received.length, 1);
   assert.equal(received[0].params.requestId, REQUEST);
   assert.equal(received[0].params.loaderId, LOADER);
+});
+
+test('a 33rd hold evicts the oldest without delivering it or its ExtraInfo', async (t) => {
+  const fixture = await backend();
+  t.after(fixture.close);
+  const tab = await pendingChild(fixture);
+  const oldest = 'held-0';
+  const oldestRequest = 'req-0';
+  for (let index = 0; index < 33; index++) {
+    const id = `held-${index}`;
+    const requestId = `req-${index}`;
+    tab.pendingFrames.add(id);
+    tab.frames.set(id, true);
+    await fixture.emit(
+      'Network.responseReceived',
+      documentResponse({
+        frameId: id,
+        requestId,
+        loaderId: `loader-${index}`,
+        response: {
+          url: `https://ordinary.test/${id}`,
+          status: 200,
+          headers: { 'permissions-policy': POLICY },
+        },
+      })
+    );
+    await fixture.emit('Network.responseReceivedExtraInfo', {
+      requestId,
+      statusCode: 200,
+      headers: { 'permissions-policy': POLICY },
+    });
+  }
+  await settle(fixture);
+  assert.equal(tab.heldDocuments.has(oldest), false);
+  assert.equal(tab.heldDocuments.size, 32);
+  assert.equal(tab.requests.get(oldestRequest), true);
+  tab.frames.set(oldest, false);
+  await fixture.emit('Page.frameNavigated', {
+    frame: childFrame({
+      id: oldest,
+      loaderId: 'loader-0',
+      url: `https://ordinary.test/${oldest}`,
+    }),
+  });
+  await settle(fixture);
+  assert.equal(
+    events(fixture).some(
+      (message) =>
+        (message.method === 'Network.responseReceived' &&
+          message.params?.requestId === oldestRequest) ||
+        (message.method === 'Network.responseReceivedExtraInfo' &&
+          message.params?.requestId === oldestRequest)
+    ),
+    false
+  );
+});
+
+test('loadingFinished before release still delivers the response and ExtraInfo once each', async (t) => {
+  const fixture = await backend();
+  t.after(fixture.close);
+  await pendingChild(fixture);
+  await fixture.emit('Network.responseReceived', documentResponse());
+  await fixture.emit('Network.responseReceivedExtraInfo', {
+    requestId: REQUEST,
+    statusCode: 200,
+    headers: { 'permissions-policy': POLICY },
+  });
+  await fixture.emit('Network.loadingFinished', { requestId: REQUEST });
+  await settle(fixture);
+  assert.equal(
+    events(fixture).filter((message) => message.method === 'Network.loadingFinished').length,
+    1
+  );
+  assert.equal(
+    events(fixture).some((message) =>
+      ['Network.responseReceived', 'Network.responseReceivedExtraInfo'].includes(message.method)
+    ),
+    false
+  );
+  await fixture.emit('Page.frameNavigated', { frame: childFrame() });
+  await settle(fixture);
+  const received = events(fixture).filter(
+    (message) => message.method === 'Network.responseReceived'
+  );
+  const extra = events(fixture).filter(
+    (message) => message.method === 'Network.responseReceivedExtraInfo'
+  );
+  const finished = events(fixture).filter(
+    (message) => message.method === 'Network.loadingFinished'
+  );
+  assert.equal(received.length, 1);
+  assert.equal(extra.length, 1);
+  assert.equal(finished.length, 1);
+  assert.equal(received[0].params.requestId, REQUEST);
+  assert.equal(extra[0].params.requestId, REQUEST);
 });
 
 test('held Document responses expire by time bound without delivery', async (t) => {
