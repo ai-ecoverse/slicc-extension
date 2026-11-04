@@ -104,6 +104,8 @@ const SETTLES = new Set([
   'Network.loadingFinished',
   'Network.loadingFailed',
 ]);
+const HELD_DOCUMENT_CAP = 32;
+const HELD_DOCUMENT_MS = 10000;
 const REROUTE =
   'slicc: refused: the rewritten request answered with a protected url, so the guard failed it';
 const BODY_READ = 'slicc: refused: this paused response body was already read the other way';
@@ -998,6 +1000,8 @@ class Connection {
         requests: new Map(),
         networkStreams: new NetworkStreams(anyProtected),
         held: new Map(),
+        heldDocuments: new Map(),
+        frameParents: new Map(),
         settled: new Set(),
         hops: new Map(),
         reroutes: new Map(),
@@ -1970,6 +1974,93 @@ class Connection {
     return true;
   }
 
+  heldDocumentRequest(tab, requestId) {
+    if (typeof requestId !== 'string' || !tab.heldDocuments) return false;
+    for (const held of tab.heldDocuments.values()) {
+      if (held.requestId === requestId) return true;
+    }
+    return false;
+  }
+
+  dropHeldDocument(tab, frameId, held) {
+    tab.heldDocuments?.delete(frameId);
+    if (typeof held?.requestId === 'string') {
+      tab.requests.set(held.requestId, true);
+      tab.held.delete(held.requestId);
+    }
+  }
+
+  dropAllHeldDocuments(tab) {
+    if (!tab.heldDocuments) return;
+    for (const [frameId, held] of [...tab.heldDocuments.entries()]) {
+      this.dropHeldDocument(tab, frameId, held);
+    }
+  }
+
+  heldDocumentParentBad(tab, frame) {
+    let parentId = textOf(frame.parentId);
+    const seen = new Set();
+    while (parentId) {
+      if (seen.has(parentId)) return true;
+      seen.add(parentId);
+      if (tab.frames.get(parentId) === true) return true;
+      if (tab.seal?.sealed.has(parentId) === true) return true;
+      parentId = textOf(tab.frameParents?.get(parentId));
+    }
+    return false;
+  }
+
+  holdChildDocument(tab, method, params) {
+    if (method !== 'Network.responseReceived' || params?.type !== 'Document') return false;
+    const frameId = textOf(params.frameId);
+    if (!frameId || this.isMain(tab, frameId) || !tab.pendingFrames.has(frameId)) return false;
+    tab.heldDocuments ??= new Map();
+    const previous = tab.heldDocuments.get(frameId);
+    if (previous) this.dropHeldDocument(tab, frameId, previous);
+    if (tab.heldDocuments.size >= HELD_DOCUMENT_CAP) {
+      const oldest = [...tab.heldDocuments.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest) this.dropHeldDocument(tab, oldest[0], oldest[1]);
+    }
+    if (tab.heldDocuments.size >= HELD_DOCUMENT_CAP) return false;
+    tab.heldDocuments.set(frameId, {
+      params,
+      at: Date.now(),
+      requestId: typeof params.requestId === 'string' ? params.requestId : undefined,
+      loaderId: textOf(params.loaderId),
+    });
+    return true;
+  }
+
+  releaseHeldDocument(tabId, tab, frame, refused) {
+    if (!frame.parentId) {
+      this.dropAllHeldDocuments(tab);
+      return;
+    }
+    const frameId = textOf(frame.id);
+    const held = tab.heldDocuments?.get(frameId);
+    if (!held) return;
+    const expired = Date.now() - held.at > HELD_DOCUMENT_MS;
+    const loaderOk = held.loaderId !== '' && held.loaderId === textOf(frame.loaderId);
+    const bad =
+      refused ||
+      expired ||
+      !loaderOk ||
+      this.frameHidden(tab, frame) ||
+      unknownFrame(frame) ||
+      textOf(frame.url).startsWith('chrome-error:') ||
+      this.heldDocumentParentBad(tab, frame);
+    if (bad) {
+      this.dropHeldDocument(tab, frameId, held);
+      return;
+    }
+    tab.heldDocuments.delete(frameId);
+    if (tab.worlds.hides(held.params) || this.frameProtected(tab, held.params.frameId)) {
+      this.dropHeldDocument(tab, frameId, held);
+      return;
+    }
+    this.deliver(tabId, tab, 'Network.responseReceived', held.params);
+  }
+
   deliver(tabId, tab, method, params) {
     const id = typeof params?.requestId === 'string' ? params.requestId : undefined;
     const known = this.classify(tab, params);
@@ -1996,6 +2087,13 @@ class Connection {
     }
     this.broadcast(tabId, method, out);
     if (id !== undefined && SETTLES.has(method)) {
+      if (
+        method !== 'Network.responseReceived' &&
+        this.heldDocumentRequest(tab, id) &&
+        !tab.settled.has(id)
+      ) {
+        return;
+      }
       const held = tab.held.get(id) ?? [];
       tab.held.delete(id);
       if (known !== false) return;
@@ -2085,6 +2183,13 @@ class Connection {
     if (!frame.parentId) {
       tab.pendingFrames.clear();
       tab.startedFrames.clear();
+    }
+    const frameId = textOf(frame.id);
+    if (frameId) {
+      tab.frameParents ??= new Map();
+      const parentId = textOf(frame.parentId);
+      if (parentId) tab.frameParents.set(frameId, parentId);
+      else tab.frameParents.delete(frameId);
     }
     const url = textOf(frame.url);
     const isProtected =
@@ -2177,6 +2282,11 @@ class Connection {
       tab.pendingFrames.delete(id);
       tab.startedFrames.delete(id);
     }
+    if (method === 'Page.frameDetached' && id) {
+      const held = tab.heldDocuments?.get(id);
+      if (held) this.dropHeldDocument(tab, id, held);
+      tab.frameParents?.delete(id);
+    }
   }
 
   watch(tabId, tab, method, p) {
@@ -2242,14 +2352,14 @@ class Connection {
     if (this.hop(tabId, tab, method, p)) return;
     const watched = this.watch(tabId, tab, method, p);
     this.debuggerGate.revoke(tabId);
+    this.afterWatch(tabId, tab, method, p, watched);
     if (debuggerDomain(method)) {
       await this.debuggerGate.event(tabId, method, p);
       return;
     }
     if (watched) return;
     if (profiled(method) && tab.worlds.foreign) return;
-    if (tab.worlds.hides(p)) return;
-    if (this.frameProtected(tab, p.frameId)) return;
+    if (this.fenceEvent(tab, method, p)) return;
     if (errorPageRead(method)) {
       try {
         await this.checkContent(tabId, method, p);
@@ -2259,6 +2369,19 @@ class Connection {
     }
     if (sealedRead(method) && !(await this.sealEvent(tabId, tab, method, p))) return;
     this.deliver(tabId, tab, method, p);
+  }
+
+  afterWatch(tabId, tab, method, p, watched) {
+    if (method === 'Page.frameNavigated') {
+      this.releaseHeldDocument(tabId, tab, p.frame ?? {}, watched === true);
+    }
+  }
+
+  fenceEvent(tab, method, p) {
+    if (tab.worlds.hides(p)) return true;
+    if (!this.frameProtected(tab, p.frameId)) return false;
+    this.holdChildDocument(tab, method, p);
+    return true;
   }
 
   async announce(tab, created) {

@@ -43,6 +43,7 @@ jobs:
         test/integration/cached-hop.test.mjs
         test/integration/capture.test.mjs
         test/integration/cdp.test.mjs
+        test/integration/child-document-response.test.mjs
         test/integration/commit-tab-lag.test.mjs
         test/integration/content-check-cost.test.mjs
         test/integration/cors.test.mjs
