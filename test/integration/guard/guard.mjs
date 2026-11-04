@@ -71,7 +71,6 @@ export function capabilities(transport) {
     browserSession: false,
     browserContexts: false,
     extensionWorld: true,
-    extensionFrame: true,
     discovery: transport === 'seven',
     clientExit: true,
     siteIsolationOff: true,

@@ -1343,7 +1343,7 @@ export class DocumentBindings {
 }
 
 export const EXTENSION_FRAME =
-  "slicc: refused: another browser extension has a frame in this tab, and Chrome doesn't let one extension debug another's frames";
+  "slicc: refused: another browser extension has a frame in this tab, and Chrome doesn't let one extension debug another's frames; reload the tab, which clears that frame until the extension adds it again, or drive the tab through the linked slicc CLI";
 
 export function foreignFrame(error) {
   return /chrome-extension:\/\/ URL of different extension/i.test(String(error?.message ?? error));
