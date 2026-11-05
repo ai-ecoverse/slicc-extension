@@ -21,7 +21,7 @@ const UNSEEN =
 const PROFILED =
   'slicc: refused: a browser extension runs scripts in this page, and profiling it would expose them';
 const FRAME =
-  "slicc: refused: another browser extension has a frame in this tab, and Chrome doesn't let one extension debug another's frames";
+  "slicc: refused: another browser extension has a frame in this tab, and Chrome doesn't let one extension debug another's frames; reload the tab, which clears that frame until the extension adds it again, or drive the tab through the linked slicc CLI";
 const PROTECTED = "slicc: refused: target is on seven's origin";
 const fixture = `chrome-extension://${fixtureId}`;
 

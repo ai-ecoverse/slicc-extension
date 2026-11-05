@@ -10,7 +10,7 @@ import { run } from '@ai-ecoverse/slicc-browsers/guard-runner';
 import { launch } from '@ai-ecoverse/slicc-shared-web/harness';
 import { install } from '../client.mjs';
 import { copies } from '../copies.mjs';
-import { extId } from '../extension-page.mjs';
+import { extId, fixtureId } from '../extension-page.mjs';
 import { certificate } from '../servers.mjs';
 import {
   capabilities,
@@ -93,7 +93,7 @@ async function evaluate(cdp, sessionId, expression) {
 
 async function browser(extra = []) {
   const rules = hosts.map((host) => `MAP ${host} 127.0.0.1:${fixture.port}`).join(', ');
-  const copy = await copies(['extension/']);
+  const copy = await copies(['extension/', 'test/integration/fixture-extension/']);
   await armInbound(copy.paths).catch(async (error) => {
     await copy.remove();
     throw error;
@@ -343,6 +343,7 @@ async function sweep(transport, variant) {
     clientFactory: (metadata) => clients(transport, metadata),
     targets: targets(transport),
     capabilities: capabilities(transport),
+    extensionFrameId: fixtureId,
     variant: [variant],
     fixture,
     rowTimeoutMs: 180000,

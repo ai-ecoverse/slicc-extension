@@ -7,7 +7,7 @@ export const PROFILED =
   'slicc: refused: a browser extension runs scripts in this page, and profiling it would expose them';
 export const RESERVED_WORLD = 'slicc: refused: that world name is reserved for the guard';
 export const EXTENSION_FRAME =
-  "slicc: refused: another browser extension has a frame in this tab, and Chrome doesn't let one extension debug another's frames";
+  "slicc: refused: another browser extension has a frame in this tab, and Chrome doesn't let one extension debug another's frames; reload the tab, which clears that frame until the extension adds it again, or drive the tab through the linked slicc CLI";
 export const ABOUT_WORLD = 'slicc-navigate';
 
 const EXTENSION_SCHEMES = [
