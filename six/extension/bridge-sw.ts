@@ -965,6 +965,7 @@ async function dispatchCdpCommand(
   ) {
     return cdpGetTargetInfo(params ?? {}, deps);
   }
+  if (method === 'Browser.getVersion') return cdpGetVersion();
   if (method === 'Browser.getWindowForTarget') {
     return cdpGetWindowForTarget(params ?? {}, deps);
   }
@@ -986,6 +987,19 @@ async function dispatchCdpCommand(
   switchRuntime(method, tabId, state, shield);
   switchPage(method, params, sessionId, state);
   return result;
+}
+
+function cdpGetVersion(): CDPPayload {
+  const userAgent = typeof navigator !== 'undefined' ? String(navigator.userAgent ?? '') : '';
+  const found = /(?:Chrome|Chromium)\/([\d.]+)/.exec(userAgent);
+  return {
+    protocolVersion: '1.3',
+    product: `Chrome/${found ? found[1] : '0.0.0.0'}`,
+    revision: '',
+    userAgent,
+    jsVersion: '',
+    slicc: { route: 'extension' },
+  };
 }
 
 function switchPage(

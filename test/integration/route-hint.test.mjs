@@ -110,13 +110,7 @@ function assertRoute(version) {
 for (const transport of transports) {
   test(`${transport} Browser.getVersion carries slicc.route extension and keeps the other fields`, async (t) => {
     const page = await client(t, transport);
-    const version = await page.evaluate(async (needsSession) => {
-      if (!needsSession) return h.attempt('Browser.getVersion');
-      const { targetId, sessionId } = await h.open('https://ordinary.test/start');
-      const answer = await h.attempt('Browser.getVersion', {}, sessionId);
-      await h.close(targetId);
-      return answer;
-    }, transport === 'six-bridge');
+    const version = await page.evaluate(() => h.attempt('Browser.getVersion'));
     assert.equal(version.error, undefined, JSON.stringify(version));
     assertRoute(version.result);
   });
