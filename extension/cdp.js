@@ -363,6 +363,7 @@ function version() {
     revision: '',
     userAgent,
     jsVersion: '',
+    slicc: { route: 'extension' },
   };
 }
 
