@@ -115,6 +115,20 @@ for (const transport of transports) {
     assertRoute(version.result);
   });
 
+  test(`${transport} Browser.getVersion on a session answers locally with slicc.route (replaces chrome.debugger -32601 on six)`, async (t) => {
+    const page = await client(t, transport);
+    const version = await page.evaluate(async () => {
+      const { targetId, sessionId } = await h.open('https://ordinary.test/start');
+      const answer = await h.attempt('Browser.getVersion', {}, sessionId);
+      await h.close(targetId);
+      return answer;
+    });
+    assert.equal(version.error, undefined, JSON.stringify(version));
+    assertRoute(version.result);
+    assert.equal(version.result.revision, '');
+    assert.equal(version.result.jsVersion, '');
+  });
+
   test(`${transport} Target.setAutoAttach and autoAttachRelated refusals are pinned and never reach chrome.debugger`, async (t) => {
     const page = await client(t, transport);
     const hooked = await hook(page);
