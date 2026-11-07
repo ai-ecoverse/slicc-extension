@@ -72,6 +72,7 @@ jobs:
         test/integration/rebuild.test.mjs
         test/integration/redirect-leak.test.mjs
         test/integration/redirect-modes.test.mjs
+        test/integration/route-hint.test.mjs
         test/integration/security.test.mjs
         test/integration/seven.test.mjs
         test/integration/shared-frames.test.mjs
