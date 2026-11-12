@@ -1,5 +1,14 @@
 import { LEADER_EXT_ID_QUERY_NAME, SLICC_HOSTED_ORIGIN } from '@slicc/shared-ts';
 import { broadcastLeaderGone, setCherryPanelSeven } from './cherry-panel-sw.js';
+import {
+  forgetTopDocument,
+  type LeaderKind,
+  markSevenUpgraded,
+  noteTopDocument,
+  readLeaderKind,
+  readSevenUpgraded,
+  writeLeaderKind,
+} from './leader-document.js';
 
 const LEADER_TAB_ID_KEY = 'slicc_leader_tab_id';
 
@@ -60,8 +69,12 @@ export async function readStoredLeaderTabId(): Promise<number | undefined> {
   }
 }
 
-export async function writeStoredLeaderTabId(tabId: number): Promise<void> {
+export async function writeStoredLeaderTabId(
+  tabId: number,
+  kind: LeaderKind = 'six'
+): Promise<void> {
   await chrome.storage.session.set({ [LEADER_TAB_ID_KEY]: tabId });
+  await writeLeaderKind(sevenCommits.has(tabId) ? 'seven' : kind);
   await markLeaderTabNotDiscardable(tabId);
 }
 
@@ -75,6 +88,7 @@ async function markLeaderTabNotDiscardable(tabId: number): Promise<void> {
 
 async function clearStoredLeaderTabId(): Promise<void> {
   await chrome.storage.session.remove(LEADER_TAB_ID_KEY);
+  await writeLeaderKind('six');
 }
 
 function isLeaderTabUrl(rawUrl: string | undefined): boolean {
@@ -101,29 +115,57 @@ export function isSevenTabUrl(rawUrl: string | undefined, origin = LEADER_TAB_OR
   return u.pathname === '/7' || u.pathname.startsWith('/7/') || u.pathname.startsWith('/os/');
 }
 
-function tabUrl(tab: ChromeTab): string | undefined {
-  return tab.url || tab.pendingUrl;
-}
-
 export function sevenPanelUrl(origin = LEADER_TAB_ORIGIN): string {
   return `${origin}/os/`;
 }
 
 export async function readLeaderIsSeven(): Promise<boolean> {
   const id = await readStoredLeaderTabId();
-  if (id === undefined) return false;
+  if (id === undefined || (await readLeaderKind()) !== 'seven') return false;
   const tab = await chrome.tabs.get(id).catch(() => undefined);
-  return tab !== undefined && isSevenTabUrl(tabUrl(tab));
+  return tab !== undefined && isSevenTabUrl(tab.url);
 }
 
 export async function announceSevenLeader(): Promise<void> {
   if (await readLeaderIsSeven()) setCherryPanelSeven(sevenPanelUrl());
 }
 
-export async function noteLeaderTabUrl(tabId: number, url: string): Promise<void> {
-  if (!isSevenTabUrl(url)) return;
-  if ((await readStoredLeaderTabId()) !== tabId) return;
-  setCherryPanelSeven(sevenPanelUrl());
+const sevenCommits = new Set<number>();
+const starts = new Map<number, string>();
+
+function ownLeaderUrl(rawUrl: string | undefined): boolean {
+  return isLeaderTabUrl(rawUrl) && leaderUrlHasExtId(rawUrl, chrome.runtime.id);
+}
+
+export async function noteTopCommit(details: ChromeNavigationDetails): Promise<void> {
+  if (details.frameId !== 0) return;
+  const from = starts.get(details.tabId);
+  starts.delete(details.tabId);
+  noteTopDocument(details.tabId, details.url, details.documentId);
+  const seven = isSevenTabUrl(details.url);
+  const redirected =
+    seven &&
+    ownLeaderUrl(from) &&
+    details.transitionQualifiers?.includes('server_redirect') === true;
+  if (redirected) await markSevenUpgraded();
+  if (seven && redirected) sevenCommits.add(details.tabId);
+  else if (!seven) sevenCommits.delete(details.tabId);
+  if ((await readStoredLeaderTabId()) !== details.tabId) return;
+  if (isLeaderTabUrl(details.url)) {
+    await writeLeaderKind('six');
+    return;
+  }
+  if (seven && (redirected || (await readLeaderKind()) === 'seven')) {
+    await writeLeaderKind('seven');
+    setCherryPanelSeven(sevenPanelUrl());
+    return;
+  }
+  await clearStoredLeaderTabId();
+  broadcastLeaderGone();
+}
+
+export function noteTopNavigation(details: ChromeNavigationDetails): void {
+  if (details.frameId === 0) starts.set(details.tabId, details.url);
 }
 
 async function reconcileLeaderTabOnBoot(): Promise<void> {
@@ -133,7 +175,8 @@ async function reconcileLeaderTabOnBoot(): Promise<void> {
   try {
     tab = await chrome.tabs.get(storedId);
   } catch {}
-  if (tab !== undefined && (isLeaderTabUrl(tab.url) || isSevenTabUrl(tabUrl(tab)))) return;
+  if (tab !== undefined && isLeaderTabUrl(tab.url)) return;
+  if (tab !== undefined && isSevenTabUrl(tab.url) && (await readLeaderKind()) === 'seven') return;
   await clearStoredLeaderTabId();
 }
 
@@ -143,7 +186,7 @@ async function queryLeaderTabs(): Promise<ChromeTab[]> {
   try {
     const matches = await chrome.tabs.query({ url: LEADER_TAB_URL_GLOB });
     return matches.filter(
-      (t) => t.id !== undefined && (isLeaderTabUrl(t.url) || isSevenTabUrl(tabUrl(t)))
+      (t) => t.id !== undefined && (isLeaderTabUrl(t.url) || isSevenTabUrl(t.url))
     );
   } catch (err) {
     console.error('[slicc-sw] tabs.query for leader tab failed', err);
@@ -155,7 +198,7 @@ export function pickSevenLeader(
   tabs: ChromeTab[],
   storedId: number | undefined
 ): ChromeTab | undefined {
-  const seven = tabs.filter((t) => isSevenTabUrl(tabUrl(t)));
+  const seven = tabs.filter((t) => isSevenTabUrl(t.url));
   const loaded = (t: ChromeTab) => !isUnloadedTab(t);
   return (
     seven.find((t) => t.id === storedId) ??
@@ -175,7 +218,7 @@ async function adoptSevenLeaderTab(keep: ChromeTab): Promise<void> {
       console.error('[slicc-sw] failed to reload unloaded seven tab', err);
     }
   }
-  await writeStoredLeaderTabId(keep.id);
+  await writeStoredLeaderTabId(keep.id, 'seven');
 }
 
 async function createLeaderTab(): Promise<void> {
@@ -184,7 +227,9 @@ async function createLeaderTab(): Promise<void> {
     active: false,
     pinned: true,
   });
-  if (created.id !== undefined) await writeStoredLeaderTabId(created.id);
+  if (created.id === undefined) return;
+  await writeStoredLeaderTabId(created.id);
+  if (sevenCommits.has(created.id)) setCherryPanelSeven(sevenPanelUrl());
 }
 
 function isUnloadedTab(tab: ChromeTab): boolean {
@@ -232,8 +277,8 @@ export async function ensureLeaderTab(): Promise<void> {
     try {
       const matches = await queryLeaderTabs();
       const six = matches.filter((t) => isLeaderTabUrl(t.url));
-      const seven =
-        six.length === 0 ? pickSevenLeader(matches, await readStoredLeaderTabId()) : undefined;
+      const upgraded = six.length === 0 && (await readSevenUpgraded());
+      const seven = upgraded ? pickSevenLeader(matches, await readStoredLeaderTabId()) : undefined;
       if (seven !== undefined) await adoptSevenLeaderTab(seven);
       else if (six.length === 0) await createLeaderTab();
       else await adoptSingleLeaderTab(six);
@@ -267,7 +312,7 @@ export async function focusLeaderTab(): Promise<void> {
     }
     if (
       leaderTab !== undefined &&
-      (isLeaderTabUrl(leaderTab.url) || isSevenTabUrl(tabUrl(leaderTab)))
+      (isLeaderTabUrl(leaderTab.url) || isSevenTabUrl(leaderTab.url))
     ) {
       await chrome.tabs.update(storedId, { active: true });
       if (leaderTab.windowId !== undefined) {
@@ -308,6 +353,9 @@ async function reloadLeaderTabForUpdate(): Promise<void> {
 }
 
 async function handleLeaderTabRemoved(tabId: number): Promise<void> {
+  sevenCommits.delete(tabId);
+  starts.delete(tabId);
+  forgetTopDocument(tabId);
   const storedId = await readStoredLeaderTabId();
   if (storedId !== tabId) return;
   await clearStoredLeaderTabId();
@@ -330,9 +378,11 @@ export function installLeaderTabListeners(): void {
       });
   });
 
-  chrome.tabs.onUpdated.addListener((updatedId, change, updated) => {
-    const url = change.url ?? updated.pendingUrl;
-    if (url) noteLeaderTabUrl(updatedId, url).catch(() => {});
+  chrome.webNavigation.onBeforeNavigate.addListener(noteTopNavigation);
+  chrome.webNavigation.onCommitted.addListener((details) => {
+    noteTopCommit(details).catch((err) => {
+      console.error('[slicc-sw] noteTopCommit failed', err);
+    });
   });
 
   chrome.tabs.onRemoved.addListener((tabId) => {

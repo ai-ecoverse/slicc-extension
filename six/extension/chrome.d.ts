@@ -60,6 +60,15 @@ interface ChromeMessageSender {
   url?: string;
   origin?: string;
   frameId?: number;
+  documentId?: string;
+}
+
+interface ChromeNavigationDetails {
+  tabId: number;
+  frameId: number;
+  url: string;
+  documentId?: string;
+  transitionQualifiers?: string[];
 }
 
 interface ChromeRuntimePort {
@@ -281,12 +290,16 @@ interface ChromeAPI {
   };
   webNavigation: {
     getAllFrames(details: { tabId: number }): Promise<unknown>;
+    getFrame(details: {
+      tabId: number;
+      frameId: number;
+    }): Promise<{ url: string; documentId?: string } | null>;
+    onBeforeNavigate: { addListener(callback: (details: ChromeNavigationDetails) => void): void };
+    onCommitted: { addListener(callback: (details: ChromeNavigationDetails) => void): void };
     onCreatedNavigationTarget: {
       addListener(callback: (details: { tabId: number; sourceTabId: number }) => void): void;
     };
   } & Record<
-    | 'onBeforeNavigate'
-    | 'onCommitted'
     | 'onDOMContentLoaded'
     | 'onCompleted'
     | 'onErrorOccurred'

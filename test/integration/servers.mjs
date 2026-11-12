@@ -55,23 +55,75 @@ function listen(tls, handler) {
 }
 
 const panelOrigin = `chrome-extension://${extId}`;
-const sevenPage = `<!doctype html><title>seven</title><p>seven os</p><script>if (parent !== window) parent.postMessage({ type: 'slicc-seven-panel', role: 'follower', owner: true, stalled: false, skew: false }, ${JSON.stringify(panelOrigin)});</script>`;
+const said = {
+  follower: { type: 'slicc-seven-panel', role: 'follower', stalled: false, skew: false },
+  'wrong-type': { type: 'slicc-seven-other', role: 'follower' },
+};
+const sevenPage = (message) =>
+  `<!doctype html><title>seven</title><p>seven os</p><script>if (parent !== window) parent.postMessage(${JSON.stringify(message)}, ${JSON.stringify(panelOrigin)});</script>`;
+
+const fakeSevenWorker = `self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  if (event.request.mode !== 'navigate' || url.pathname !== '/' || url.searchParams.get('slicc') !== 'leader') return;
+  event.respondWith(Response.redirect(new URL('/os/', url).href, 302));
+});`;
+
+function html(response, body, headers = {}) {
+  response
+    .writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      ...headers,
+    })
+    .end(body);
+  return true;
+}
 
 function seven(request, response, pathname, searchParams) {
   const host = (request.headers.host ?? '').split(':')[0];
   const cookies = request.headers.cookie ?? '';
+  const says = /(?:^|; )seven-says=([\w-]+)/.exec(cookies)?.[1] ?? 'follower';
+  if (host === 'other.test' && pathname === '/seven-elsewhere') {
+    return html(response, sevenPage(said.follower));
+  }
   if (host !== 'www.sliccy.ai') return false;
-  if (pathname === '/os/') {
+  if (pathname === '/7') {
+    response.writeHead(301, { location: '/7/', 'cache-control': 'no-store' }).end();
+    return true;
+  }
+  if (
+    pathname === '/os/' &&
+    says === 'elsewhere' &&
+    request.headers['sec-fetch-dest'] === 'iframe'
+  ) {
+    response
+      .writeHead(302, {
+        location: 'https://other.test/seven-elsewhere',
+        'cache-control': 'no-store',
+      })
+      .end();
+    return true;
+  }
+  if (pathname === '/os/' || pathname === '/7/') {
     const framers = cookies.includes('seven-refuses=1') ? "'self'" : `'self' ${panelOrigin}`;
+    return html(response, sevenPage(said[says] ?? said.follower), {
+      'content-security-policy': `frame-ancestors ${framers}`,
+      'x-frame-options': 'SAMEORIGIN',
+    });
+  }
+  if (pathname === '/fake-seven-sw.js') {
     response
       .writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
+        'content-type': 'text/javascript; charset=utf-8',
         'cache-control': 'no-store',
-        'content-security-policy': `frame-ancestors ${framers}`,
-        'x-frame-options': 'SAMEORIGIN',
       })
-      .end(sevenPage);
+      .end(fakeSevenWorker);
     return true;
+  }
+  if (pathname.startsWith('/preview/')) {
+    return html(response, '<!doctype html><title>preview</title><p>agent html</p>');
   }
   const retired = cookies.includes('__Host-slicc-six-retired=1');
   if (pathname === '/' && retired && searchParams.get('slicc') === 'leader') {

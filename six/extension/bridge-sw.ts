@@ -22,6 +22,12 @@ import {
   wrapsAbout,
 } from './cdp-shield.js';
 import { EXTENSION_FRAME, foreignFrameError } from './cdp-worlds.js';
+import {
+  isLeaderDocument,
+  isSevenPath,
+  type LeaderKind,
+  readLeaderKind,
+} from './leader-document.js';
 import { tabHasProtectedFrame } from './protected-frames-sw.js';
 import {
   isProtectedTab,
@@ -169,6 +175,8 @@ export const BRIDGE_DEV_ORIGINS: readonly string[] = [
 
 export interface BridgeSwDeps {
   readStoredLeaderTabId: () => Promise<number | undefined>;
+  readLeaderKind?: () => Promise<LeaderKind>;
+  isLeaderDocument?: (tabId: number, documentId: string | undefined) => Promise<boolean>;
   writeStoredLeaderTabId?: (tabId: number) => Promise<void>;
   maybeUnmaskCdpFrame: (
     tabId: number,
@@ -222,7 +230,14 @@ function senderUrlIsLeaderTab(rawUrl: string | undefined): boolean {
 
 export async function validateBridgePin(
   sender: ChromeMessageSender | undefined,
-  deps: Pick<BridgeSwDeps, 'readStoredLeaderTabId' | 'writeStoredLeaderTabId' | 'allowedOrigins'>
+  deps: Pick<
+    BridgeSwDeps,
+    | 'readStoredLeaderTabId'
+    | 'writeStoredLeaderTabId'
+    | 'allowedOrigins'
+    | 'readLeaderKind'
+    | 'isLeaderDocument'
+  >
 ): Promise<PinResult> {
   const allowed = deps.allowedOrigins ?? BRIDGE_ALLOWED_ORIGINS;
   if (!sender) return { ok: false, reason: 'no-sender' };
@@ -236,8 +251,14 @@ export async function validateBridgePin(
   if (sender.frameId !== 0) {
     return { ok: false, reason: 'not-top-frame' };
   }
+  if (isSevenPath(sender.url)) return { ok: false, reason: 'leader-is-seven' };
+  const leaderDocument = (deps.isLeaderDocument ?? isLeaderDocument)(
+    senderTabId,
+    sender.documentId
+  );
   const storedTabId = await deps.readStoredLeaderTabId();
   if (storedTabId === undefined) {
+    if (!(await leaderDocument)) return { ok: false, reason: 'not-leader-document' };
     if (senderUrlIsLeaderTab(sender.url) && deps.writeStoredLeaderTabId) {
       await deps.writeStoredLeaderTabId(senderTabId);
       return { ok: true };
@@ -247,6 +268,10 @@ export async function validateBridgePin(
   if (storedTabId !== senderTabId) {
     return { ok: false, reason: 'sender-tab-not-leader' };
   }
+  if ((await (deps.readLeaderKind ?? readLeaderKind)()) === 'seven') {
+    return { ok: false, reason: 'leader-is-seven' };
+  }
+  if (!(await leaderDocument)) return { ok: false, reason: 'not-leader-document' };
   return { ok: true };
 }
 
@@ -588,7 +613,7 @@ export async function readStoredLeaderTabIdFromSession(): Promise<number | undef
 
 export async function writeStoredLeaderTabIdToSession(tabId: number): Promise<void> {
   try {
-    await chrome.storage.session.set({ [LEADER_TAB_ID_KEY]: tabId });
+    await chrome.storage.session.set({ [LEADER_TAB_ID_KEY]: tabId, slicc_leader_kind: 'six' });
   } catch {}
 }
 
