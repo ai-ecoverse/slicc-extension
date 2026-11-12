@@ -330,9 +330,9 @@ export function installLeaderTabListeners(): void {
       });
   });
 
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    const url = changeInfo.url ?? tab.pendingUrl;
-    if (url) noteLeaderTabUrl(tabId, url).catch(() => {});
+  chrome.tabs.onUpdated.addListener((updatedId, change, updated) => {
+    const url = change.url ?? updated.pendingUrl;
+    if (url) noteLeaderTabUrl(updatedId, url).catch(() => {});
   });
 
   chrome.tabs.onRemoved.addListener((tabId) => {
