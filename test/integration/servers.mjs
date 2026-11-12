@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer as createPlainServer } from 'node:http';
 import { createServer } from 'node:https';
 import { join } from 'node:path';
+import { extId } from './extension-page.mjs';
 
 export function certificate(dir) {
   const key = join(dir, 'key.pem');
@@ -53,6 +54,33 @@ function listen(tls, handler) {
   });
 }
 
+const panelOrigin = `chrome-extension://${extId}`;
+const sevenPage = `<!doctype html><title>seven</title><p>seven os</p><script>if (parent !== window) parent.postMessage({ type: 'slicc-seven-panel', role: 'follower', owner: true, stalled: false, skew: false }, ${JSON.stringify(panelOrigin)});</script>`;
+
+function seven(request, response, pathname, searchParams) {
+  const host = (request.headers.host ?? '').split(':')[0];
+  const cookies = request.headers.cookie ?? '';
+  if (host !== 'www.sliccy.ai') return false;
+  if (pathname === '/os/') {
+    const framers = cookies.includes('seven-refuses=1') ? "'self'" : `'self' ${panelOrigin}`;
+    response
+      .writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'content-security-policy': `frame-ancestors ${framers}`,
+        'x-frame-options': 'SAMEORIGIN',
+      })
+      .end(sevenPage);
+    return true;
+  }
+  const retired = cookies.includes('__Host-slicc-six-retired=1');
+  if (pathname === '/' && retired && searchParams.get('slicc') === 'leader') {
+    response.writeHead(302, { location: '/os/', 'cache-control': 'no-store' }).end();
+    return true;
+  }
+  return false;
+}
+
 const onePixel = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==',
   'base64'
@@ -72,6 +100,7 @@ export async function pages(tls) {
       path: pathname,
       search: searchParams.toString(),
     });
+    if (seven(request, response, pathname, searchParams)) return;
     if (pathname === '/page-version')
       return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(version);
     if (pathname.startsWith('/controller/')) {

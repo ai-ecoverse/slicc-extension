@@ -30,6 +30,14 @@ The extension manages a pinned leader tab at `https://www.sliccy.ai/?slicc=leade
 
 The side panel (`sidepanel.html`) mounts a cherry follower iframe that connects to the leader tab's tray. The controller manages boot, ready, and disconnected states with automatic reconnection.
 
+## Seven on www — leader tab and side panel
+
+After the in-place upgrade (slicc-bios#648), seven's service worker answers `www.sliccy.ai/?slicc=leader` with a redirect to `/os/`, so the leader tab ends up on seven.
+- **The leader:** a pinned `?slicc=leader` tab still wins. Without one, a `www.sliccy.ai` tab on `/os/` or `/7/` is the leader: the stored tab first, then a pinned one, then a loaded one. It's adopted as it is, without changing its URL or pinning it, and other seven tabs stay open. Before this, every panel open created another leader tab.
+- **The panel:** when the leader is seven, the service worker sends the panel `{ kind: 'seven', url: 'https://www.sliccy.ai/os/' }`, both when the panel connects and when the leader tab navigates to seven. The panel frames that URL in place of cherry. Seven lets only this extension's id frame `/os/`, runs there as a follower tab of the one that owns the kernel, and never takes the kernel itself (slicc-bios#…). The panel accepts `{ type: 'slicc-seven-panel', role }` only from that frame's window and origin, and shows it once `role` is `follower`.
+- **Fallback:** a seven that doesn't answer within 20 s (an older seven, which refuses the frame) leaves the panel on *SLICC runs in its tab* with **Show SLICC tab**, which brings the leader tab to the front.
+- **Tests:** `seven-panel.test.mjs`, against a fake www that redirects the leader once `__Host-slicc-six-retired` is set.
+
 ## Six — secrets
 
 The secrets options page (`secrets.html`) manages named secrets with per-domain scoping, S3 profiles, and OAuth extra domains. Secrets are encrypted with AES-GCM and kept as records in IndexedDB; older plaintext and `{ct, iv}` entries in `chrome.storage.local` migrate on first access.

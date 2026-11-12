@@ -118,7 +118,7 @@ export async function handleCherryPanelConnect(
   });
 
   await ensureLoaded();
-  const wasDisconnected = state.state === 'disconnected';
+  const wasDisconnected = state.kind === 'join-url' && state.state === 'disconnected';
   const wasTrayGaveUp = wasDisconnected && hasSeenReady;
   if (wasDisconnected) {
     state = { kind: 'join-url', state: 'booting' };
@@ -144,6 +144,13 @@ export function setCherryPanelJoinUrl(joinUrl: string | null): void {
     state = { kind: 'join-url', state: 'disconnected' };
     maybeRecoverLeader(Date.now(), recoveryDeps?.reloadLeaderTabIfExists);
   }
+  persist();
+  broadcast();
+}
+
+export function setCherryPanelSeven(url: string): void {
+  if (state.kind === 'seven' && state.url === url) return;
+  state = { kind: 'seven', url };
   persist();
   broadcast();
 }
