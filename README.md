@@ -30,6 +30,27 @@ The extension manages a pinned leader tab at `https://www.sliccy.ai/?slicc=leade
 
 The side panel (`sidepanel.html`) mounts a cherry follower iframe that connects to the leader tab's tray. The controller manages boot, ready, and disconnected states with automatic reconnection.
 
+## Seven on www — leader tab and side panel
+
+After the in-place upgrade (slicc-bios#648), seven's service worker answers `www.sliccy.ai/?slicc=leader` with a redirect to `/os/`, so the leader tab ends up on seven.
+- **The upgrade, as the extension sees it:** the extension's own leader URL (`?slicc=leader&ext=<id>`) starts a top-frame navigation, and the navigation commits on `/os/` with `server_redirect` in `webNavigation`'s transition qualifiers. Seven's service worker and a network 302 both count. The extension then sets `slicc_seven_upgraded` in `chrome.storage.local`, which only the extension's own pages and worker can read and write (`TRUSTED_CONTEXTS`). The upgrade is one-way per browser. A script navigation (`location.assign('/os/')`), a redirect from another URL (`/7` to `/7/`) and a `pushState` are no upgrade.
+- **The six leader document:** exactly `https://www.sliccy.ai/?slicc=leader` (the origin, the path `/`, and `slicc=leader`), one predicate for the leader tab, the commits and the pins. `/preview/x.html?slicc=leader` or `/doc?slicc=leader` is not the leader.
+- **The leader:** a six leader tab always wins. Before the upgrade, the extension never adopts a seven tab and creates a six leader instead. After it, a `www.sliccy.ai` tab whose committed URL is on `/os/` or `/7/` is the leader: the stored tab first, then a pinned one, then a loaded one. It's adopted as it is, without changing its URL or pinning it, and other seven tabs stay open. Before this change, every panel open created another leader tab. A `pendingUrl` never counts.
+- **Leaving the leader document:** every top-frame commit in the stored tab is checked. A six leader URL keeps it as six. Seven keeps it as seven only after the upgrade. Anything else, `/preview/` included, drops the stored leader and tells the panel.
+- **Six's ports never reach seven:** the CDP bridge, `fetch-proxy.fetch`, `secrets.crud` and `mount.sign-and-forward` refuse:
+  - a sender on `/os/`, `/7` or `/7/` (`leader-is-seven`);
+  - any sender while the stored leader is seven (`leader-is-seven`);
+  - a sender whose document didn't commit on the six leader URL (`not-leader-document`), as a first claim or as the stored tab.
+
+  The last check uses the sender's `documentId` against the commit the extension saw for that tab, so a page that `pushState`s a leader URL is refused. A commit made before the worker listened (a browser start, an update) is checked with `webNavigation.getFrame`.
+- **The panel:** when the leader is seven, the service worker sends the panel `{ kind: 'seven', url: 'https://www.sliccy.ai/os/' }`, both when the panel connects and when the leader's upgrade redirect commits. The panel frames that URL in place of cherry. Seven lets only this extension's id frame `/os/`, runs there as a follower tab of the one that owns the kernel, and never takes the kernel itself (ai-ecoverse/slicc-bios#1530). The panel accepts `{ type: 'slicc-seven-panel', role }` only from that frame's window and origin, and shows it once `role` is `follower`.
+- **Fallback:** a seven that doesn't answer within 20 s (an older seven, which refuses the frame) leaves the panel on *SLICC runs in its tab* with **Show SLICC tab**, which brings the leader tab to the front.
+- **Tests:** `seven-panel.test.mjs`, against a fake www that redirects the leader, once by a service worker and once by a 302 when `__Host-slicc-six-retired` is set. It covers:
+  - `/preview/x.html?slicc=leader` refused as a first claim, and after the stored leader navigates there;
+  - before the upgrade, the forgeries above, and a seven tab never adopted;
+  - after the upgrade, every pinned port refusing the seven leader, on `/os/`, on `/7/` and after it moves to `/preview/`;
+  - the panel ignoring a message of another type, from another origin, or from its own window.
+
 ## Six — secrets
 
 The secrets options page (`secrets.html`) manages named secrets with per-domain scoping, S3 profiles, and OAuth extra domains. Secrets are encrypted with AES-GCM and kept as records in IndexedDB; older plaintext and `{ct, iv}` entries in `chrome.storage.local` migrate on first access.

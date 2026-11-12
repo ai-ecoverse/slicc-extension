@@ -61,6 +61,7 @@ async function prepareExtension(paths) {
   }
 });`;
   assert.ok(six.includes(eventSite) && six.includes(updatedSite) && six.includes(updatedEnd));
+  assert.equal(six.split(updatedSite).length, 2, 'the onUpdated anchor occurs exactly once');
   six = six.replace(
     '  async checkContent(method, params = {}) {',
     `  async checkContent(method, params = {}) {

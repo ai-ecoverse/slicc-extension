@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer as createPlainServer } from 'node:http';
 import { createServer } from 'node:https';
 import { join } from 'node:path';
+import { extId } from './extension-page.mjs';
 
 export function certificate(dir) {
   const key = join(dir, 'key.pem');
@@ -53,6 +54,85 @@ function listen(tls, handler) {
   });
 }
 
+const panelOrigin = `chrome-extension://${extId}`;
+const said = {
+  follower: { type: 'slicc-seven-panel', role: 'follower', stalled: false, skew: false },
+  'wrong-type': { type: 'slicc-seven-other', role: 'follower' },
+};
+const sevenPage = (message) =>
+  `<!doctype html><title>seven</title><p>seven os</p><script>if (parent !== window) parent.postMessage(${JSON.stringify(message)}, ${JSON.stringify(panelOrigin)});</script>`;
+
+const fakeSevenWorker = `self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  if (event.request.mode !== 'navigate' || url.pathname !== '/' || url.searchParams.get('slicc') !== 'leader') return;
+  event.respondWith(Response.redirect(new URL('/os/', url).href, 302));
+});`;
+
+function html(response, body, headers = {}) {
+  response
+    .writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      ...headers,
+    })
+    .end(body);
+  return true;
+}
+
+function seven(request, response, pathname, searchParams) {
+  const host = (request.headers.host ?? '').split(':')[0];
+  const cookies = request.headers.cookie ?? '';
+  const says = /(?:^|; )seven-says=([\w-]+)/.exec(cookies)?.[1] ?? 'follower';
+  if (host === 'other.test' && pathname === '/seven-elsewhere') {
+    return html(response, sevenPage(said.follower));
+  }
+  if (host !== 'www.sliccy.ai') return false;
+  if (pathname === '/7') {
+    response.writeHead(301, { location: '/7/', 'cache-control': 'no-store' }).end();
+    return true;
+  }
+  if (
+    pathname === '/os/' &&
+    says === 'elsewhere' &&
+    request.headers['sec-fetch-dest'] === 'iframe'
+  ) {
+    response
+      .writeHead(302, {
+        location: 'https://other.test/seven-elsewhere',
+        'cache-control': 'no-store',
+      })
+      .end();
+    return true;
+  }
+  if (pathname === '/os/' || pathname === '/7/') {
+    const framers = cookies.includes('seven-refuses=1') ? "'self'" : `'self' ${panelOrigin}`;
+    return html(response, sevenPage(said[says] ?? said.follower), {
+      'content-security-policy': `frame-ancestors ${framers}`,
+      'x-frame-options': 'SAMEORIGIN',
+    });
+  }
+  if (pathname === '/fake-seven-sw.js') {
+    response
+      .writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+      })
+      .end(fakeSevenWorker);
+    return true;
+  }
+  if (pathname.startsWith('/preview/')) {
+    return html(response, '<!doctype html><title>preview</title><p>agent html</p>');
+  }
+  const retired = cookies.includes('__Host-slicc-six-retired=1');
+  if (pathname === '/' && retired && searchParams.get('slicc') === 'leader') {
+    response.writeHead(302, { location: '/os/', 'cache-control': 'no-store' }).end();
+    return true;
+  }
+  return false;
+}
+
 const onePixel = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==',
   'base64'
@@ -72,6 +152,7 @@ export async function pages(tls) {
       path: pathname,
       search: searchParams.toString(),
     });
+    if (seven(request, response, pathname, searchParams)) return;
     if (pathname === '/page-version')
       return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(version);
     if (pathname.startsWith('/controller/')) {
@@ -306,7 +387,8 @@ export async function pages(tls) {
         .end(html);
     }
     const named = { '/probe': probe, '/frames': frames };
-    const body = named[pathname] ?? html;
+    const page = pathname === '/' && searchParams.has('frames') ? '/frames' : pathname;
+    const body = named[page] ?? html;
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
   });
   server.upgrade(binaryEcho);

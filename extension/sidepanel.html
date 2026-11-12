@@ -20,19 +20,42 @@
       position: absolute;
       inset: 0;
       display: none;
+      flex-direction: column;
+      gap: 12px;
       align-items: center;
       justify-content: center;
+      padding: 24px;
+      box-sizing: border-box;
+      background: #1e1e1e;
       color: #aaa;
       font: 14px system-ui;
+      text-align: center;
     }
     #cherry-status[data-state="starting"],
+    #cherry-status[data-state="slow"],
+    #cherry-status[data-state="tab"],
     #cherry-status[data-state="disconnected"] {
       display: flex;
+    }
+    #cherry-status-action {
+      font: inherit;
+      padding: 6px 14px;
+      border-radius: 16px;
+      border: 1px solid #666;
+      background: transparent;
+      color: #eee;
+      cursor: pointer;
+    }
+    #cherry-status-action[hidden] {
+      display: none;
     }
     </style>
   </head>
   <body>
-    <div id="cherry-status" data-state="starting">Starting SLICC…</div>
+    <div id="cherry-status" data-state="starting">
+      <span id="cherry-status-text">Starting SLICC…</span>
+      <button id="cherry-status-action" type="button" hidden></button>
+    </div>
 
     <iframe
       id="cherry-follower"
