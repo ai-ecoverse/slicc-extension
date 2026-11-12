@@ -387,7 +387,8 @@ export async function pages(tls) {
         .end(html);
     }
     const named = { '/probe': probe, '/frames': frames };
-    const body = named[pathname] ?? html;
+    const page = pathname === '/' && searchParams.has('frames') ? '/frames' : pathname;
+    const body = named[page] ?? html;
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
   });
   server.upgrade(binaryEcho);

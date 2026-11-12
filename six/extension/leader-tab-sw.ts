@@ -2,6 +2,7 @@ import { LEADER_EXT_ID_QUERY_NAME, SLICC_HOSTED_ORIGIN } from '@slicc/shared-ts'
 import { broadcastLeaderGone, setCherryPanelSeven } from './cherry-panel-sw.js';
 import {
   forgetTopDocument,
+  isSixLeaderDocumentUrl,
   type LeaderKind,
   markSevenUpgraded,
   noteTopDocument,
@@ -92,15 +93,7 @@ async function clearStoredLeaderTabId(): Promise<void> {
 }
 
 function isLeaderTabUrl(rawUrl: string | undefined): boolean {
-  if (!rawUrl) return false;
-  let u: URL;
-  try {
-    u = new URL(rawUrl);
-  } catch {
-    return false;
-  }
-  if (u.origin !== LEADER_TAB_ORIGIN) return false;
-  return u.searchParams.get('slicc') === 'leader';
+  return isSixLeaderDocumentUrl(rawUrl, [LEADER_TAB_ORIGIN]);
 }
 
 export function isSevenTabUrl(rawUrl: string | undefined, origin = LEADER_TAB_ORIGIN): boolean {

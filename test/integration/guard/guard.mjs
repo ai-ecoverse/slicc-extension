@@ -80,7 +80,7 @@ export function capabilities(transport) {
 
 export const entries = {
   seven: { origin: 'https://seven.sliccy.ai', path: '/doc?n=guard-client' },
-  'six-bridge': { origin: 'https://www.sliccy.ai', path: '/doc?n=guard-client&slicc=leader' },
+  'six-bridge': { origin: 'https://www.sliccy.ai', path: '/?n=guard-client&slicc=leader' },
 };
 
 export function targets(transport) {

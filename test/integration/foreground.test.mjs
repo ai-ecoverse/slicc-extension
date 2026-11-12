@@ -12,7 +12,7 @@ after(() => chrome?.close());
 
 const entry = {
   seven: 'https://seven.sliccy.ai/frames',
-  'six-bridge': 'https://www.sliccy.ai/frames?slicc=leader',
+  'six-bridge': 'https://www.sliccy.ai/?frames&slicc=leader',
 };
 const ordinary = 'https://ordinary.test/';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

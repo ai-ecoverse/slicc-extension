@@ -114,15 +114,25 @@ async function goTo(targetId, url, lands = url) {
   }
 }
 
+const connectable = `document.readyState === 'complete' && typeof globalThis.chrome?.runtime?.connect === 'function'`;
+
+async function settled(targetId, ms) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const ready = await inTab(targetId, connectable).catch(() => false);
+    if (ready) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function open(url) {
   const { targetId } = await chrome.cdp.send('Target.createTarget', { url });
   await targetOf(url);
-  const deadline = Date.now() + 15000;
-  while ((await inTab(targetId, 'document.readyState')) !== 'complete') {
-    if (Date.now() > deadline) throw new Error(`${url} never loaded`);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  return targetId;
+  if (await settled(targetId, 5000)) return targetId;
+  await inTab(targetId, 'location.reload(); true');
+  if (await settled(targetId, 15000)) return targetId;
+  throw new Error(`${url} loaded without chrome.runtime.connect, also after a reload`);
 }
 
 async function closeWww() {
@@ -133,6 +143,30 @@ async function closeWww() {
     }
   }
 }
+
+test('only the six leader document on / is the leader: /preview/?slicc=leader is refused as a claim and as the stored tab', async (t) => {
+  t.after(closeWww);
+  const keys = `chrome.storage.session.get('slicc_leader_tab_id').then((s) => s.slicc_leader_tab_id ?? null)`;
+  const preview = await open(`${www}/preview/x.html?slicc=leader`);
+  refusedEverywhere(await inTab(preview, probe), 'not-leader-document');
+  await chrome.cdp.send('Target.closeTarget', { targetId: preview });
+
+  const leader = await open(`${www}/?slicc=leader`);
+  assert.deepEqual(await inTab(leader, probe), {
+    bridge: 'open',
+    fetch: 'open',
+    secrets: 'open',
+    mount: 'open',
+  });
+  const first = await panel(t);
+  const stored = await first.evaluate(keys);
+  await first.close();
+  assert.notEqual(stored, null);
+  await goTo(leader, `${www}/preview/x.html?slicc=leader`);
+  refusedEverywhere(await inTab(leader, probe), 'not-leader-document');
+  const side = await panel(t);
+  assert.notEqual(await side.evaluate(keys), stored, 'the stored leader was dropped');
+});
 
 test('before the upgrade: a six leader wins and its ports open, a /os/ or /7/ tab is never adopted, and none of six’s ports reach it', async (t) => {
   t.after(closeWww);

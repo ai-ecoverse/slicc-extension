@@ -25,6 +25,7 @@ import { EXTENSION_FRAME, foreignFrameError } from './cdp-worlds.js';
 import {
   isLeaderDocument,
   isSevenPath,
+  isSixLeaderDocumentUrl,
   type LeaderKind,
   readLeaderKind,
 } from './leader-document.js';
@@ -219,15 +220,6 @@ export interface PinResult {
   reason?: string;
 }
 
-function senderUrlIsLeaderTab(rawUrl: string | undefined): boolean {
-  if (!rawUrl) return false;
-  try {
-    return new URL(rawUrl).searchParams.get('slicc') === 'leader';
-  } catch {
-    return false;
-  }
-}
-
 export async function validateBridgePin(
   sender: ChromeMessageSender | undefined,
   deps: Pick<
@@ -259,7 +251,7 @@ export async function validateBridgePin(
   const storedTabId = await deps.readStoredLeaderTabId();
   if (storedTabId === undefined) {
     if (!(await leaderDocument)) return { ok: false, reason: 'not-leader-document' };
-    if (senderUrlIsLeaderTab(sender.url) && deps.writeStoredLeaderTabId) {
+    if (isSixLeaderDocumentUrl(sender.url, allowed) && deps.writeStoredLeaderTabId) {
       await deps.writeStoredLeaderTabId(senderTabId);
       return { ok: true };
     }

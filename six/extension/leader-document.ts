@@ -1,3 +1,9 @@
+import { SLICC_HOSTED_ORIGIN } from '@slicc/shared-ts';
+
+export const LEADER_ORIGINS: readonly string[] = __SLICC_EXT_DEV__
+  ? ['http://localhost:8787', 'http://127.0.0.1:8787']
+  : [SLICC_HOSTED_ORIGIN];
+
 const DOCUMENTS_KEY = 'slicc_leader_documents';
 const KIND_KEY = 'slicc_leader_kind';
 const UPGRADED_KEY = 'slicc_seven_upgraded';
@@ -21,10 +27,16 @@ export function isSevenPath(rawUrl: string | undefined): boolean {
   }
 }
 
-export function isSixLeaderDocumentUrl(rawUrl: string | undefined): boolean {
-  if (!rawUrl || isSevenPath(rawUrl)) return false;
+export function isSixLeaderDocumentUrl(
+  rawUrl: string | undefined,
+  origins: readonly string[] = LEADER_ORIGINS
+): boolean {
+  if (!rawUrl) return false;
   try {
-    return new URL(rawUrl).searchParams.get('slicc') === 'leader';
+    const u = new URL(rawUrl);
+    return (
+      origins.includes(u.origin) && u.pathname === '/' && u.searchParams.get('slicc') === 'leader'
+    );
   } catch {
     return false;
   }
