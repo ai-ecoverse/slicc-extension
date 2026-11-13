@@ -54,7 +54,7 @@ After the in-place upgrade (slicc-bios#648), seven's service worker answers `www
   - before the upgrade, the forgeries above, and a seven tab never adopted;
   - after the upgrade, every pinned port refusing the seven leader, on `/os/`, on `/7/` and after it moves to `/preview/`;
   - the panel ignoring a message of another type, from another origin, or from its own window.
-  - the upgrade's script move of the leader to `/os/`, where the next panel open keeps that pinned tab and closes the one it opened, and a former leader that left seven, which is not adopted.
+  - the upgrade's script move of the leader to `/os/`, where the next panel open keeps that pinned tab and closes the one it opened, a former leader that left seven, which is not adopted, a leader tab the user opened, which is never closed, and no former leader, where nothing is closed.
 
 ## Six — secrets
 
