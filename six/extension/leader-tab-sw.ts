@@ -125,6 +125,39 @@ export async function announceSevenLeader(): Promise<void> {
 
 const sevenCommits = new Set<number>();
 const starts = new Map<number, string>();
+const createdLeaders = new Set<number>();
+const FORMER_LEADER_KEY = 'slicc_former_leader_tab_id';
+
+async function readFormerLeader(): Promise<number | undefined> {
+  try {
+    const raw = (await chrome.storage.session.get(FORMER_LEADER_KEY))[FORMER_LEADER_KEY];
+    return typeof raw === 'number' ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function forgetFormerLeader(): Promise<void> {
+  await chrome.storage.session.remove(FORMER_LEADER_KEY);
+}
+
+let settling: Promise<void> = Promise.resolve();
+
+export function settleUpgradedLeader(newId: number): Promise<void> {
+  settling = settling.then(() => settleOnce(newId)).catch(() => {});
+  return settling;
+}
+
+async function settleOnce(newId: number): Promise<void> {
+  const formerId = await readFormerLeader();
+  if (formerId === undefined || formerId === newId || !createdLeaders.has(newId)) return;
+  await forgetFormerLeader();
+  const former = await chrome.tabs.get(formerId).catch(() => undefined);
+  if (former?.id === undefined || !isSevenTabUrl(former.url)) return;
+  await writeStoredLeaderTabId(former.id, 'seven');
+  createdLeaders.delete(newId);
+  await chrome.tabs.remove(newId).catch(() => {});
+}
 
 function ownLeaderUrl(rawUrl: string | undefined): boolean {
   return isLeaderTabUrl(rawUrl) && leaderUrlHasExtId(rawUrl, chrome.runtime.id);
@@ -151,9 +184,11 @@ export async function noteTopCommit(details: ChromeNavigationDetails): Promise<v
   if (seven && (redirected || (await readLeaderKind()) === 'seven')) {
     await writeLeaderKind('seven');
     setCherryPanelSeven(sevenPanelUrl());
+    if (redirected) await settleUpgradedLeader(details.tabId);
     return;
   }
   await clearStoredLeaderTabId();
+  if (seven) await chrome.storage.session.set({ [FORMER_LEADER_KEY]: details.tabId });
   broadcastLeaderGone();
 }
 
@@ -212,6 +247,7 @@ async function adoptSevenLeaderTab(keep: ChromeTab): Promise<void> {
     }
   }
   await writeStoredLeaderTabId(keep.id, 'seven');
+  await forgetFormerLeader();
 }
 
 async function createLeaderTab(): Promise<void> {
@@ -221,8 +257,11 @@ async function createLeaderTab(): Promise<void> {
     pinned: true,
   });
   if (created.id === undefined) return;
+  createdLeaders.add(created.id);
   await writeStoredLeaderTabId(created.id);
-  if (sevenCommits.has(created.id)) setCherryPanelSeven(sevenPanelUrl());
+  if (!sevenCommits.has(created.id)) return;
+  setCherryPanelSeven(sevenPanelUrl());
+  await settleUpgradedLeader(created.id);
 }
 
 function isUnloadedTab(tab: ChromeTab): boolean {
@@ -347,6 +386,8 @@ async function reloadLeaderTabForUpdate(): Promise<void> {
 
 async function handleLeaderTabRemoved(tabId: number): Promise<void> {
   sevenCommits.delete(tabId);
+  createdLeaders.delete(tabId);
+  if ((await readFormerLeader()) === tabId) await forgetFormerLeader();
   starts.delete(tabId);
   forgetTopDocument(tabId);
   const storedId = await readStoredLeaderTabId();
