@@ -37,6 +37,10 @@ After the in-place upgrade (slicc-bios#648), seven's service worker answers `www
 - **The six leader document:** exactly `https://www.sliccy.ai/?slicc=leader` (the origin, the path `/`, and `slicc=leader`), one predicate for the leader tab, the commits and the pins. `/preview/x.html?slicc=leader` or `/doc?slicc=leader` is not the leader.
 - **The leader:** a six leader tab always wins. Before the upgrade, the extension never adopts a seven tab and creates a six leader instead. After it, a `www.sliccy.ai` tab whose committed URL is on `/os/` or `/7/` is the leader: the stored tab first, then a pinned one, then a loaded one. It's adopted as it is, without changing its URL or pinning it, and other seven tabs stay open. Before this change, every panel open created another leader tab. A `pendingUrl` never counts.
 - **Leaving the leader document:** every top-frame commit in the stored tab is checked. A six leader URL keeps it as six. Seven keeps it as seven only after the upgrade. Anything else, `/preview/` included, drops the stored leader and tells the panel.
+- **The former leader:** the upgrade moves six's own leader tab to `/os/` by script (six's step-aside), which is no proof, so that move drops it as the leader. The extension remembers it (`slicc_former_leader_tab_id` in `storage.session`).
+  - **First panel open after the upgrade:** the extension opens a new leader, and seven redirects it, which is the proof. If the former leader is still on seven, the extension keeps it as the seven leader and closes the tab it just opened, so the upgrade leaves one pinned leader, not two.
+  - **A former leader that has left seven:** it isn't adopted.
+  - **The tab it closes:** only one it opened itself.
 - **Six's ports never reach seven:** the CDP bridge, `fetch-proxy.fetch`, `secrets.crud` and `mount.sign-and-forward` refuse:
   - a sender on `/os/`, `/7` or `/7/` (`leader-is-seven`);
   - any sender while the stored leader is seven (`leader-is-seven`);
@@ -50,6 +54,7 @@ After the in-place upgrade (slicc-bios#648), seven's service worker answers `www
   - before the upgrade, the forgeries above, and a seven tab never adopted;
   - after the upgrade, every pinned port refusing the seven leader, on `/os/`, on `/7/` and after it moves to `/preview/`;
   - the panel ignoring a message of another type, from another origin, or from its own window.
+  - the upgrade's script move of the leader to `/os/`, where the next panel open keeps that pinned tab and closes the one it opened, and a former leader that left seven, which is not adopted.
 
 ## Six — secrets
 

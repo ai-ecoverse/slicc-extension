@@ -357,3 +357,78 @@ test('a seven that refuses the frame leaves the panel on Show SLICC tab, which b
     JSON.stringify(await side.evaluate(wwwTabs))
   );
 });
+
+async function freshUpgrade(t) {
+  await cookie('__Host-slicc-six-retired', '', 1);
+  const reset = await panel(t);
+  await reset.evaluate(`chrome.storage.local.remove('slicc_seven_upgraded').then(() => true)`);
+  await reset.close();
+  await closeWww();
+  const side = await panel(t);
+  assert.ok(
+    await side.until(`${stored}.then((s) => s.slicc_leader_tab_id !== undefined)`, 15000),
+    'the panel opens six’s leader'
+  );
+  const leader = await targetOf(`${www}/?slicc=leader`);
+  const id = (await side.evaluate(stored)).slicc_leader_tab_id;
+  await side.close();
+  return { leader, id };
+}
+
+test('the upgrade moves six’s leader to /os/ by script, and the first panel open afterwards keeps that pinned tab and closes the one it had to open', async (t) => {
+  t.after(closeWww);
+  t.after(() => cookie('__Host-slicc-six-retired', '1'));
+  const { leader, id } = await freshUpgrade(t);
+  await cookie('__Host-slicc-six-retired', '1');
+  await goTo(leader, os);
+  const side = await panel(t);
+  assert.ok(
+    await side.until(
+      `${stored}.then((s) => s.slicc_leader_tab_id === ${id} && s.slicc_leader_kind === 'seven')`,
+      20000
+    ),
+    JSON.stringify(await side.evaluate(stored))
+  );
+  assert.ok(
+    await side.until(`${wwwTabs}.then((tabs) => tabs.length === 1)`, 10000),
+    JSON.stringify(await side.evaluate(wwwTabs))
+  );
+  assert.deepEqual(
+    (await side.evaluate(wwwTabs)).map(({ id, url, pinned }) => ({ id, url, pinned })),
+    [{ id, url: os, pinned: true }]
+  );
+  assert.equal(await side.evaluate(upgraded), true);
+  assert.ok(
+    await side.until(`${shown}.state === 'live'`, 20000),
+    JSON.stringify(await side.evaluate(shown))
+  );
+  refusedEverywhere(await inTab(leader, probe), 'leader-is-seven');
+
+  const again = await panel(t);
+  assert.ok(await again.until(`${shown}.state === 'live'`, 20000));
+  assert.deepEqual(
+    (await again.evaluate(wwwTabs)).map((tab) => tab.id),
+    [id]
+  );
+});
+
+test('a former leader that left seven before the panel opened is not adopted, and the new leader stays', async (t) => {
+  t.after(closeWww);
+  t.after(() => cookie('__Host-slicc-six-retired', '1'));
+  const { leader, id } = await freshUpgrade(t);
+  await cookie('__Host-slicc-six-retired', '1');
+  await goTo(leader, os);
+  await goTo(leader, `${www}/preview/x.html`);
+  const side = await panel(t);
+  assert.ok(
+    await side.until(
+      `${stored}.then((s) => s.slicc_leader_kind === 'seven' && s.slicc_leader_tab_id !== ${id})`,
+      20000
+    ),
+    JSON.stringify(await side.evaluate(stored))
+  );
+  const tabs = await side.evaluate(wwwTabs);
+  assert.equal(tabs.length, 2, JSON.stringify(tabs));
+  assert.deepEqual(tabs.find((tab) => tab.id === id)?.url, `${www}/preview/x.html`);
+  assert.ok(await side.until(`${shown}.state === 'live'`, 20000));
+});
