@@ -432,3 +432,69 @@ test('a former leader that left seven before the panel opened is not adopted, an
   assert.deepEqual(tabs.find((tab) => tab.id === id)?.url, `${www}/preview/x.html`);
   assert.ok(await side.until(`${shown}.state === 'live'`, 20000));
 });
+
+test('a proof on a leader tab the extension didn’t open closes nothing: the user’s own leader redirects and stays', async (t) => {
+  t.after(closeWww);
+  t.after(() => cookie('__Host-slicc-six-retired', '1'));
+  const { leader, id } = await freshUpgrade(t);
+  await goTo(leader, os);
+  const own = `${www}/?slicc=leader&ext=${extId}`;
+  const mine = await open(own);
+  const adopt = await panel(t);
+  assert.ok(
+    await adopt.until(
+      `${stored}.then((s) => s.slicc_leader_tab_id !== undefined && s.slicc_leader_tab_id !== ${id})`,
+      15000
+    ),
+    JSON.stringify(await adopt.evaluate(stored))
+  );
+  const user = (await adopt.evaluate(stored)).slicc_leader_tab_id;
+  await adopt.close();
+  await cookie('__Host-slicc-six-retired', '1');
+  await inTab(mine, 'location.reload(); true');
+  const side = await panel(t);
+  assert.ok(
+    await side.until(`${stored}.then((s) => s.slicc_leader_kind === 'seven')`, 20000),
+    JSON.stringify(await side.evaluate(stored))
+  );
+  assert.equal(await side.evaluate(upgraded), true);
+  assert.equal(
+    (await side.evaluate(stored)).slicc_leader_tab_id,
+    user,
+    'the user’s tab stays the leader'
+  );
+  const tabs = await side.evaluate(wwwTabs);
+  assert.deepEqual(tabs.map((tab) => tab.id).sort(), [id, user].sort(), JSON.stringify(tabs));
+  assert.ok(
+    tabs.every((tab) => tab.url === os),
+    JSON.stringify(tabs)
+  );
+});
+
+test('with no former leader, the leader the extension opened stays, and the user’s own seven tab isn’t closed', async (t) => {
+  t.after(closeWww);
+  await cookie('__Host-slicc-six-retired', '', 1);
+  const reset = await panel(t);
+  await reset.evaluate(
+    `Promise.all([chrome.storage.local.remove('slicc_seven_upgraded'), chrome.storage.session.remove('slicc_former_leader_tab_id')]).then(() => true)`
+  );
+  await reset.close();
+  await closeWww();
+  await cookie('__Host-slicc-six-retired', '1');
+  const mine = await open(os);
+  const side = await panel(t);
+  assert.ok(
+    await side.until(`${stored}.then((s) => s.slicc_leader_kind === 'seven')`, 20000),
+    JSON.stringify(await side.evaluate(stored))
+  );
+  const tabs = await side.evaluate(wwwTabs);
+  assert.equal(tabs.length, 2, JSON.stringify(tabs));
+  const created = tabs.find((tab) => tab.pinned);
+  assert.equal(created?.url, os, JSON.stringify(tabs));
+  assert.equal((await side.evaluate(stored)).slicc_leader_tab_id, created.id);
+  assert.ok(
+    (await chrome.cdp.send('Target.getTargets')).targetInfos.some((x) => x.targetId === mine),
+    'the user’s seven tab is still open'
+  );
+  assert.ok(await side.until(`${shown}.state === 'live'`, 20000));
+});
