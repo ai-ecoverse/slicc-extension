@@ -29,7 +29,7 @@
     "@ai-ecoverse/slicc-browsers": "1.24.0",
     "@ai-ecoverse/slicc-cdp": "1.50.1",
     "@ai-ecoverse/slicc-shared-web": "2.14.2",
-    "@biomejs/biome": "2.6.5",
+    "@biomejs/biome": "2.6.6",
     "@semantic-release/exec": "7.1.0",
     "esbuild": "0.28.2",
     "fake-indexeddb": "6.2.7",
