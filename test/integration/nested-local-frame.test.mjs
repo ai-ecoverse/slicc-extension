@@ -561,3 +561,22 @@ for (const transport of ['seven', 'six-bridge']) {
     );
   });
 }
+
+test('six-bridge: an isolated extension world stays hidden and the tab stays open', async (t) => {
+  const fixture = await open('six-bridge', rootOnly());
+  t.after(fixture.close);
+  await fixture.emit('Runtime.executionContextCreated', {
+    context: {
+      id: 21,
+      origin: 'chrome-extension://abcdefghijklmnop',
+      name: 'ext',
+      auxData: { isDefault: false, frameId: 'root' },
+    },
+  });
+  assert.equal(
+    fixture.hit('Runtime.executionContextCreated', (params) => params.context?.id === 21),
+    false
+  );
+  const enabled = await fixture.command('Page.enable');
+  assert.equal(enabled.error, undefined);
+});

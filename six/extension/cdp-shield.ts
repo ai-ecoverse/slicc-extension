@@ -23,6 +23,7 @@ import {
   scopedBinding,
   UNSEEN_CONTEXT,
   WORLD,
+  type WorldKind,
   Worlds,
 } from './cdp-worlds.js';
 import {
@@ -2590,23 +2591,41 @@ export class TabShield {
     const frame = str(aux['frameId']);
     const state = this.ancestorState(frame ?? '');
     if (state === 'protected') return true;
-    let kind = this.worlds.kindOf(context, urlProtected);
-    if (this.protectedContext(origin)) return true;
-    if (aux['isDefault'] !== false && kind === undefined) {
-      if (frame) this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
-      const child = frame !== undefined && frame !== this.mainFrameId;
-      if (child && unknownFrame({ securityOrigin: origin, url: origin })) {
-        this.uncertainFrames.set(frame, true);
-        this.hasUncertain = true;
-      }
-      if (child && (extensionOrigin(origin) || (frame && this.hiddenFrames.has(frame)))) {
-        if (frame) this.hiddenFrames.set(frame, true);
-        kind = 'foreign';
-      }
+    const learned = this.learnDefault(
+      aux,
+      origin,
+      frame,
+      this.worlds.kindOf(context, urlProtected)
+    );
+    if (learned.blocked) return true;
+    if (state === 'unresolved' && learned.kind === undefined) return false;
+    if (this.worlds.add(context, learned.kind)) this.quietProfilers();
+    return learned.kind !== undefined;
+  }
+
+  private learnDefault(
+    aux: CDPPayload,
+    origin: string,
+    frame: string | undefined,
+    kind: WorldKind
+  ): { kind: WorldKind; blocked: boolean } {
+    if (!(aux['isDefault'] !== false && kind === undefined)) return { kind, blocked: false };
+    if (frame) this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
+    const child = frame !== undefined && frame !== this.mainFrameId;
+    if (child && unknownFrame({ securityOrigin: origin, url: origin })) {
+      this.uncertainFrames.set(frame, true);
+      this.hasUncertain = true;
     }
-    if (state === 'unresolved' && kind === undefined) return false;
-    if (this.worlds.add(context, kind)) this.quietProfilers();
-    return kind !== undefined;
+    if (child && (extensionOrigin(origin) || (frame && this.hiddenFrames.has(frame)))) {
+      if (frame) this.hiddenFrames.set(frame, true);
+      return { kind: 'foreign', blocked: false };
+    }
+    if (urlProtected(origin)) {
+      this.block();
+      this.sawProtected = true;
+      return { kind, blocked: true };
+    }
+    return { kind, blocked: false };
   }
 
   private pruneFrames(tree: unknown): void {
@@ -2681,13 +2700,6 @@ export class TabShield {
       parentId = next;
     }
     return parentId ? 'protected' : 'clear';
-  }
-
-  private protectedContext(origin: string): boolean {
-    if (!urlProtected(origin)) return false;
-    this.block();
-    this.sawProtected = true;
-    return true;
   }
 
   private holdUnresolved(frameId: string, event: ShieldEvent): void {
