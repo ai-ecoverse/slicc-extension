@@ -23,6 +23,7 @@ import {
   scopedBinding,
   UNSEEN_CONTEXT,
   WORLD,
+  type WorldKind,
   Worlds,
 } from './cdp-worlds.js';
 import {
@@ -1462,6 +1463,11 @@ export class TabShield {
   private readonly networkStreams = new NetworkStreams();
   private readonly hiddenFrames = new Bounded<true>(1000);
   private readonly uncertainFrames = new Bounded<true>(1000);
+  private readonly frameParents = new Map<string, string>();
+  private readonly unresolved = new Map<string, ShieldEvent[]>();
+  private carried: ShieldEvent[] = [];
+  private sawProtected = false;
+  private hasUncertain = false;
   private readonly namedBodies = new Bounded<true>(2000);
   private readonly hops = new Bounded<Hop>(500);
   private readonly reroutes = new Map<string, (allowed: boolean) => void>();
@@ -2331,7 +2337,9 @@ export class TabShield {
       await resolveFrameOrigins(result['frameTree'], this.uncertainFrames, (id) =>
         this.documentOrigin(id)
       );
+      this.rememberParents(result['frameTree']);
       this.pruneFrames(result['frameTree']);
+      this.flushUnresolved();
     }
     if (COOKIE_READERS.has(method)) dropProtectedCookies(result);
     if (method === 'Page.getNavigationHistory') redactHistory(result);
@@ -2365,30 +2373,54 @@ export class TabShield {
     if (method === 'Fetch.requestPaused') return this.onPaused(p);
     if (method === 'Fetch.authRequired') return this.onAuth(p);
     if (this.wake.hides(method, p)) return [];
+    if (method === 'Page.frameAttached') return this.onAttached(p);
     this.track(p);
-    if (this.watchCommit(method, p)) return [];
-    if (profiled(method) && this.worlds.foreign) return [];
-    if (this.worlds.hides(p)) return [];
-    if (this.frameProtected(str(p['frameId']) ?? '')) return [];
-    if (DISCOVERY_EVENTS.has(method)) return [];
-    if (errorPageRead(method)) {
-      return this.checkContent(method, p).then(
-        async () => {
-          if (sealedRead(method) && !(await this.sealEvent(method, p))) return [];
-          return this.deliver({ method, params: p });
-        },
-        () => []
-      );
+    if (this.watchCommit(method, p)) return this.carry([]);
+    if (profiled(method) && this.worlds.foreign) return this.carry([]);
+    if (this.worlds.hides(p)) return this.carry([]);
+    return this.frameGate(method, p) ?? this.finishEvent(method, p);
+  }
+
+  private frameGate(method: string, params: CDPPayload): ShieldEvent[] | undefined {
+    const frameId = this.eventFrame(params);
+    const state = this.ancestorState(frameId);
+    if (this.frameProtected(frameId) || state === 'protected') {
+      const requestId = str(params['requestId']);
+      if (requestId) this.requests.set(requestId, true);
+      return this.carry([]);
     }
-    if (method.startsWith('Target.')) {
-      if (isObj(p['targetInfo']) && isProtectedTargetType(p['targetInfo']['type'])) return [];
-      return [this.redactTarget(method, p)];
+    if (state === 'unresolved') {
+      this.holdUnresolved(frameId, { method, params });
+      return this.carry([]);
     }
-    return this.deliver({ method, params: p });
+    return undefined;
+  }
+
+  private finishEvent(method: string, params: CDPPayload): ShieldEvent[] | Promise<ShieldEvent[]> {
+    if (DISCOVERY_EVENTS.has(method)) return this.carry([]);
+    if (errorPageRead(method)) return this.finishRead(method, params);
+    if (!method.startsWith('Target.')) return this.carry(this.deliver({ method, params }));
+    if (isObj(params['targetInfo']) && isProtectedTargetType(params['targetInfo']['type'])) {
+      return this.carry([]);
+    }
+    return this.carry([this.redactTarget(method, params)]);
+  }
+
+  private finishRead(method: string, params: CDPPayload): Promise<ShieldEvent[]> {
+    return this.checkContent(method, params).then(
+      async () => {
+        if (sealedRead(method) && !(await this.sealEvent(method, params))) return this.carry([]);
+        return this.carry(this.deliver({ method, params }));
+      },
+      () => this.carry([])
+    );
   }
 
   private initiatedByProtected(paused: CDPPayload): boolean {
-    if (this.frameProtected(str(paused['frameId']) ?? '')) return true;
+    const frameId = str(paused['frameId']) ?? '';
+    const state = this.ancestorState(frameId);
+    if (this.frameProtected(frameId) || state === 'protected' || state === 'unresolved')
+      return true;
     const request = paused['request'];
     const headers = isObj(request) && isObj(request['headers']) ? request['headers'] : {};
     return Object.entries(headers).some(([name, value]) => {
@@ -2452,10 +2484,12 @@ export class TabShield {
     const url = requestUrl(params);
     if (!id || url === undefined) return;
     const initiator = params['initiator'];
+    const frameId = str(params['frameId']) ?? '';
     const fromProtected =
       urlProtected(str(params['documentURL']) ?? '') ||
       urlProtected(isObj(initiator) ? (str(initiator['url']) ?? '') : '') ||
-      this.frameProtected(str(params['frameId']) ?? '');
+      this.frameProtected(frameId) ||
+      this.ancestorState(frameId) === 'protected';
     const tainted = fromProtected || urlProtected(url) || this.requests.get(id) === true;
     this.requests.set(id, tainted);
   }
@@ -2509,21 +2543,7 @@ export class TabShield {
   private watchCommit(method: string, params: CDPPayload): boolean {
     this.navigation(method, params);
     if (method === 'Page.frameNavigated' && isObj(params['frame'])) {
-      const frame = params['frame'];
-      const url = `${str(frame['url']) ?? ''}${str(frame['urlFragment']) ?? ''}`;
-      const origin = str(frame['securityOrigin']) ?? '';
-      const id = str(frame['id']);
-      if (id) this.frames.set(id, [url, origin]);
-      if (frame['parentId'] === undefined) {
-        if (id) this.mainFrameId = id;
-        if (urlProtected(url) || urlProtected(origin)) this.block();
-        return false;
-      }
-      if (id && (extensionOrigin(url) || extensionOrigin(origin))) {
-        this.hiddenFrames.set(id, true);
-        return true;
-      }
-      return false;
+      return this.commitNavigated(params['frame']);
     }
     if (method === 'Runtime.executionContextDestroyed') {
       this.documents.contexts.delete(params['executionContextId'] as number);
@@ -2540,28 +2560,72 @@ export class TabShield {
     return false;
   }
 
+  private commitNavigated(frame: CDPPayload): boolean {
+    const url = `${str(frame['url']) ?? ''}${str(frame['urlFragment']) ?? ''}`;
+    const origin = str(frame['securityOrigin']) ?? '';
+    const id = str(frame['id']);
+    const parentId = str(frame['parentId']) ?? '';
+    if (id) this.frames.set(id, [url, origin]);
+    if (id && parentId) this.frameParents.set(id, parentId);
+    else if (id) this.frameParents.delete(id);
+    if (urlProtected(url) || urlProtected(origin)) this.sawProtected = true;
+    const state = id ? this.ancestorState(id) : 'clear';
+    if (id) this.settleUnresolved(id);
+    if (frame['parentId'] === undefined) {
+      if (id) this.mainFrameId = id;
+      if (urlProtected(url) || urlProtected(origin)) this.block();
+      return false;
+    }
+    if (id && (extensionOrigin(url) || extensionOrigin(origin))) {
+      this.hiddenFrames.set(id, true);
+      this.sawProtected = true;
+      return true;
+    }
+    return state === 'protected' || state === 'unresolved' || this.frameProtected(id ?? '');
+  }
+
   private watchContext(context: CDPPayload): boolean {
     this.documents.context(context);
     const aux = isObj(context['auxData']) ? context['auxData'] : {};
     const origin = str(context['origin']) ?? '';
     const frame = str(aux['frameId']);
-    let kind = this.worlds.kindOf(context, urlProtected);
-    if (aux['isDefault'] !== false && kind === undefined) {
-      if (frame) this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
-      const child = frame !== undefined && frame !== this.mainFrameId;
-      if (child && unknownFrame({ securityOrigin: origin, url: origin })) {
-        this.uncertainFrames.set(frame, true);
-      }
-      if (child && (extensionOrigin(origin) || (frame && this.hiddenFrames.has(frame)))) {
-        if (frame) this.hiddenFrames.set(frame, true);
-        kind = 'foreign';
-      } else if (urlProtected(origin)) {
-        this.block();
-        return true;
-      }
+    const state = this.ancestorState(frame ?? '');
+    if (state === 'protected') return true;
+    const learned = this.learnDefault(
+      aux,
+      origin,
+      frame,
+      this.worlds.kindOf(context, urlProtected)
+    );
+    if (learned.blocked) return true;
+    if (state === 'unresolved' && learned.kind === undefined) return false;
+    if (this.worlds.add(context, learned.kind)) this.quietProfilers();
+    return learned.kind !== undefined;
+  }
+
+  private learnDefault(
+    aux: CDPPayload,
+    origin: string,
+    frame: string | undefined,
+    kind: WorldKind
+  ): { kind: WorldKind; blocked: boolean } {
+    if (!(aux['isDefault'] !== false && kind === undefined)) return { kind, blocked: false };
+    if (frame) this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
+    const child = frame !== undefined && frame !== this.mainFrameId;
+    if (child && unknownFrame({ securityOrigin: origin, url: origin })) {
+      this.uncertainFrames.set(frame, true);
+      this.hasUncertain = true;
     }
-    if (this.worlds.add(context, kind)) this.quietProfilers();
-    return kind !== undefined;
+    if (child && (extensionOrigin(origin) || (frame && this.hiddenFrames.has(frame)))) {
+      if (frame) this.hiddenFrames.set(frame, true);
+      return { kind: 'foreign', blocked: false };
+    }
+    if (urlProtected(origin)) {
+      this.block();
+      this.sawProtected = true;
+      return { kind, blocked: true };
+    }
+    return { kind, blocked: false };
   }
 
   private pruneFrames(tree: unknown): void {
@@ -2570,11 +2634,131 @@ export class TabShield {
       const frame = isObj(node) && isObj(node['frame']) ? node['frame'] : {};
       const id = str(frame['id']) ?? '';
       const hidden = this.frameHidden(frame);
-      if (hidden && id) this.hiddenFrames.set(id, true);
+      if (hidden && id) {
+        this.hiddenFrames.set(id, true);
+        this.sawProtected = true;
+      }
       return !hidden;
     });
     tree['childFrames'] = kept;
     for (const node of kept) this.pruneFrames(node);
+  }
+
+  private eventFrame(params: CDPPayload): string {
+    const direct = str(params['frameId']);
+    if (direct) return direct;
+    const frame = params['frame'];
+    if (isObj(frame)) {
+      const id = str(frame['id']);
+      if (id) return id;
+    }
+    const context = params['context'];
+    const aux = isObj(context) ? context['auxData'] : undefined;
+    return isObj(aux) ? (str(aux['frameId']) ?? '') : '';
+  }
+
+  private onAttached(params: CDPPayload): ShieldEvent[] {
+    const id = str(params['frameId']) ?? '';
+    const parent = str(params['parentFrameId']) ?? '';
+    if (id && parent) this.frameParents.set(id, parent);
+    else if (id) this.frameParents.delete(id);
+    if (id && this.frameProtected(id)) this.sawProtected = true;
+    if (id) this.settleUnresolved(id);
+    const state = this.ancestorState(id);
+    if (!id || this.frameProtected(id) || state === 'protected') return this.carry([]);
+    if (state === 'unresolved') {
+      this.holdUnresolved(id, { method: 'Page.frameAttached', params });
+      return this.carry([]);
+    }
+    return this.carry([{ method: 'Page.frameAttached', params }]);
+  }
+
+  private parentUnresolved(): boolean {
+    return (
+      this.sawProtected ||
+      this.pendingFrames.size > 0 ||
+      this.startedFrames.size > 0 ||
+      this.hasUncertain
+    );
+  }
+
+  private ancestorState(frameId: string): 'clear' | 'protected' | 'unresolved' {
+    if (!frameId || frameId === this.mainFrameId) return 'clear';
+    if (!this.frameParents.has(frameId)) return this.parentUnresolved() ? 'unresolved' : 'clear';
+    return this.walkAncestors(this.frameParents.get(frameId) ?? '', new Set([frameId]));
+  }
+
+  private walkAncestors(parentId: string, seen: Set<string>): 'clear' | 'protected' | 'unresolved' {
+    for (let depth = 0; parentId && depth < 8; depth += 1) {
+      if (seen.has(parentId)) return 'protected';
+      seen.add(parentId);
+      if (this.frameProtected(parentId)) return 'protected';
+      const next = this.frameParents.get(parentId) ?? '';
+      if (parentId === this.mainFrameId) return 'clear';
+      if (!next && this.frames.get(parentId) && !this.frameProtected(parentId)) return 'clear';
+      if (!next) return this.parentUnresolved() ? 'unresolved' : 'clear';
+      parentId = next;
+    }
+    return parentId ? 'protected' : 'clear';
+  }
+
+  private holdUnresolved(frameId: string, event: ShieldEvent): void {
+    if (!frameId) return;
+    const held = this.unresolved.get(frameId) ?? [];
+    held.push(event);
+    this.unresolved.set(frameId, held);
+    while (this.unresolved.size > 32) {
+      const oldest = this.unresolved.keys().next().value;
+      if (oldest === undefined) break;
+      const dropped = this.unresolved.get(oldest) ?? [];
+      this.unresolved.delete(oldest);
+      for (const item of dropped) {
+        const id = str(item.params?.['requestId']);
+        if (id) this.requests.set(id, true);
+      }
+    }
+  }
+
+  private settleUnresolved(frameId: string): void {
+    const held = this.unresolved.get(frameId);
+    if (!held) return;
+    this.unresolved.delete(frameId);
+    const state = this.ancestorState(frameId);
+    if (state === 'protected' || this.frameProtected(frameId)) {
+      for (const event of held) {
+        const id = str(event.params?.['requestId']);
+        if (id) this.requests.set(id, true);
+      }
+      return;
+    }
+    for (const event of held) this.carried.push(...this.deliver(event));
+  }
+
+  private flushUnresolved(): void {
+    for (const frameId of [...this.unresolved.keys()]) {
+      const state = this.ancestorState(frameId);
+      if (state === 'unresolved') continue;
+      this.settleUnresolved(frameId);
+    }
+  }
+
+  private carry(events: ShieldEvent[]): ShieldEvent[] {
+    const extra = this.carried;
+    this.carried = [];
+    return extra.length === 0 ? events : [...events, ...extra];
+  }
+
+  private rememberParents(tree: unknown, parentId = ''): void {
+    if (!isObj(tree)) return;
+    const frame = isObj(tree['frame']) ? tree['frame'] : {};
+    const id = str(frame['id']) ?? '';
+    if (id && parentId) this.frameParents.set(id, parentId);
+    const named = `${str(frame['url']) ?? ''}${str(frame['urlFragment']) ?? ''}`;
+    const originNamed = str(frame['securityOrigin']) ?? '';
+    if (id && (urlProtected(named) || urlProtected(originNamed))) this.sawProtected = true;
+    const children = tree['childFrames'];
+    if (!Array.isArray(children)) return;
+    for (const child of children) this.rememberParents(child, id || parentId);
   }
 
   private quietProfilers(): void {
