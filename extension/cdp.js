@@ -882,16 +882,24 @@ class Connection {
     if (this.protectedOrigin(textOf(main.securityOrigin))) return false;
     if (await this.inheritedProtected(tabId, main)) return false;
     if (!tab.mainFrameId) tab.mainFrameId = main.id;
-    const pending = [...(tree.frameTree.childFrames ?? [])];
-    while (pending.length > 0) {
-      const node = pending.pop();
-      const frame = node?.frame;
-      if (typeof frame?.id === 'string' && (await this.inheritedProtected(tabId, frame))) {
-        tab.frames.set(frame.id, true);
-      }
-      if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
-    }
+    await this.indexFrames(tabId, tab, tree.frameTree);
     return true;
+  }
+
+  async indexFrames(tabId, tab, tree) {
+    const pending = [{ node: tree, parentId: '' }];
+    while (pending.length > 0) {
+      const { node, parentId } = pending.pop();
+      const frame = node?.frame;
+      const id = typeof frame?.id === 'string' ? frame.id : '';
+      if (id && parentId) tab.frameParents.set(id, parentId);
+      if (id && parentId && tab.frames.get(parentId) === true) tab.frames.set(id, true);
+      if (id && tab.frames.get(id) !== true && (await this.inheritedProtected(tabId, frame))) {
+        tab.frames.set(id, true);
+      }
+      if (!Array.isArray(node?.childFrames)) continue;
+      for (const child of node.childFrames) pending.push({ node: child, parentId: id || parentId });
+    }
   }
 
   async frameOf(tabId, frameId) {
@@ -1002,6 +1010,7 @@ class Connection {
         networkStreams: new NetworkStreams(anyProtected),
         held: new Map(),
         heldDocuments: new Map(),
+        unresolved: new Map(),
         frameParents: new Map(),
         settled: new Set(),
         hops: new Map(),
@@ -1195,7 +1204,12 @@ class Connection {
     if (await this.rerouted(tabId, tab, requestId, params ?? {})) return;
     const url = requestUrl(params);
     const frameId = textOf(params?.frameId);
-    const isProtected = urlProtected(guard, url) || tab.frames.get(frameId) === true;
+    const ancestor = this.ancestorState(tab, frameId);
+    const isProtected =
+      urlProtected(guard, url) ||
+      tab.frames.get(frameId) === true ||
+      ancestor === 'protected' ||
+      ancestor === 'unresolved';
     if (typeof params?.networkId === 'string') {
       const before = tab.requests.get(params.networkId) === true;
       tab.requests.set(params.networkId, before || isProtected);
@@ -1828,7 +1842,9 @@ class Connection {
       await resolveFrameOrigins(result.frameTree, tab.uncertain ?? new Set(), (id) =>
         this.documentOrigin(tabId, id)
       );
+      this.rememberParents(tab, result.frameTree);
       this.pruneFrames(tab, result.frameTree);
+      this.flushUnresolved(tabId, tab);
     }
   }
 
@@ -1918,7 +1934,8 @@ class Connection {
     const started =
       urlProtected(guard, textOf(params.documentURL)) ||
       urlProtected(guard, textOf(params.initiator?.url)) ||
-      this.frameProtected(tab, params.frameId);
+      this.frameProtected(tab, params.frameId) ||
+      this.ancestorState(tab, textOf(params.frameId)) === 'protected';
     const isProtected = started || urlProtected(guard, url);
     const value = tab.requests.get(id) === true || isProtected;
     if (url || started) tab.requests.set(id, value);
@@ -1995,6 +2012,99 @@ class Connection {
     if (!tab.heldDocuments) return;
     for (const [frameId, held] of [...tab.heldDocuments.entries()]) {
       this.dropHeldDocument(tab, frameId, held);
+    }
+  }
+
+  eventFrame(params) {
+    if (typeof params?.frameId === 'string') return params.frameId;
+    if (typeof params?.frame?.id === 'string') return params.frame.id;
+    if (typeof params?.context?.auxData?.frameId === 'string')
+      return params.context.auxData.frameId;
+    return '';
+  }
+
+  rememberParent(tab, frameId, parentId) {
+    if (!frameId) return;
+    tab.frameParents ??= new Map();
+    if (parentId) tab.frameParents.set(frameId, parentId);
+    else tab.frameParents.delete(frameId);
+  }
+
+  rememberParents(tab, tree, parentId = '') {
+    const frame = tree?.frame;
+    const id = typeof frame?.id === 'string' ? frame.id : '';
+    if (id && parentId) this.rememberParent(tab, id, parentId);
+    if (id && parentId && tab.frames.get(parentId) === true) tab.frames.set(id, true);
+    for (const child of tree?.childFrames ?? []) this.rememberParents(tab, child, id || parentId);
+  }
+
+  parentUnresolved(tab) {
+    for (const value of tab.frames.values()) if (value === true) return true;
+    if (tab.pendingFrames.size > 0 || tab.startedFrames.size > 0) return true;
+    return (tab.uncertain?.size ?? 0) > 0;
+  }
+
+  ancestorState(tab, frameId) {
+    if (typeof frameId !== 'string' || frameId === '' || frameId === tab.mainFrameId)
+      return 'clear';
+    tab.frameParents ??= new Map();
+    if (!tab.frameParents.has(frameId)) return this.parentUnresolved(tab) ? 'unresolved' : 'clear';
+    return this.walkAncestors(tab, textOf(tab.frameParents.get(frameId)), new Set([frameId]));
+  }
+
+  walkAncestors(tab, parentId, seen) {
+    for (let depth = 0; parentId && depth < 8; depth += 1) {
+      if (seen.has(parentId)) return 'protected';
+      seen.add(parentId);
+      if (tab.frames.get(parentId) === true || tab.seal?.sealed.has(parentId) === true) {
+        return 'protected';
+      }
+      const next = tab.frameParents.has(parentId) ? textOf(tab.frameParents.get(parentId)) : '';
+      if (parentId === tab.mainFrameId || (tab.frames.get(parentId) === false && !next))
+        return 'clear';
+      if (!next) return this.parentUnresolved(tab) ? 'unresolved' : 'clear';
+      parentId = next;
+    }
+    return parentId ? 'protected' : 'clear';
+  }
+
+  holdUnresolved(tab, method, params, frameId) {
+    if (!frameId) return;
+    tab.unresolved ??= new Map();
+    const held = tab.unresolved.get(frameId) ?? [];
+    held.push([method, params]);
+    tab.unresolved.set(frameId, held);
+    while (tab.unresolved.size > 32) {
+      const oldest = tab.unresolved.keys().next().value;
+      const dropped = tab.unresolved.get(oldest);
+      tab.unresolved.delete(oldest);
+      for (const [, event] of dropped ?? []) this.dropUnresolved(tab, event);
+    }
+  }
+
+  dropUnresolved(tab, params) {
+    const id = typeof params?.requestId === 'string' ? params.requestId : undefined;
+    if (!id) return;
+    tab.requests.set(id, true);
+    tab.held.delete(id);
+  }
+
+  settleUnresolved(tabId, tab, frameId, drop) {
+    const held = tab.unresolved?.get(frameId);
+    if (!held) return;
+    tab.unresolved.delete(frameId);
+    for (const [method, params] of held) {
+      if (drop || this.frameProtected(tab, this.eventFrame(params)))
+        this.dropUnresolved(tab, params);
+      else this.deliver(tabId, tab, method, params);
+    }
+  }
+
+  flushUnresolved(tabId, tab) {
+    for (const frameId of [...(tab.unresolved?.keys() ?? [])]) {
+      const state = this.ancestorState(tab, frameId);
+      if (state === 'unresolved') continue;
+      this.settleUnresolved(tabId, tab, frameId, state === 'protected');
     }
   }
 
@@ -2193,8 +2303,11 @@ class Connection {
       else tab.frameParents.delete(frameId);
     }
     const url = textOf(frame.url);
-    const isProtected =
-      this.protectedOrigin(textOf(frame.securityOrigin)) || urlProtected(guard, url);
+    const state = frameId ? this.ancestorState(tab, frameId) : 'clear';
+    const originProtected = this.protectedOrigin(textOf(frame.securityOrigin));
+    const urlIsProtected = urlProtected(guard, url);
+    const ancestorProtected = state === 'protected';
+    const isProtected = originProtected || urlIsProtected || ancestorProtected;
     if (!frame.parentId && url.startsWith('chrome-error:')) {
       tab.mainFrameId = textOf(frame.id);
       return urlProtected(guard, textOf(frame.unreachableUrl));
@@ -2209,7 +2322,8 @@ class Connection {
       tab.pageUrl = url;
     }
     if (typeof frame.id === 'string') tab.frames.set(frame.id, isProtected);
-    return isProtected;
+    this.settleUnresolved(tabId, tab, frameId, isProtected || state === 'unresolved');
+    return isProtected || state === 'unresolved';
   }
 
   watchContext(tabId, tab, ctx) {
@@ -2220,6 +2334,7 @@ class Connection {
       this.release(tabId);
       return true;
     }
+    const state = this.ancestorState(tab, frameId);
     const kind = tab.worlds.hideable(ctx, tab.mainFrameId, (origin) =>
       this.protectedOrigin(origin)
     );
@@ -2233,8 +2348,12 @@ class Connection {
       tab.uncertain.add(frameId);
       while (tab.uncertain.size > 1000) tab.uncertain.delete(tab.uncertain.values().next().value);
     }
-    if (tab.worlds.add(ctx, kind)) this.quietProfilers(tabId);
-    return kind !== undefined;
+    if (state === 'protected') return true;
+    if (isProtected || !(state === 'unresolved' && kind === undefined)) {
+      if (tab.worlds.add(ctx, kind)) this.quietProfilers(tabId);
+      return kind !== undefined || isProtected;
+    }
+    return false;
   }
 
   pruneFrames(tab, tree, frameEvents = this.frameTrees.get(tree)) {
@@ -2286,12 +2405,30 @@ class Connection {
     if (method === 'Page.frameDetached' && id) {
       const held = tab.heldDocuments?.get(id);
       if (held) this.dropHeldDocument(tab, id, held);
+      const pending = tab.unresolved?.get(id);
+      if (pending) {
+        tab.unresolved.delete(id);
+        for (const [, params] of pending) this.dropUnresolved(tab, params);
+      }
       tab.frameParents?.delete(id);
     }
   }
 
   watch(tabId, tab, method, p) {
     this.navigation(tab, method, p);
+    if (method === 'Page.frameAttached') {
+      const frameId = textOf(p.frameId);
+      this.rememberParent(tab, frameId, textOf(p.parentFrameId));
+      const state = this.ancestorState(tab, frameId);
+      const hidden = this.frameProtected(tab, frameId) || state === 'protected';
+      this.settleUnresolved(tabId, tab, frameId, hidden);
+      if (hidden) return true;
+      if (state === 'unresolved') {
+        this.holdUnresolved(tab, method, p, frameId);
+        return true;
+      }
+      return false;
+    }
     if (this.headsToProtected(method, p)) return true;
     if (method === 'Page.frameNavigated') return this.watchFrame(tabId, tab, p.frame ?? {});
     if (method === 'Runtime.executionContextCreated') {
@@ -2380,9 +2517,21 @@ class Connection {
 
   fenceEvent(tab, method, p) {
     if (tab.worlds.hides(p)) return true;
-    if (!this.frameProtected(tab, p.frameId)) return false;
-    this.holdChildDocument(tab, method, p);
-    return true;
+    const frameId = this.eventFrame(p);
+    if (this.frameProtected(tab, frameId)) {
+      this.holdChildDocument(tab, method, p);
+      return true;
+    }
+    const state = this.ancestorState(tab, frameId);
+    if (state === 'protected') {
+      this.dropUnresolved(tab, p);
+      return true;
+    }
+    if (state === 'unresolved') {
+      this.holdUnresolved(tab, method, p, frameId);
+      return true;
+    }
+    return false;
   }
 
   async announce(tab, created) {
