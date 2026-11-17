@@ -128,15 +128,30 @@ function context(id, frameId, origin) {
   };
 }
 
+function paused(requestId, frameId, url, type = 'Script') {
+  return {
+    requestId,
+    frameId,
+    networkId: `${requestId}-net`,
+    resourceType: type,
+    request: { url, method: 'GET', headers: {} },
+  };
+}
+
 async function open(transport, initial) {
   const published = [];
+  const continued = [];
   let tree = initial;
   const events = bus();
   const readTab = async () => ({ id: 1, url: ORDINARY, status: 'complete' });
   const readFrames = async () => [
     { frameId: 0, parentFrameId: -1, url: ORDINARY, errorOccurred: false },
   ];
-  const send = async (method) => {
+  const send = async (method, params = {}) => {
+    if (method === 'Fetch.continueRequest' || method === 'Fetch.failRequest') {
+      continued.push({ method, ...(params ?? {}) });
+      return {};
+    }
     if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
       return { frameTree: structuredClone(tree) };
     }
@@ -147,6 +162,9 @@ async function open(transport, initial) {
     if (method === 'Runtime.evaluate') {
       return { result: { type: 'string', value: 'https://ordinary.test' } };
     }
+    if (method === 'DOM.getDocument') return { root: { nodeId: 1, backendNodeId: 1 } };
+    if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
+    if (method === 'DOMSnapshot.captureSnapshot') return { documents: [], strings: [] };
     return {};
   };
   let command;
@@ -154,6 +172,7 @@ async function open(transport, initial) {
   let prepareChild = () => {};
   let close = () => {};
   let session;
+  let tabOf = () => undefined;
   if (transport === 'seven') {
     const connection = listen(
       {
@@ -192,7 +211,7 @@ async function open(transport, initial) {
           onDetach: bus(),
           attach: async () => {},
           detach: async () => {},
-          sendCommand: async (_target, method) => send(method),
+          sendCommand: async (_target, method, params) => send(method, params),
         },
       }
     );
@@ -216,6 +235,7 @@ async function open(transport, initial) {
       tab.frames.set(frameId, true);
       tab.pendingFrames.add(frameId);
     };
+    tabOf = () => connection.tabState(1);
     close = () => connection.close();
   } else {
     const failedDocuments = new Bounded(200);
@@ -232,6 +252,7 @@ async function open(transport, initial) {
       const delivered = await shield.onEvent(method, params);
       for (const message of delivered ?? []) published.push(message);
     };
+    tabOf = () => shield;
     close = () => {};
   }
   await command('Page.enable');
@@ -245,10 +266,25 @@ async function open(transport, initial) {
     close,
     hit,
     prepareChild,
+    tabOf,
+    continued,
     setTree(next) {
       tree = next;
     },
   };
+}
+
+async function showMidChromeOrder(fixture) {
+  await fixture.emit('Page.frameAttached', { frameId: 'mid', parentFrameId: 'root' });
+  await fixture.emit('Page.frameNavigated', { frame: frame('mid', VAULT, 'root') });
+  assert.equal(
+    fixture.hit('Page.frameAttached', (params) => params.frameId === 'mid'),
+    false
+  );
+  assert.equal(
+    fixture.hit('Page.frameNavigated', (params) => params.frame?.id === 'mid'),
+    false
+  );
 }
 
 async function showMid(fixture) {
@@ -579,4 +615,231 @@ test('six-bridge: an isolated extension world stays hidden and the tab stays ope
   );
   const enabled = await fixture.command('Page.enable');
   assert.equal(enabled.error, undefined);
+});
+
+for (const transport of ['seven', 'six-bridge']) {
+  test(`${transport}: attach before navigate keeps the middle frame and its child hidden`, async (t) => {
+    const fixture = await open(transport, rootOnly());
+    t.after(fixture.close);
+    await showMidChromeOrder(fixture);
+    await fixture.emit('Page.frameAttached', { frameId: 'grand', parentFrameId: 'mid' });
+    await fixture.emit('Page.frameNavigated', { frame: frame('grand', GRAND, 'mid') });
+    assert.equal(
+      fixture.hit('Page.frameAttached', (params) => params.frameId === 'grand'),
+      false
+    );
+    assert.equal(
+      fixture.hit('Page.frameNavigated', (params) => params.frame?.id === 'grand'),
+      false
+    );
+  });
+
+  test(`${transport}: an ordinary child's attach still reaches the client`, async (t) => {
+    const fixture = await open(transport, rootOnly());
+    t.after(fixture.close);
+    await fixture.emit('Page.frameAttached', { frameId: 'child', parentFrameId: 'root' });
+    await fixture.emit('Page.frameNavigated', { frame: frame('child', CHILD, 'root') });
+    assert.equal(
+      fixture.hit('Page.frameAttached', (params) => params.frameId === 'child'),
+      true
+    );
+    assert.equal(
+      fixture.hit('Page.frameNavigated', (params) => params.frame?.id === 'child'),
+      true
+    );
+  });
+
+  test(`${transport}: a hidden context's console, exception and script stay hidden`, async (t) => {
+    const fixture = await open(transport, rootOnly());
+    t.after(fixture.close);
+    await showMid(fixture);
+    await fixture.emit('Page.frameAttached', { frameId: 'grand', parentFrameId: 'mid' });
+    await fixture.emit('Page.frameNavigated', { frame: frame('grand', GRAND, 'mid') });
+    await fixture.emit(
+      'Runtime.executionContextCreated',
+      context(3, 'grand', 'https://ordinary.test')
+    );
+    assert.equal(
+      fixture.hit(
+        'Runtime.executionContextCreated',
+        (params) => params.context?.auxData?.frameId === 'grand'
+      ),
+      false
+    );
+    await fixture.emit('Runtime.consoleAPICalled', {
+      type: 'log',
+      args: [{ type: 'string', value: 'secret' }],
+      executionContextId: 3,
+    });
+    await fixture.emit('Runtime.exceptionThrown', {
+      exceptionDetails: {
+        text: 'boom',
+        executionContextId: 3,
+        url: `${GRAND}/x.js`,
+      },
+    });
+    await fixture.emit('Debugger.scriptParsed', {
+      scriptId: '1',
+      url: `${GRAND}/x.js`,
+      executionContextId: 3,
+    });
+    assert.equal(
+      fixture.hit('Runtime.consoleAPICalled', (params) => params.executionContextId === 3),
+      false
+    );
+    assert.equal(
+      fixture.hit(
+        'Runtime.exceptionThrown',
+        (params) => params.exceptionDetails?.executionContextId === 3
+      ),
+      false
+    );
+    assert.equal(
+      fixture.hit('Debugger.scriptParsed', (params) => params.executionContextId === 3),
+      false
+    );
+    const evaluated = await fixture.command('Runtime.evaluate', {
+      expression: '1',
+      contextId: 3,
+      returnByValue: true,
+    });
+    assert.equal(evaluated.error !== undefined, true);
+  });
+
+  test(`${transport}: an unresolved chain stays held until the parent commits protected`, async (t) => {
+    const fixture = await open(transport, rootOnly());
+    t.after(fixture.close);
+    await showMid(fixture);
+    await fixture.emit(
+      'Network.responseReceived',
+      received('held-chain', 'ghost-child', SIBLING, 'Script')
+    );
+    assert.equal(
+      fixture.hit('Network.responseReceived', (params) => params.requestId === 'held-chain'),
+      false
+    );
+    await fixture.emit('Page.frameAttached', {
+      frameId: 'ghost-child',
+      parentFrameId: 'ghost-parent',
+    });
+    assert.equal(
+      fixture.hit('Network.responseReceived', (params) => params.requestId === 'held-chain'),
+      false
+    );
+    assert.equal(
+      fixture.hit('Page.frameAttached', (params) => params.frameId === 'ghost-child'),
+      false
+    );
+    await fixture.emit('Page.frameNavigated', {
+      frame: frame('ghost-parent', VAULT, 'root'),
+    });
+    assert.equal(
+      fixture.hit('Network.responseReceived', (params) => params.requestId === 'held-chain'),
+      false
+    );
+    assert.equal(
+      fixture.hit('Page.frameAttached', (params) => params.frameId === 'ghost-child'),
+      false
+    );
+  });
+
+  test(`${transport}: held events stay bounded by frame count and deadline`, async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] });
+    const fixture = await open(transport, rootOnly());
+    t.after(fixture.close);
+    await showMid(fixture);
+    for (let index = 0; index < 33; index++) {
+      const id = `cap-${index}`;
+      await fixture.emit(
+        'Network.responseReceived',
+        received(`cap-req-${index}`, id, `${SIBLING}/${id}`, 'Script')
+      );
+    }
+    assert.equal(
+      fixture.hit('Network.responseReceived', (params) => params.requestId === 'cap-req-0'),
+      false
+    );
+    if (transport === 'seven') {
+      const tab = fixture.tabOf();
+      assert.ok(tab.unresolved.size <= 32);
+    }
+    await fixture.emit(
+      'Network.responseReceived',
+      received('deadline-req', 'deadline-frame', `${SIBLING}/deadline`, 'Script')
+    );
+    assert.equal(
+      fixture.hit('Network.responseReceived', (params) => params.requestId === 'deadline-req'),
+      false
+    );
+    t.mock.timers.tick(10_001);
+    await fixture.emit('Page.frameNavigated', {
+      frame: frame('deadline-frame', `${SIBLING}/deadline`, 'root'),
+    });
+    assert.equal(
+      fixture.hit('Network.responseReceived', (params) => params.requestId === 'deadline-req'),
+      false
+    );
+  });
+
+  test(`${transport}: DOM, AX, Fetch and evaluate into a hidden grandchild are refused`, async (t) => {
+    const fixture = await open(transport, rootOnly());
+    t.after(fixture.close);
+    await showMid(fixture);
+    await fixture.emit('Page.frameAttached', { frameId: 'grand', parentFrameId: 'mid' });
+    await fixture.emit('Page.frameNavigated', { frame: frame('grand', GRAND, 'mid') });
+    await fixture.emit(
+      'Runtime.executionContextCreated',
+      context(3, 'grand', 'https://ordinary.test')
+    );
+    fixture.setTree(nested());
+    const doc = await fixture.command('DOM.getDocument', { frameId: 'grand', depth: -1 });
+    assert.equal(doc.error !== undefined, true);
+    const ax = await fixture.command('Accessibility.getFullAXTree', { frameId: 'grand' });
+    assert.equal(ax.error !== undefined, true);
+    const evaluated = await fixture.command('Runtime.evaluate', {
+      expression: '1',
+      contextId: 3,
+      returnByValue: true,
+    });
+    assert.equal(evaluated.error !== undefined, true);
+    await fixture.command('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    fixture.continued.length = 0;
+    await fixture.emit('Fetch.requestPaused', paused('grand-fetch', 'grand', SIBLING));
+    assert.equal(
+      fixture.hit('Fetch.requestPaused', (params) => params.requestId === 'grand-fetch'),
+      false
+    );
+    assert.equal(
+      fixture.continued.some((item) => item.requestId === 'grand-fetch'),
+      true
+    );
+  });
+}
+
+test('six-bridge: an ordinary iframe present at attach stays live after an opaque child', async (t) => {
+  const fixture = await open('six-bridge', ordinaryNest());
+  t.after(fixture.close);
+  await fixture.command('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+  fixture.continued.length = 0;
+  await fixture.emit('Fetch.requestPaused', paused('child-fetch', 'child', CHILD));
+  assert.equal(
+    fixture.hit('Fetch.requestPaused', (params) => params.requestId === 'child-fetch'),
+    true
+  );
+  await fixture.emit('Runtime.executionContextCreated', context(9, 'blank', 'null'));
+  fixture.continued.length = 0;
+  await fixture.emit('Fetch.requestPaused', paused('child-fetch-2', 'child', `${CHILD}/2`));
+  assert.equal(
+    fixture.hit('Fetch.requestPaused', (params) => params.requestId === 'child-fetch-2'),
+    true
+  );
+  assert.equal(
+    fixture.continued.some((item) => item.requestId === 'child-fetch-2'),
+    false
+  );
+  await fixture.emit('Network.responseReceived', received('child-net', 'child', CHILD, 'Script'));
+  assert.equal(
+    fixture.hit('Network.responseReceived', (params) => params.requestId === 'child-net'),
+    true
+  );
 });
