@@ -321,7 +321,8 @@ function allowedHost(hostname) {
 export function trusted(sender, extensionId) {
   if (!sender || sender.id !== extensionId || !URL.canParse(sender.url)) return false;
   const { protocol, hostname } = new URL(sender.url);
-  return protocol === 'https:' && allowedHost(hostname);
+  if (protocol !== 'https:' || !allowedHost(hostname)) return false;
+  return sender.origin === `https://${hostname}`;
 }
 
 export function internal(sender, extensionId) {

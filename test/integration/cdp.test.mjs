@@ -16,9 +16,14 @@ const slicc = 'https://seven.sliccy.ai/';
 
 function port(name, url, id = extensionId) {
   const disconnectListeners = new Set();
+  let origin;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'https:') origin = parsed.origin;
+  } catch {}
   return {
     name,
-    sender: { id, url },
+    sender: { id, url, origin },
     disconnected: false,
     posted: [],
     disconnect() {
