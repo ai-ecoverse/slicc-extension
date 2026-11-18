@@ -106,6 +106,9 @@ const SETTLES = new Set([
 ]);
 const HELD_DOCUMENT_CAP = 32;
 const HELD_DOCUMENT_MS = 10000;
+const UNRESOLVED_FRAME_CAP = 32;
+const UNRESOLVED_EVENT_CAP = 32;
+const UNRESOLVED_MS = 10000;
 const REROUTE =
   'slicc: refused: the rewritten request answered with a protected url, so the guard failed it';
 const BODY_READ = 'slicc: refused: this paused response body was already read the other way';
@@ -2068,42 +2071,90 @@ class Connection {
     return parentId ? 'protected' : 'clear';
   }
 
-  holdUnresolved(tab, method, params, frameId) {
+  markAttachDropped(tab, frameId, method) {
+    if (!frameId || method !== 'Page.frameAttached') return;
+    tab.attachDropped ??= new Set();
+    tab.attachDropped.add(frameId);
+  }
+
+  holdUnresolved(tab, method, params, frameId, tabId) {
     if (!frameId) return;
     tab.unresolved ??= new Map();
     const held = tab.unresolved.get(frameId) ?? [];
-    held.push([method, params]);
+    held.push([method, params, Date.now()]);
+    while (held.length > UNRESOLVED_EVENT_CAP) {
+      const [droppedMethod, event] = held.shift();
+      this.dropUnresolved(tab, event, tabId);
+      this.markAttachDropped(tab, frameId, droppedMethod);
+    }
     tab.unresolved.set(frameId, held);
-    while (tab.unresolved.size > 32) {
+    while (tab.unresolved.size > UNRESOLVED_FRAME_CAP) {
       const oldest = tab.unresolved.keys().next().value;
       const dropped = tab.unresolved.get(oldest);
       tab.unresolved.delete(oldest);
-      for (const [, event] of dropped ?? []) this.dropUnresolved(tab, event);
+      for (const [droppedMethod, event] of dropped ?? []) {
+        this.dropUnresolved(tab, event, tabId);
+        this.markAttachDropped(tab, oldest, droppedMethod);
+      }
     }
   }
 
-  dropUnresolved(tab, params) {
+  dropUnresolved(tab, params, tabId) {
     const id = typeof params?.requestId === 'string' ? params.requestId : undefined;
-    if (!id) return;
-    tab.requests.set(id, true);
-    tab.held.delete(id);
+    if (id) {
+      tab.requests.set(id, true);
+      tab.held.delete(id);
+    }
+    const ctx = params?.context;
+    if (ctx && typeof ctx === 'object') {
+      if (tab.worlds.add(ctx, 'foreign') && Number.isSafeInteger(tabId)) this.quietProfilers(tabId);
+    }
+  }
+
+  expiredUnresolved(at) {
+    return typeof at === 'number' && Date.now() - at > UNRESOLVED_MS;
+  }
+
+  releaseHeld(tabId, tab, method, params) {
+    if (method === 'Runtime.executionContextCreated') {
+      if (this.watchContext(tabId, tab, params?.context ?? {})) return;
+    }
+    this.deliver(tabId, tab, method, params);
   }
 
   settleUnresolved(tabId, tab, frameId, drop) {
     const held = tab.unresolved?.get(frameId);
     if (!held) return;
+    if (!drop && this.ancestorState(tab, frameId) === 'unresolved') {
+      const kept = [];
+      for (const entry of held) {
+        const [method, params, at] = entry;
+        if (this.expiredUnresolved(at)) {
+          this.dropUnresolved(tab, params, tabId);
+          this.markAttachDropped(tab, frameId, method);
+        } else kept.push([method, params, at ?? Date.now()]);
+      }
+      if (kept.length === 0) tab.unresolved.delete(frameId);
+      else tab.unresolved.set(frameId, kept);
+      return;
+    }
     tab.unresolved.delete(frameId);
-    for (const [method, params] of held) {
-      if (drop || this.frameProtected(tab, this.eventFrame(params)))
-        this.dropUnresolved(tab, params);
-      else this.deliver(tabId, tab, method, params);
+    const lost = drop || tab.attachDropped?.has(frameId) === true;
+    for (const [method, params, at] of held) {
+      if (lost || this.expiredUnresolved(at) || this.frameProtected(tab, this.eventFrame(params))) {
+        this.dropUnresolved(tab, params, tabId);
+        this.markAttachDropped(tab, frameId, method);
+      } else this.releaseHeld(tabId, tab, method, params);
     }
   }
 
   flushUnresolved(tabId, tab) {
     for (const frameId of [...(tab.unresolved?.keys() ?? [])]) {
       const state = this.ancestorState(tab, frameId);
-      if (state === 'unresolved') continue;
+      if (state === 'unresolved') {
+        this.settleUnresolved(tabId, tab, frameId, false);
+        continue;
+      }
       this.settleUnresolved(tabId, tab, frameId, state === 'protected');
     }
   }
@@ -2322,8 +2373,25 @@ class Connection {
       tab.pageUrl = url;
     }
     if (typeof frame.id === 'string') tab.frames.set(frame.id, isProtected);
-    this.settleUnresolved(tabId, tab, frameId, isProtected || state === 'unresolved');
-    return isProtected || state === 'unresolved';
+    tab.uncertain?.delete(frameId);
+    if (tab.attachDropped?.has(frameId)) {
+      if (typeof frame.id === 'string') tab.frames.set(frame.id, true);
+      this.settleUnresolved(tabId, tab, frameId, true);
+      this.flushUnresolved(tabId, tab);
+      return true;
+    }
+    if (isProtected) {
+      this.settleUnresolved(tabId, tab, frameId, true);
+      this.flushUnresolved(tabId, tab);
+      return true;
+    }
+    if (state === 'unresolved') {
+      this.holdUnresolved(tab, 'Page.frameNavigated', { frame }, frameId, tabId);
+      return true;
+    }
+    this.settleUnresolved(tabId, tab, frameId, false);
+    this.flushUnresolved(tabId, tab);
+    return false;
   }
 
   watchContext(tabId, tab, ctx) {
@@ -2348,7 +2416,10 @@ class Connection {
       tab.uncertain.add(frameId);
       while (tab.uncertain.size > 1000) tab.uncertain.delete(tab.uncertain.values().next().value);
     }
-    if (state === 'protected') return true;
+    if (state === 'protected') {
+      if (tab.worlds.add(ctx, kind ?? 'foreign')) this.quietProfilers(tabId);
+      return true;
+    }
     if (isProtected || !(state === 'unresolved' && kind === undefined)) {
       if (tab.worlds.add(ctx, kind)) this.quietProfilers(tabId);
       return kind !== undefined || isProtected;
@@ -2375,7 +2446,7 @@ class Connection {
     }
   }
 
-  navigation(tab, method, p) {
+  navigation(tabId, tab, method, p) {
     const id = textOf(p.frameId);
     if (['Page.frameStartedLoading', 'Page.frameStartedNavigating'].includes(method)) {
       tab.startedFrames.add(id);
@@ -2408,25 +2479,31 @@ class Connection {
       const pending = tab.unresolved?.get(id);
       if (pending) {
         tab.unresolved.delete(id);
-        for (const [, params] of pending) this.dropUnresolved(tab, params);
+        for (const [, params] of pending) this.dropUnresolved(tab, params, tabId);
       }
       tab.frameParents?.delete(id);
     }
   }
 
   watch(tabId, tab, method, p) {
-    this.navigation(tab, method, p);
+    this.navigation(tabId, tab, method, p);
     if (method === 'Page.frameAttached') {
       const frameId = textOf(p.frameId);
       this.rememberParent(tab, frameId, textOf(p.parentFrameId));
       const state = this.ancestorState(tab, frameId);
       const hidden = this.frameProtected(tab, frameId) || state === 'protected';
-      this.settleUnresolved(tabId, tab, frameId, hidden);
-      if (hidden) return true;
-      if (state === 'unresolved') {
-        this.holdUnresolved(tab, method, p, frameId);
+      if (hidden) {
+        this.settleUnresolved(tabId, tab, frameId, true);
+        this.flushUnresolved(tabId, tab);
         return true;
       }
+      if (state === 'unresolved') {
+        this.settleUnresolved(tabId, tab, frameId, false);
+        this.holdUnresolved(tab, method, p, frameId, tabId);
+        return true;
+      }
+      this.settleUnresolved(tabId, tab, frameId, false);
+      this.flushUnresolved(tabId, tab);
       return false;
     }
     if (this.headsToProtected(method, p)) return true;
@@ -2497,7 +2574,7 @@ class Connection {
     }
     if (watched) return;
     if (profiled(method) && tab.worlds.foreign) return;
-    if (this.fenceEvent(tab, method, p)) return;
+    if (this.fenceEvent(tabId, tab, method, p)) return;
     if (errorPageRead(method)) {
       try {
         await this.checkContent(tabId, method, p);
@@ -2515,7 +2592,7 @@ class Connection {
     }
   }
 
-  fenceEvent(tab, method, p) {
+  fenceEvent(tabId, tab, method, p) {
     if (tab.worlds.hides(p)) return true;
     const frameId = this.eventFrame(p);
     if (this.frameProtected(tab, frameId)) {
@@ -2524,11 +2601,11 @@ class Connection {
     }
     const state = this.ancestorState(tab, frameId);
     if (state === 'protected') {
-      this.dropUnresolved(tab, p);
+      this.dropUnresolved(tab, p, tabId);
       return true;
     }
     if (state === 'unresolved') {
-      this.holdUnresolved(tab, method, p, frameId);
+      this.holdUnresolved(tab, method, p, frameId, tabId);
       return true;
     }
     return false;

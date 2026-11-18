@@ -265,6 +265,9 @@ const SETTLES = new Set([
 const REROUTE_REFUSAL =
   'slicc: refused: the rewritten request answered with a protected url, so the guard failed it';
 const PAUSE_REFUSAL = 'slicc: refused: request was not paused toward this client';
+const UNRESOLVED_FRAME_CAP = 32;
+const UNRESOLVED_EVENT_CAP = 32;
+const UNRESOLVED_MS = 10000;
 
 export const GUARD_FETCH_PATTERN: CDPPayload = {
   urlPattern: '*',
@@ -1404,6 +1407,9 @@ export class Bounded<V> {
   has(key: string): boolean {
     return this.map.has(key);
   }
+  get size(): number {
+    return this.map.size;
+  }
   set(key: string, value: V): void {
     this.map.delete(key);
     this.map.set(key, value);
@@ -1425,6 +1431,7 @@ export class Bounded<V> {
 export interface ShieldEvent {
   method: string;
   params?: CDPPayload;
+  at?: number;
 }
 
 type Send = (method: string, params?: CDPPayload) => Promise<CDPPayload>;
@@ -1465,6 +1472,7 @@ export class TabShield {
   private readonly uncertainFrames = new Bounded<true>(1000);
   private readonly frameParents = new Map<string, string>();
   private readonly unresolved = new Map<string, ShieldEvent[]>();
+  private readonly attachDropped = new Set<string>();
   private carried: ShieldEvent[] = [];
   private sawProtected = false;
   private hasUncertain = false;
@@ -1534,22 +1542,36 @@ export class TabShield {
     const main = isObj(root) && isObj(root['frame']) ? str(root['frame']['id']) : undefined;
     if (!main) refuse(PROTECTED_RULES.refusal);
     this.mainFrameId = main;
-    const pending: unknown[] = [root];
+    const pending: { node: unknown; parentId: string }[] = [{ node: root, parentId: '' }];
     while (pending.length > 0) {
-      const node = pending.pop();
-      if (!isObj(node)) continue;
-      const frame = isObj(node['frame']) ? node['frame'] : {};
-      const url = `${str(frame['url']) ?? ''}${str(frame['urlFragment']) ?? ''}`;
-      const origin = str(frame['securityOrigin']) ?? '';
-      const id = str(frame['id']);
-      if (id) this.frames.set(id, [url, origin]);
-      if (id && id !== main && (extensionOrigin(url) || extensionOrigin(origin))) {
-        this.hiddenFrames.set(id, true);
-        continue;
-      }
-      if (urlProtected(url) || urlProtected(origin)) refuse(PROTECTED_RULES.refusal);
-      if (await this.inheritedProtected(frame)) refuse(PROTECTED_RULES.refusal);
-      if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
+      const next = pending.pop();
+      if (!next) continue;
+      await this.inventoryNode(next.node, next.parentId, main, pending);
+    }
+  }
+
+  private async inventoryNode(
+    node: unknown,
+    parentId: string,
+    main: string,
+    pending: { node: unknown; parentId: string }[]
+  ): Promise<void> {
+    if (!isObj(node)) return;
+    const frame = isObj(node['frame']) ? node['frame'] : {};
+    const url = `${str(frame['url']) ?? ''}${str(frame['urlFragment']) ?? ''}`;
+    const origin = str(frame['securityOrigin']) ?? '';
+    const id = str(frame['id']);
+    if (id) this.frames.set(id, [url, origin]);
+    if (id && parentId) this.frameParents.set(id, parentId);
+    if (id && parentId && this.frameProtected(parentId)) this.hiddenFrames.set(id, true);
+    if (id && id !== main && (extensionOrigin(url) || extensionOrigin(origin))) {
+      this.hiddenFrames.set(id, true);
+      return;
+    }
+    if (urlProtected(url) || urlProtected(origin)) refuse(PROTECTED_RULES.refusal);
+    if (await this.inheritedProtected(frame)) refuse(PROTECTED_RULES.refusal);
+    for (const child of Array.isArray(node['childFrames']) ? node['childFrames'] : []) {
+      pending.push({ node: child, parentId: id || parentId });
     }
   }
 
@@ -2560,28 +2582,59 @@ export class TabShield {
     return false;
   }
 
-  private commitNavigated(frame: CDPPayload): boolean {
+  private rememberCommit(frame: CDPPayload): {
+    id: string;
+    url: string;
+    origin: string;
+    state: 'clear' | 'protected' | 'unresolved';
+  } {
     const url = `${str(frame['url']) ?? ''}${str(frame['urlFragment']) ?? ''}`;
     const origin = str(frame['securityOrigin']) ?? '';
-    const id = str(frame['id']);
+    const id = str(frame['id']) ?? '';
     const parentId = str(frame['parentId']) ?? '';
     if (id) this.frames.set(id, [url, origin]);
     if (id && parentId) this.frameParents.set(id, parentId);
     else if (id) this.frameParents.delete(id);
+    if (id) this.uncertainFrames.delete(id);
+    this.hasUncertain = this.uncertainFrames.size > 0;
     if (urlProtected(url) || urlProtected(origin)) this.sawProtected = true;
-    const state = id ? this.ancestorState(id) : 'clear';
+    return { id, url, origin, state: id ? this.ancestorState(id) : 'clear' };
+  }
+
+  private finishCommit(id: string, hide: boolean): boolean {
     if (id) this.settleUnresolved(id);
+    this.flushUnresolved();
+    return hide;
+  }
+
+  private commitNavigated(frame: CDPPayload): boolean {
+    const { id, url, origin, state } = this.rememberCommit(frame);
     if (frame['parentId'] === undefined) {
       if (id) this.mainFrameId = id;
       if (urlProtected(url) || urlProtected(origin)) this.block();
-      return false;
+      return this.finishCommit(id, false);
+    }
+    if (id && this.attachDropped.has(id)) {
+      this.hiddenFrames.set(id, true);
+      return this.finishCommit(id, true);
     }
     if (id && (extensionOrigin(url) || extensionOrigin(origin))) {
       this.hiddenFrames.set(id, true);
       this.sawProtected = true;
+      return this.finishCommit(id, true);
+    }
+    const hidden =
+      state === 'protected' || this.frameProtected(id) || urlProtected(url) || urlProtected(origin);
+    if (hidden) {
+      if (id) this.hiddenFrames.set(id, true);
+      this.sawProtected = true;
+      return this.finishCommit(id, true);
+    }
+    if (state === 'unresolved') {
+      if (id) this.holdUnresolved(id, { method: 'Page.frameNavigated', params: { frame } });
       return true;
     }
-    return state === 'protected' || state === 'unresolved' || this.frameProtected(id ?? '');
+    return this.finishCommit(id, false);
   }
 
   private watchContext(context: CDPPayload): boolean {
@@ -2590,7 +2643,11 @@ export class TabShield {
     const origin = str(context['origin']) ?? '';
     const frame = str(aux['frameId']);
     const state = this.ancestorState(frame ?? '');
-    if (state === 'protected') return true;
+    if (state === 'protected') {
+      const kind = this.worlds.kindOf(context, urlProtected) ?? 'foreign';
+      if (this.worlds.add(context, kind)) this.quietProfilers();
+      return true;
+    }
     const learned = this.learnDefault(
       aux,
       origin,
@@ -2663,13 +2720,19 @@ export class TabShield {
     if (id && parent) this.frameParents.set(id, parent);
     else if (id) this.frameParents.delete(id);
     if (id && this.frameProtected(id)) this.sawProtected = true;
-    if (id) this.settleUnresolved(id);
     const state = this.ancestorState(id);
-    if (!id || this.frameProtected(id) || state === 'protected') return this.carry([]);
+    if (!id || this.frameProtected(id) || state === 'protected') {
+      if (id) this.settleUnresolved(id);
+      this.flushUnresolved();
+      return this.carry([]);
+    }
     if (state === 'unresolved') {
+      this.settleUnresolved(id);
       this.holdUnresolved(id, { method: 'Page.frameAttached', params });
       return this.carry([]);
     }
+    this.settleUnresolved(id);
+    this.flushUnresolved();
     return this.carry([{ method: 'Page.frameAttached', params }]);
   }
 
@@ -2702,42 +2765,69 @@ export class TabShield {
     return parentId ? 'protected' : 'clear';
   }
 
+  private expiredUnresolved(at: number | undefined): boolean {
+    return typeof at === 'number' && Date.now() - at > UNRESOLVED_MS;
+  }
+
+  private dropHeld(event: ShieldEvent, frameId = ''): void {
+    const id = str(event.params?.['requestId']);
+    if (id) this.requests.set(id, true);
+    if (frameId && event.method === 'Page.frameAttached') this.attachDropped.add(frameId);
+    if (event.method === 'Runtime.executionContextCreated' && isObj(event.params?.['context'])) {
+      if (this.worlds.add(event.params['context'], 'foreign')) this.quietProfilers();
+    }
+  }
+
+  private releaseHeld(event: ShieldEvent): void {
+    if (event.method === 'Runtime.executionContextCreated' && isObj(event.params?.['context'])) {
+      if (this.watchContext(event.params['context'])) return;
+    }
+    this.carried.push(...this.deliver({ method: event.method, params: event.params }));
+  }
+
   private holdUnresolved(frameId: string, event: ShieldEvent): void {
     if (!frameId) return;
     const held = this.unresolved.get(frameId) ?? [];
-    held.push(event);
+    held.push({ ...event, at: Date.now() });
+    while (held.length > UNRESOLVED_EVENT_CAP) {
+      const dropped = held.shift();
+      if (dropped) this.dropHeld(dropped, frameId);
+    }
     this.unresolved.set(frameId, held);
-    while (this.unresolved.size > 32) {
+    while (this.unresolved.size > UNRESOLVED_FRAME_CAP) {
       const oldest = this.unresolved.keys().next().value;
       if (oldest === undefined) break;
       const dropped = this.unresolved.get(oldest) ?? [];
       this.unresolved.delete(oldest);
-      for (const item of dropped) {
-        const id = str(item.params?.['requestId']);
-        if (id) this.requests.set(id, true);
-      }
+      for (const item of dropped) this.dropHeld(item, oldest);
     }
   }
 
   private settleUnresolved(frameId: string): void {
     const held = this.unresolved.get(frameId);
     if (!held) return;
-    this.unresolved.delete(frameId);
     const state = this.ancestorState(frameId);
-    if (state === 'protected' || this.frameProtected(frameId)) {
+    if (state === 'unresolved') {
+      const kept: ShieldEvent[] = [];
       for (const event of held) {
-        const id = str(event.params?.['requestId']);
-        if (id) this.requests.set(id, true);
+        if (this.expiredUnresolved(event.at)) this.dropHeld(event, frameId);
+        else kept.push({ ...event, at: event.at ?? Date.now() });
       }
+      if (kept.length === 0) this.unresolved.delete(frameId);
+      else this.unresolved.set(frameId, kept);
       return;
     }
-    for (const event of held) this.carried.push(...this.deliver(event));
+    this.unresolved.delete(frameId);
+    const drop =
+      state === 'protected' || this.frameProtected(frameId) || this.attachDropped.has(frameId);
+    for (const event of held) {
+      if (drop || this.expiredUnresolved(event.at)) this.dropHeld(event, frameId);
+      else this.releaseHeld(event);
+    }
   }
 
   private flushUnresolved(): void {
     for (const frameId of [...this.unresolved.keys()]) {
-      const state = this.ancestorState(frameId);
-      if (state === 'unresolved') continue;
       this.settleUnresolved(frameId);
     }
   }
