@@ -276,11 +276,11 @@ async function open(transport, initial) {
 
 async function showMidChromeOrder(fixture) {
   await fixture.emit('Page.frameAttached', { frameId: 'mid', parentFrameId: 'root' });
-  await fixture.emit('Page.frameNavigated', { frame: frame('mid', VAULT, 'root') });
   assert.equal(
     fixture.hit('Page.frameAttached', (params) => params.frameId === 'mid'),
-    false
+    true
   );
+  await fixture.emit('Page.frameNavigated', { frame: frame('mid', VAULT, 'root') });
   assert.equal(
     fixture.hit('Page.frameNavigated', (params) => params.frame?.id === 'mid'),
     false
@@ -618,7 +618,7 @@ test('six-bridge: an isolated extension world stays hidden and the tab stays ope
 });
 
 for (const transport of ['seven', 'six-bridge']) {
-  test(`${transport}: attach before navigate keeps the middle frame and its child hidden`, async (t) => {
+  test(`${transport}: attach before navigate keeps the grandchild hidden`, async (t) => {
     const fixture = await open(transport, rootOnly());
     t.after(fixture.close);
     await showMidChromeOrder(fixture);
@@ -645,6 +645,37 @@ for (const transport of ['seven', 'six-bridge']) {
     );
     assert.equal(
       fixture.hit('Page.frameNavigated', (params) => params.frame?.id === 'child'),
+      true
+    );
+  });
+
+  test(`${transport}: a never-committing ordinary iframe's attach is delivered`, async (t) => {
+    const fixture = await open(transport, rootOnly());
+    t.after(fixture.close);
+    await fixture.emit('Page.frameAttached', { frameId: 'hung', parentFrameId: 'root' });
+    assert.equal(
+      fixture.hit('Page.frameAttached', (params) => params.frameId === 'hung'),
+      true
+    );
+  });
+
+  test(`${transport}: a slow-commit ordinary iframe stays consistent`, async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] });
+    const fixture = await open(transport, rootOnly());
+    t.after(fixture.close);
+    await fixture.emit('Page.frameAttached', { frameId: 'slow', parentFrameId: 'root' });
+    assert.equal(
+      fixture.hit('Page.frameAttached', (params) => params.frameId === 'slow'),
+      true
+    );
+    t.mock.timers.tick(10_001);
+    await fixture.emit('Page.frameNavigated', { frame: frame('slow', CHILD, 'root') });
+    assert.equal(
+      fixture.hit('Page.frameAttached', (params) => params.frameId === 'slow'),
+      true
+    );
+    assert.equal(
+      fixture.hit('Page.frameNavigated', (params) => params.frame?.id === 'slow'),
       true
     );
   });
@@ -759,9 +790,9 @@ for (const transport of ['seven', 'six-bridge']) {
       fixture.hit('Network.responseReceived', (params) => params.requestId === 'cap-req-0'),
       false
     );
-    if (transport === 'seven') {
-      const tab = fixture.tabOf();
-      assert.ok(tab.unresolved.size <= 32);
+    {
+      const held = fixture.tabOf().unresolved;
+      assert.ok(held.size <= 32);
     }
     await fixture.emit(
       'Network.responseReceived',

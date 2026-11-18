@@ -1472,6 +1472,7 @@ export class TabShield {
   private readonly uncertainFrames = new Bounded<true>(1000);
   private readonly frameParents = new Map<string, string>();
   private readonly unresolved = new Map<string, ShieldEvent[]>();
+  private readonly attachDropped = new Set<string>();
   private carried: ShieldEvent[] = [];
   private sawProtected = false;
   private hasUncertain = false;
@@ -2613,6 +2614,10 @@ export class TabShield {
       if (urlProtected(url) || urlProtected(origin)) this.block();
       return this.finishCommit(id, false);
     }
+    if (id && this.attachDropped.has(id)) {
+      this.hiddenFrames.set(id, true);
+      return this.finishCommit(id, true);
+    }
     if (id && (extensionOrigin(url) || extensionOrigin(origin))) {
       this.hiddenFrames.set(id, true);
       this.sawProtected = true;
@@ -2721,9 +2726,14 @@ export class TabShield {
       this.flushUnresolved();
       return this.carry([]);
     }
+    if (state === 'unresolved') {
+      this.settleUnresolved(id);
+      this.holdUnresolved(id, { method: 'Page.frameAttached', params });
+      return this.carry([]);
+    }
     this.settleUnresolved(id);
-    this.holdUnresolved(id, { method: 'Page.frameAttached', params });
-    return this.carry([]);
+    this.flushUnresolved();
+    return this.carry([{ method: 'Page.frameAttached', params }]);
   }
 
   private parentUnresolved(): boolean {
@@ -2759,9 +2769,10 @@ export class TabShield {
     return typeof at === 'number' && Date.now() - at > UNRESOLVED_MS;
   }
 
-  private dropHeld(event: ShieldEvent): void {
+  private dropHeld(event: ShieldEvent, frameId = ''): void {
     const id = str(event.params?.['requestId']);
     if (id) this.requests.set(id, true);
+    if (frameId && event.method === 'Page.frameAttached') this.attachDropped.add(frameId);
   }
 
   private holdUnresolved(frameId: string, event: ShieldEvent): void {
@@ -2770,7 +2781,7 @@ export class TabShield {
     held.push({ ...event, at: Date.now() });
     while (held.length > UNRESOLVED_EVENT_CAP) {
       const dropped = held.shift();
-      if (dropped) this.dropHeld(dropped);
+      if (dropped) this.dropHeld(dropped, frameId);
     }
     this.unresolved.set(frameId, held);
     while (this.unresolved.size > UNRESOLVED_FRAME_CAP) {
@@ -2778,7 +2789,7 @@ export class TabShield {
       if (oldest === undefined) break;
       const dropped = this.unresolved.get(oldest) ?? [];
       this.unresolved.delete(oldest);
-      for (const item of dropped) this.dropHeld(item);
+      for (const item of dropped) this.dropHeld(item, oldest);
     }
   }
 
@@ -2789,7 +2800,7 @@ export class TabShield {
     if (state === 'unresolved') {
       const kept: ShieldEvent[] = [];
       for (const event of held) {
-        if (this.expiredUnresolved(event.at)) this.dropHeld(event);
+        if (this.expiredUnresolved(event.at)) this.dropHeld(event, frameId);
         else kept.push({ ...event, at: event.at ?? Date.now() });
       }
       if (kept.length === 0) this.unresolved.delete(frameId);
@@ -2797,9 +2808,10 @@ export class TabShield {
       return;
     }
     this.unresolved.delete(frameId);
-    const drop = state === 'protected' || this.frameProtected(frameId);
+    const drop =
+      state === 'protected' || this.frameProtected(frameId) || this.attachDropped.has(frameId);
     for (const event of held) {
-      if (drop || this.expiredUnresolved(event.at)) this.dropHeld(event);
+      if (drop || this.expiredUnresolved(event.at)) this.dropHeld(event, frameId);
       else this.carried.push(...this.deliver({ method: event.method, params: event.params }));
     }
   }

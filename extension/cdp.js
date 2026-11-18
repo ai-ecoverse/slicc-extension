@@ -2071,21 +2071,31 @@ class Connection {
     return parentId ? 'protected' : 'clear';
   }
 
+  markAttachDropped(tab, frameId, method) {
+    if (!frameId || method !== 'Page.frameAttached') return;
+    tab.attachDropped ??= new Set();
+    tab.attachDropped.add(frameId);
+  }
+
   holdUnresolved(tab, method, params, frameId) {
     if (!frameId) return;
     tab.unresolved ??= new Map();
     const held = tab.unresolved.get(frameId) ?? [];
     held.push([method, params, Date.now()]);
     while (held.length > UNRESOLVED_EVENT_CAP) {
-      const [, event] = held.shift();
+      const [droppedMethod, event] = held.shift();
       this.dropUnresolved(tab, event);
+      this.markAttachDropped(tab, frameId, droppedMethod);
     }
     tab.unresolved.set(frameId, held);
     while (tab.unresolved.size > UNRESOLVED_FRAME_CAP) {
       const oldest = tab.unresolved.keys().next().value;
       const dropped = tab.unresolved.get(oldest);
       tab.unresolved.delete(oldest);
-      for (const [, event] of dropped ?? []) this.dropUnresolved(tab, event);
+      for (const [droppedMethod, event] of dropped ?? []) {
+        this.dropUnresolved(tab, event);
+        this.markAttachDropped(tab, oldest, droppedMethod);
+      }
     }
   }
 
@@ -2107,18 +2117,22 @@ class Connection {
       const kept = [];
       for (const entry of held) {
         const [method, params, at] = entry;
-        if (this.expiredUnresolved(at)) this.dropUnresolved(tab, params);
-        else kept.push([method, params, at ?? Date.now()]);
+        if (this.expiredUnresolved(at)) {
+          this.dropUnresolved(tab, params);
+          this.markAttachDropped(tab, frameId, method);
+        } else kept.push([method, params, at ?? Date.now()]);
       }
       if (kept.length === 0) tab.unresolved.delete(frameId);
       else tab.unresolved.set(frameId, kept);
       return;
     }
     tab.unresolved.delete(frameId);
+    const lost = drop || tab.attachDropped?.has(frameId) === true;
     for (const [method, params, at] of held) {
-      if (drop || this.expiredUnresolved(at) || this.frameProtected(tab, this.eventFrame(params)))
+      if (lost || this.expiredUnresolved(at) || this.frameProtected(tab, this.eventFrame(params))) {
         this.dropUnresolved(tab, params);
-      else this.deliver(tabId, tab, method, params);
+        this.markAttachDropped(tab, frameId, method);
+      } else this.deliver(tabId, tab, method, params);
     }
   }
 
@@ -2348,6 +2362,12 @@ class Connection {
     }
     if (typeof frame.id === 'string') tab.frames.set(frame.id, isProtected);
     tab.uncertain?.delete(frameId);
+    if (tab.attachDropped?.has(frameId)) {
+      if (typeof frame.id === 'string') tab.frames.set(frame.id, true);
+      this.settleUnresolved(tabId, tab, frameId, true);
+      this.flushUnresolved(tabId, tab);
+      return true;
+    }
     if (isProtected) {
       this.settleUnresolved(tabId, tab, frameId, true);
       this.flushUnresolved(tabId, tab);
@@ -2465,9 +2485,14 @@ class Connection {
         this.flushUnresolved(tabId, tab);
         return true;
       }
+      if (state === 'unresolved') {
+        this.settleUnresolved(tabId, tab, frameId, false);
+        this.holdUnresolved(tab, method, p, frameId);
+        return true;
+      }
       this.settleUnresolved(tabId, tab, frameId, false);
-      this.holdUnresolved(tab, method, p, frameId);
-      return true;
+      this.flushUnresolved(tabId, tab);
+      return false;
     }
     if (this.headsToProtected(method, p)) return true;
     if (method === 'Page.frameNavigated') return this.watchFrame(tabId, tab, p.frame ?? {});
