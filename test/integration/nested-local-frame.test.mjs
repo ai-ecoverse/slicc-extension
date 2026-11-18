@@ -737,6 +737,83 @@ for (const transport of ['seven', 'six-bridge']) {
     assert.equal(evaluated.error !== undefined, true);
   });
 
+  test(`${transport}: a held context dropped when the parent commits protected stays hidden`, async (t) => {
+    const fixture = await open(transport, rootOnly());
+    t.after(fixture.close);
+    await fixture.emit('Page.frameAttached', { frameId: 'mid', parentFrameId: 'root' });
+    assert.equal(
+      fixture.hit('Page.frameAttached', (params) => params.frameId === 'mid'),
+      true
+    );
+    await fixture.emit('Page.frameStartedNavigating', { frameId: 'mid', url: VAULT });
+    await fixture.emit(
+      'Runtime.executionContextCreated',
+      context(9, 'grand', 'https://ordinary.test')
+    );
+    assert.equal(
+      fixture.hit(
+        'Runtime.executionContextCreated',
+        (params) => params.context?.auxData?.frameId === 'grand'
+      ),
+      false
+    );
+    await fixture.emit('Page.frameNavigated', { frame: frame('mid', VAULT, 'root') });
+    assert.equal(
+      fixture.hit('Page.frameNavigated', (params) => params.frame?.id === 'mid'),
+      false
+    );
+    await fixture.emit('Page.frameAttached', { frameId: 'grand', parentFrameId: 'mid' });
+    assert.equal(
+      fixture.hit('Page.frameAttached', (params) => params.frameId === 'grand'),
+      false
+    );
+    assert.equal(
+      fixture.hit(
+        'Runtime.executionContextCreated',
+        (params) => params.context?.auxData?.frameId === 'grand'
+      ),
+      false
+    );
+    await fixture.emit('Runtime.consoleAPICalled', {
+      type: 'log',
+      args: [{ type: 'string', value: 'secret' }],
+      executionContextId: 9,
+    });
+    await fixture.emit('Runtime.exceptionThrown', {
+      exceptionDetails: {
+        text: 'boom',
+        executionContextId: 9,
+        url: `${GRAND}/x.js`,
+      },
+    });
+    await fixture.emit('Debugger.scriptParsed', {
+      scriptId: '9',
+      url: `${GRAND}/x.js`,
+      executionContextId: 9,
+    });
+    assert.equal(
+      fixture.hit('Runtime.consoleAPICalled', (params) => params.executionContextId === 9),
+      false
+    );
+    assert.equal(
+      fixture.hit(
+        'Runtime.exceptionThrown',
+        (params) => params.exceptionDetails?.executionContextId === 9
+      ),
+      false
+    );
+    assert.equal(
+      fixture.hit('Debugger.scriptParsed', (params) => params.executionContextId === 9),
+      false
+    );
+    const evaluated = await fixture.command('Runtime.evaluate', {
+      expression: '1',
+      contextId: 9,
+      returnByValue: true,
+    });
+    assert.equal(evaluated.error !== undefined, true);
+  });
+
   test(`${transport}: an unresolved chain stays held until the parent commits protected`, async (t) => {
     const fixture = await open(transport, rootOnly());
     t.after(fixture.close);

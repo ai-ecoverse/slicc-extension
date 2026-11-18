@@ -2773,6 +2773,16 @@ export class TabShield {
     const id = str(event.params?.['requestId']);
     if (id) this.requests.set(id, true);
     if (frameId && event.method === 'Page.frameAttached') this.attachDropped.add(frameId);
+    if (event.method === 'Runtime.executionContextCreated' && isObj(event.params?.['context'])) {
+      if (this.worlds.add(event.params['context'], 'foreign')) this.quietProfilers();
+    }
+  }
+
+  private releaseHeld(event: ShieldEvent): void {
+    if (event.method === 'Runtime.executionContextCreated' && isObj(event.params?.['context'])) {
+      if (this.watchContext(event.params['context'])) return;
+    }
+    this.carried.push(...this.deliver({ method: event.method, params: event.params }));
   }
 
   private holdUnresolved(frameId: string, event: ShieldEvent): void {
@@ -2812,7 +2822,7 @@ export class TabShield {
       state === 'protected' || this.frameProtected(frameId) || this.attachDropped.has(frameId);
     for (const event of held) {
       if (drop || this.expiredUnresolved(event.at)) this.dropHeld(event, frameId);
-      else this.carried.push(...this.deliver({ method: event.method, params: event.params }));
+      else this.releaseHeld(event);
     }
   }
 
