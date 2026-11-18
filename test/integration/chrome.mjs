@@ -21,6 +21,7 @@ export async function launch({ pinned = false, prepare, args = [] } = {}) {
   const adobe = await ims(tls);
   const rules = [
     `MAP seven.sliccy.ai 127.0.0.1:${site.port}`,
+    `MAP sliccy.ai 127.0.0.1:${site.port}`,
     `MAP vault.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP vault-preview.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP vault-x.sliccy.ai 127.0.0.1:${site.port}`,
@@ -80,13 +81,13 @@ export async function launch({ pinned = false, prepare, args = [] } = {}) {
     return true;
   }
 
-  async function visit(t, href) {
+  async function visit(t, href, opts = {}) {
     const first = opened.get(t);
     const page = first ? await first.tab() : await chrome.page(t);
     if (!first) opened.set(t, page);
     await page.goto(href);
     const host = new URL(href).hostname;
-    const needsExt = expectsExtension(host);
+    const needsExt = opts.expectExtension ?? expectsExtension(host);
     await page.until(
       (target, ext) =>
         document.readyState === 'complete' &&

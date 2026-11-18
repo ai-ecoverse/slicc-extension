@@ -354,6 +354,32 @@ export async function pages(tls) {
       const page = `<!doctype html><title>frame</title><iframe src=${src}></iframe>`;
       return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(page);
     }
+    if (pathname === '/page-api-doc') {
+      const who = searchParams.get('who') ?? 'doc';
+      const sandboxed = searchParams.get('sandbox') === '1';
+      const page = `<!doctype html><meta charset="utf-8"><title>${who}</title><body data-who="${who}"><p>${who}</p></body>`;
+      const headers = {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+      };
+      if (sandboxed) {
+        headers['content-security-policy'] =
+          'sandbox allow-scripts allow-forms allow-popups allow-modals';
+      }
+      return response.writeHead(200, headers).end(page);
+    }
+    if (pathname === '/page-api-opener') {
+      const child = searchParams.get('child') ?? '/?n=child';
+      const flags =
+        searchParams.get('flags') ?? 'allow-scripts allow-forms allow-popups allow-modals';
+      const page = `<!doctype html><meta charset="utf-8"><title>opener</title><body><iframe id="child" sandbox="${flags}" src="${child}"></iframe></body>`;
+      return response
+        .writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        .end(page);
+    }
     const cors = {
       'access-control-allow-origin': request.headers.origin ?? '*',
       'access-control-allow-credentials': 'true',
