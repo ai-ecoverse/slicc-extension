@@ -15,6 +15,7 @@ test('a private frame reply arriving after relay disconnect never reaches CDP li
       version: '7.10.1',
     },
     location: { hostname: 'seven.sliccy.ai', origin: 'https://seven.sliccy.ai' },
+    origin: 'https://seven.sliccy.ai',
     MessageChannel: class {
       constructor() {
         this.port1 = port = { postMessage: (value) => sent.push(value) };
