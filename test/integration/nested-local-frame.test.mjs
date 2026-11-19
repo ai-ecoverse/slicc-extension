@@ -177,7 +177,11 @@ async function open(transport, initial) {
     const connection = listen(
       {
         name: 'slicc-fetch',
-        sender: { id: 'fixture', url: 'https://seven.sliccy.ai/' },
+        sender: {
+          id: 'fixture',
+          url: 'https://seven.sliccy.ai/',
+          origin: 'https://seven.sliccy.ai',
+        },
         onDisconnect: bus(),
         postMessage(message) {
           published.push(message);

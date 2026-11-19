@@ -9,6 +9,8 @@
   if (!h.endsWith(_d)) return;
   const l = h.slice(0, -_d.length);
   if (!l || (!_six.includes(h) && (_exL.includes(l) || _exP.some((p) => l.startsWith(p))))) return;
+  const expected = `https://${h}`;
+  if (location.origin !== expected || globalThis.origin !== expected) return;
 
   const { port1, port2 } = new MessageChannel();
   const open = new Map();

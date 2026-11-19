@@ -24,6 +24,8 @@
   if (!h.endsWith(_d)) throw 0;
   const l = h.slice(0, -_d.length);
   if (!l || (!_six.includes(h) && (_exL.includes(l) || _exP.some((p) => l.startsWith(p))))) throw 0;
+  const expected = `https://${h}`;
+  if (location.origin !== expected || globalThis.origin !== expected) throw 0;
 }
 function serve(page) {
   const open = new Map();

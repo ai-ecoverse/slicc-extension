@@ -67,6 +67,7 @@ jobs:
         test/integration/newtab.test.mjs
         test/integration/nested-local-frame.test.mjs
         test/integration/owned-continue.test.mjs
+        test/integration/page-api-origin.test.mjs
         test/integration/page-version.test.mjs
         test/integration/private-extension.test.mjs
         test/integration/privileged.test.mjs

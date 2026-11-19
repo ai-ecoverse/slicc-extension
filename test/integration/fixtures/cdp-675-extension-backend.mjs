@@ -81,7 +81,7 @@ export async function backend() {
   };
   const port = {
     name: 'slicc-fetch',
-    sender: { id: '675', url: 'https://seven.sliccy.ai/' },
+    sender: { id: '675', url: 'https://seven.sliccy.ai/', origin: 'https://seven.sliccy.ai' },
     onDisconnect: event(),
     postMessage: (message) => messages.push(message),
     disconnect: () => {},

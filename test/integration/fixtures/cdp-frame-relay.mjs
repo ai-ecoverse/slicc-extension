@@ -36,7 +36,8 @@ export async function frameRelay(host = 'seven.sliccy.ai') {
   const relayWindow = {};
   const relay = vm.createContext({
     __sliccSeven: structuredClone(seven),
-    location: { hostname: host },
+    location: { hostname: host, origin },
+    origin,
     chrome: { runtime: { connect: () => worker } },
     window: relayWindow,
     addEventListener: (name, callback) => {
@@ -53,6 +54,7 @@ export async function frameRelay(host = 'seven.sliccy.ai') {
   const page = vm.createContext({
     __sliccSeven: structuredClone(seven),
     location: { hostname: host, origin },
+    origin,
     MessageChannel: class {
       constructor() {
         this.port1 = port = {};
