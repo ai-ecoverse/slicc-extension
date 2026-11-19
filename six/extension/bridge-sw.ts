@@ -458,6 +458,10 @@ export function __clearTabShieldsForTest(): void {
   shieldFanouts.clear();
 }
 
+export function __noteFailedForTest(tabId: number, url: string): void {
+  failuresOf(tabId).set(url.split('#')[0] ?? url, true);
+}
+
 type DebuggerEventSink = (tabId: number, method: string, params?: CDPPayload) => void;
 interface ShieldFanout {
   sinks: Set<DebuggerEventSink>;
@@ -1064,6 +1068,21 @@ async function cdpGetTargets(
   return { targetInfos } as BridgeTargetGetTargetsResult;
 }
 
+async function abortOwnedAttach(
+  tabId: number,
+  state: PortState,
+  deps: BridgeSwDeps
+): Promise<void> {
+  await deps.sendDebuggerCommand(tabId, 'Fetch.disable').catch(() => {});
+  tabShields.delete(tabId);
+  if (state.ownedTabs.has(tabId)) {
+    state.ownedTabs.delete(tabId);
+    await deps.detachDebugger(tabId);
+  } else {
+    await releaseTabShield(tabId, deps);
+  }
+}
+
 async function cdpAttachToTarget(
   params: CDPPayload,
   state: PortState,
@@ -1071,18 +1090,21 @@ async function cdpAttachToTarget(
 ): Promise<BridgeTargetAttachResult> {
   const targetId = readTargetIdParam(params);
   const tabId = await guardedTab(params, deps);
+  let attachedNow = false;
   if (!state.ownedTabs.has(tabId)) {
     const attachedByThisPort = await deps.attachDebugger(tabId).catch((err: unknown) => {
       if (foreignFrameError(err)) throw new Error(EXTENSION_FRAME);
       throw err;
     });
-    if (attachedByThisPort) state.ownedTabs.add(tabId);
+    if (attachedByThisPort) {
+      state.ownedTabs.add(tabId);
+      attachedNow = true;
+    }
   }
   await confirmFailure(tabId, deps);
   if (await protectedNow(tabId, deps)) {
-    if (state.ownedTabs.has(tabId)) {
-      state.ownedTabs.delete(tabId);
-      await deps.detachDebugger(tabId);
+    if (attachedNow || state.ownedTabs.has(tabId)) {
+      await abortOwnedAttach(tabId, state, deps);
     }
     throw new Error(PROTECTED_REFUSAL);
   }
@@ -1090,25 +1112,27 @@ async function cdpAttachToTarget(
     await ensureTabShield(tabId, deps);
     if (await deps.tabHasProtectedFrame?.(tabId)) throw new Error(PROTECTED_REFUSAL);
   } catch (err) {
-    if (state.ownedTabs.has(tabId)) {
-      state.ownedTabs.delete(tabId);
-      tabShields.delete(tabId);
-      await deps.detachDebugger(tabId);
-    } else {
-      await releaseTabShield(tabId, deps);
-    }
+    await abortOwnedAttach(tabId, state, deps);
     throw err;
+  }
+  const tab = await deps.getTab(tabId);
+  if (!tab) {
+    await abortOwnedAttach(tabId, state, deps);
+    throw new Error(PROTECTED_REFUSAL);
+  }
+  if (await isProtectedTab(failedView(tabId, tab), deps.getTab)) {
+    await abortOwnedAttach(tabId, state, deps);
+    throw new Error(PROTECTED_REFUSAL);
   }
   const sessionId = targetId;
   state.cut.delete(sessionId);
   state.sessionToTab.set(sessionId, tabId);
   state.attachRefCounts.set(tabId, (state.attachRefCounts.get(tabId) ?? 0) + 1);
-  const tab = await deps.getTab(tabId);
-  const url = tab?.url || tab?.pendingUrl || '';
+  const url = tab.url || tab.pendingUrl || '';
   const info = {
     targetId,
     type: 'page',
-    title: tab?.title ?? '',
+    title: tab.title ?? '',
     url,
     attached: true,
     canAccessOpener: false,

@@ -940,6 +940,22 @@ class Connection {
     return { success: true };
   }
 
+  async errorRootAllowed(tabId, frame) {
+    const url = textOf(frame?.url);
+    if (!url.startsWith('chrome-error:')) return true;
+    const raw = await readTab(this.api, tabId).catch(() => undefined);
+    if (raw && (await this.confirmedError(tabId, raw))) return true;
+    const unreachable = textOf(frame?.unreachableUrl);
+    if (!unreachable) return false;
+    return !errorUrlProtected(guard, unreachable);
+  }
+
+  async abortAttach(tabId) {
+    await this.send(tabId, 'Fetch.disable', {}).catch(() => undefined);
+    this.forget(tabId);
+    await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+  }
+
   async inventory(tabId, tab) {
     let tree;
     try {
@@ -951,6 +967,7 @@ class Connection {
     tab.documents.remember(tree?.frameTree);
     if (!main || typeof main.id !== 'string' || main.id === '') return false;
     if (this.protectedOrigin(textOf(main.securityOrigin))) return false;
+    if (!(await this.errorRootAllowed(tabId, main))) return false;
     if (await this.inheritedProtected(tabId, main)) return false;
     if (!tab.mainFrameId) tab.mainFrameId = main.id;
     await this.indexFrames(tabId, tab, tree.frameTree);
@@ -1050,8 +1067,9 @@ class Connection {
     if (params.flatten !== true) throw new Error('only flatten: true is supported');
     const targetId = readTargetId(params);
     const tabId = tabFrom(targetId);
-    const seen = await demandTab(this.api, await this.confirmed(tabId));
+    let seen = await demandTab(this.api, await this.confirmed(tabId));
     let tab = this.tabState(tabId);
+    let created = false;
     if (!tab) {
       if (!this.state.ownedTabs.has(tabId)) {
         await bounded(
@@ -1095,11 +1113,11 @@ class Connection {
         wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
       this.state.tabs.set(tabId, tab);
+      created = true;
       try {
         await bounded(this.applyFetch(tabId), 10000, 'Target.attachToTarget');
       } catch (error) {
-        this.forget(tabId);
-        await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+        await this.abortAttach(tabId);
         throw error;
       }
       tab.pageObserved = await bounded(
@@ -1116,8 +1134,7 @@ class Connection {
         ? protectedRules.refusal
         : await this.watchRuntime(tabId);
       if (unwatched) {
-        this.forget(tabId);
-        await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+        await this.abortAttach(tabId);
         throw new Error(unwatched);
       }
       await bounded(
@@ -1130,6 +1147,18 @@ class Connection {
         'children'
       ).catch(() => undefined);
     }
+    const current = await readTab(this.api, tabId).catch(() => undefined);
+    if (!current) {
+      if (created) await this.abortAttach(tabId);
+      refusal();
+    }
+    try {
+      seen = await demandTab(this.api, this.view(current));
+    } catch (error) {
+      if (created) await this.abortAttach(tabId);
+      throw error;
+    }
+    tab = this.tabState(tabId);
     tab.pageUrl = seen.url;
     const sessionId = this.state.sessions.has(targetId)
       ? `${targetId}.${++this.state.counter}`
@@ -1138,17 +1167,14 @@ class Connection {
     this.state.sessions.set(sessionId, { tabId, patterns: null, auth: false });
     tab.sessions.add(sessionId);
     this.state.seen.add(tabId);
-    const current = await readTab(this.api, tabId).catch(() => undefined);
-    if (current) {
-      this.post({
-        method: 'Target.attachedToTarget',
-        params: {
-          sessionId,
-          targetInfo: { ...this.info(current), attached: true },
-          waitingForDebugger: false,
-        },
-      });
-    }
+    this.post({
+      method: 'Target.attachedToTarget',
+      params: {
+        sessionId,
+        targetInfo: { ...this.info(current), attached: true },
+        waitingForDebugger: false,
+      },
+    });
     return { sessionId };
   }
 

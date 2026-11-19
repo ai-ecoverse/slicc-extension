@@ -1535,12 +1535,29 @@ export class TabShield {
     );
   }
 
+  private async errorRootAllowed(frame: CDPPayload): Promise<boolean> {
+    const url = str(frame['url']) ?? '';
+    if (!url.startsWith('chrome-error:')) return true;
+    const tab = await this.readLive();
+    if (await this.confirmedError(tab)) return true;
+    const unreachable = str(frame['unreachableUrl']);
+    if (unreachable === undefined || unreachable === '') return false;
+    if (/[\s\\\u0000-\u001f\u007f]/.test(unreachable) || !URL.canParse(unreachable)) return false;
+    const parsed = new URL(unreachable);
+    if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) return false;
+    if (parsed.username || parsed.password) return false;
+    if (isUnparseableUrl(unreachable) || urlProtected(unreachable)) return false;
+    return true;
+  }
+
   private async inventoryFrames(): Promise<void> {
     const tree = await this.send('Page.getFrameTree', {});
     const root = tree['frameTree'];
     this.documents.remember(root);
-    const main = isObj(root) && isObj(root['frame']) ? str(root['frame']['id']) : undefined;
-    if (!main) refuse(PROTECTED_RULES.refusal);
+    const mainFrame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
+    const main = mainFrame ? str(mainFrame['id']) : undefined;
+    if (!main || !mainFrame) refuse(PROTECTED_RULES.refusal);
+    if (!(await this.errorRootAllowed(mainFrame))) refuse(PROTECTED_RULES.refusal);
     this.mainFrameId = main;
     const pending: { node: unknown; parentId: string }[] = [{ node: root, parentId: '' }];
     while (pending.length > 0) {

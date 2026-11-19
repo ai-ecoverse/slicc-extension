@@ -3,6 +3,7 @@ dist/
 coverage/
 artifacts/
 test/unit/
+six/.unit-out/
 extension/_metadata/
 extension/six-sw.js
 extension/sidepanel.js
