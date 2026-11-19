@@ -33,6 +33,7 @@ import {
   dropProtectedCookies,
   EXTENSION_FRAME,
   errorPageRead,
+  errorUrlProtected,
   extensionOrigin,
   foreignFrame,
   frameIn,
@@ -117,6 +118,14 @@ const ERROR_PAGE_READS = new Set([
   'Page.getResourceContent',
   'Page.searchInResource',
 ]);
+
+function erroredFrame(frame) {
+  return Boolean(frame.errorOccurred) || textOf(frame.url).startsWith('chrome-error:');
+}
+
+function nativeFailed(frame, errors) {
+  return errors ? erroredFrame(frame) && frame.frameId === 0 : frame.errorOccurred === true;
+}
 
 function anyProtected(text, options) {
   return urlProtected(guard, text, options);
@@ -485,7 +494,7 @@ class Connection {
     throw new Error('slicc: refused: unsettled frame list');
   }
 
-  async frames(tabId) {
+  async frames(tabId, { errors = false } = {}) {
     const tab = this.tabState(tabId);
     const refuse = () => {
       throw new Error('slicc: refused: unsettled frame list');
@@ -495,7 +504,7 @@ class Connection {
     const debuggerRevision = tab.debuggerRevision;
     const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
     const children = this.debuggerGate.childKey(tab);
-    const [frames, tree, remoteOwners] = await bounded(
+    const [frames, tree, remoteOwners, childTrees] = await bounded(
       (async () => {
         if (!generation || !this.debuggerGate.knownChildren(tab)) refuse();
         const entries = [...tab.debuggerChildInfo.values()].filter(
@@ -519,7 +528,7 @@ class Connection {
           ),
         ]);
         if (new Set(owners.map((owner) => owner.backendNodeId)).size !== owners.length) refuse();
-        return [native, page, owners];
+        return [native, page, owners, await this.childTrees(tabId, tab, native, errors)];
       })(),
       2000,
       'frame list'
@@ -547,7 +556,7 @@ class Connection {
           !frame.documentId ||
           typeof frame.url !== 'string' ||
           !frame.url ||
-          frame.errorOccurred === true ||
+          nativeFailed(frame, errors) ||
           (frame.documentLifecycle !== undefined && frame.documentLifecycle !== 'active')
       )
     )
@@ -595,6 +604,7 @@ class Connection {
       refuse();
     this.checkFrameWitness(tab, frames, revision);
     return {
+      ...this.errorTaint(errors, frames, tree.frameTree, childTrees, refuse),
       version: 1,
       rootDocumentId: root.documentId,
       revision,
@@ -606,9 +616,58 @@ class Connection {
     };
   }
 
+  childTrees(tabId, tab, native, errors) {
+    if (!errors || !Array.isArray(native) || !native.some((entry) => erroredFrame(entry ?? {})))
+      return [];
+    return Promise.all(
+      [...tab.debuggerChildInfo]
+        .filter(([, info]) => info.type === 'iframe')
+        .map(([sessionId, info]) =>
+          this.inflight(
+            tabId,
+            this.api.debugger.sendCommand({ tabId, sessionId }, 'Page.getFrameTree', {})
+          ).then(
+            (result) => ({ target: info.target, tree: result?.frameTree }),
+            () => ({ target: info.target })
+          )
+        )
+    );
+  }
+
+  errorTaint(errors, frames, localTree, childTrees, refuse) {
+    if (!errors) return {};
+    const pages = [];
+    let taint = false;
+    const collect = (node) => {
+      const pending = [node];
+      while (pending.length) {
+        const entry = pending.pop();
+        if (typeof entry?.frame?.url !== 'string') taint = true;
+        else if (entry.frame.url.startsWith('chrome-error:')) pages.push(entry.frame);
+        if (Array.isArray(entry?.childFrames)) pending.push(...entry.childFrames);
+      }
+    };
+    collect(localTree);
+    for (const { target, tree } of childTrees) {
+      const root = tree?.frame;
+      if (
+        root?.id !== target ||
+        typeof root.loaderId !== 'string' ||
+        !root.loaderId ||
+        (tree.childFrames !== undefined && !Array.isArray(tree.childFrames))
+      )
+        taint = true;
+      if (tree) collect(tree);
+    }
+    if (pages.length !== frames.filter((frame) => erroredFrame(frame)).length) refuse();
+    return {
+      errorTaint: taint || pages.some((page) => errorUrlProtected(guard, page.unreachableUrl)),
+    };
+  }
+
   frameKind(frame) {
     const url = frame.url;
-    if (frame.errorOccurred || url?.startsWith('chrome-error:')) return 'error';
+    if (erroredFrame(frame)) return 'error';
     if (typeof url !== 'string' || !/^https?:\/\//.test(url) || !URL.canParse(url))
       return 'unknown';
     if (this.protectedOrigin(url)) return 'protected';
@@ -619,7 +678,14 @@ class Connection {
 
   frameReply(snapshot) {
     const kinds = snapshot.frames.map((frame) => this.frameKind(frame));
-    const ordinary = kinds.every((kind) => kind === 'ordinary');
+    const errorProtected = snapshot.frames.map(
+      (frame, index) =>
+        kinds[index] === 'error' &&
+        (snapshot.errorTaint !== false || errorUrlProtected(guard, frame.url))
+    );
+    const ordinary = kinds.every(
+      (kind, index) => kind === 'ordinary' || (kind === 'error' && errorProtected[index] === false)
+    );
     return {
       version: 2,
       revision: snapshot.revision,
@@ -628,6 +694,7 @@ class Connection {
       frames: snapshot.frames.map((frame, index) => ({
         ...(ordinary ? { frameId: frame.frameId, parentFrameId: frame.parentFrameId } : {}),
         kind: kinds[index],
+        ...(kinds[index] === 'error' ? { errorProtected: errorProtected[index] } : {}),
       })),
       localFrames: ordinary ? [...snapshot.localFrames] : [],
       remoteOwners: ordinary
@@ -2762,7 +2829,7 @@ class Connection {
   handle(message) {
     if (message?.privateFrames && Number.isSafeInteger(message.privateFrames.id)) {
       const { id, tabId } = message.privateFrames;
-      const task = this.frames(tabId)
+      const task = this.frames(tabId, { errors: true })
         .then(
           (result) =>
             this.port.postMessage({ privateFrames: { id, result: this.frameReply(result) } }),
