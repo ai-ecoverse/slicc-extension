@@ -35,10 +35,10 @@ const six = await import(
   `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`
 );
 
-function errorTree(unreachable) {
+function errorTree(unreachable, opts = {}) {
   const frame = {
-    id: 'ROOT',
-    loaderId: 'L1',
+    id: opts.frameId ?? 'ROOT',
+    loaderId: opts.loaderId ?? 'L1',
     url: ERROR_PAGE,
     securityOrigin: '://',
     mimeType: 'text/html',
@@ -122,7 +122,10 @@ async function sevenAttach(reads, opts = {}) {
     'fx',
     api
   );
-  if (opts.failedRecord) conn.state.failed.set(1, failed.split('#')[0]);
+  if (opts.failedRecord) {
+    const recorded = opts.failedRecordUrl ?? failed;
+    conn.state.failed.set(1, recorded.split('#')[0]);
+  }
   let attach;
   try {
     attach = { sessionId: (await conn.attach({ targetId: '1', flatten: true })).sessionId };
@@ -227,7 +230,7 @@ async function sixAttach(reads, opts = {}) {
       return {};
     },
   });
-  if (opts.failedRecord) six.__noteFailedForTest(1, failed);
+  if (opts.failedRecord) six.__noteFailedForTest(1, opts.failedRecordUrl ?? failed);
   await six.handleBridgePortConnect(port, deps);
   const send = async (raw) => {
     for (const f of listeners.msg) f(raw);
@@ -435,6 +438,82 @@ for (const transport of ['seven', 'six-bridge']) {
       navUrl: ordinaryFailed,
     });
     assertAttached(plain, title);
+  });
+
+  test(`${transport}: ordinary then protected failed load on the same tab is refused`, async () => {
+    const out = await run(
+      () => ({ url: ordinaryFailed, title: 'Missing page', status: 'complete' }),
+      {
+        tree: (forwarded) =>
+          forwarded.includes('Runtime.enable')
+            ? errorTree(failed, { loaderId: 'L-protected' })
+            : errorTree(ordinaryFailed, { loaderId: 'L-ordinary' }),
+        navUrl: ordinaryFailed,
+        failedRecord: true,
+        failedRecordUrl: ordinaryFailed,
+      }
+    );
+    assertRefused(out);
+    assert.ok(!out.announced.some((m) => m.params?.targetInfo?.title === 'vault.sliccy.ai'));
+  });
+
+  test(`${transport}: protected failed record then ordinary error root still attaches`, async () => {
+    const title = 'Missing page';
+    const out = await run(() => ({ url: ordinaryFailed, title, status: 'complete' }), {
+      tree: errorTree(ordinaryFailed, { loaderId: 'L-ordinary' }),
+      navUrl: ordinaryFailed,
+      failedRecord: true,
+      failedRecordUrl: failed,
+    });
+    assertAttached(out, title);
+  });
+
+  test(`${transport}: inventoried error root must still be the same document at announce`, async () => {
+    const out = await run(
+      () => ({ url: ordinaryFailed, title: 'Missing page', status: 'complete' }),
+      {
+        tree: (forwarded) =>
+          forwarded.includes('Runtime.enable')
+            ? errorTree(failed, { loaderId: 'L-protected' })
+            : errorTree(ordinaryFailed, { loaderId: 'L-ordinary' }),
+        navUrl: ordinaryFailed,
+      }
+    );
+    assertRefused(out);
+    assert.equal(out.announced.length, 0);
+  });
+
+  test(`${transport}: back-to-back navigation before announce refuses the stale inventory`, async () => {
+    const out = await run(
+      () => ({ url: ordinaryFailed, title: 'Missing page', status: 'complete' }),
+      {
+        tree: (forwarded) => {
+          const trees = forwarded.filter(
+            (m) => m === 'Page.getFrameTree' || m === 'Page.getResourceTree'
+          ).length;
+          return trees <= 1
+            ? errorTree(ordinaryFailed, { loaderId: 'L1' })
+            : errorTree(failed, { loaderId: 'L2' });
+        },
+        navUrl: ordinaryFailed,
+      }
+    );
+    assertRefused(out);
+    assert.equal(out.announced.length, 0);
+  });
+
+  test(`${transport}: failed record for another URL does not prove the current error root`, async () => {
+    const out = await run(
+      () => ({ url: ordinaryFailed, title: 'Missing page', status: 'complete' }),
+      {
+        tree: errorTree(failed, { loaderId: 'L-protected' }),
+        navUrl: ordinaryFailed,
+        failedRecord: true,
+        failedRecordUrl: ordinaryFailed,
+      }
+    );
+    assertRefused(out);
+    assert.equal(out.announced.length, 0);
   });
 }
 
