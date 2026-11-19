@@ -966,11 +966,34 @@ class Connection {
     const main = tree?.frameTree?.frame;
     tab.documents.remember(tree?.frameTree);
     if (!main || typeof main.id !== 'string' || main.id === '') return false;
+    if (typeof main.loaderId !== 'string' || main.loaderId === '') return false;
     if (this.protectedOrigin(textOf(main.securityOrigin))) return false;
     if (!(await this.errorRootAllowed(tabId, main))) return false;
     if (await this.inheritedProtected(tabId, main)) return false;
     if (!tab.mainFrameId) tab.mainFrameId = main.id;
+    tab.attachRoot = {
+      frameId: main.id,
+      loaderId: main.loaderId,
+      unreachableUrl: textOf(main.unreachableUrl),
+    };
     await this.indexFrames(tabId, tab, tree.frameTree);
+    return true;
+  }
+
+  async sameInventoriedRoot(tabId, tab) {
+    const expected = tab?.attachRoot;
+    if (!expected?.frameId || !expected?.loaderId) return false;
+    let tree;
+    try {
+      tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
+    } catch {
+      return false;
+    }
+    const main = tree?.frameTree?.frame;
+    if (!main || main.id !== expected.frameId || main.loaderId !== expected.loaderId) return false;
+    if (textOf(main.url).startsWith('chrome-error:')) {
+      if (textOf(main.unreachableUrl) !== expected.unreachableUrl) return false;
+    }
     return true;
   }
 
@@ -1067,7 +1090,7 @@ class Connection {
     if (params.flatten !== true) throw new Error('only flatten: true is supported');
     const targetId = readTargetId(params);
     const tabId = tabFrom(targetId);
-    let seen = await demandTab(this.api, await this.confirmed(tabId));
+    const seen = await demandTab(this.api, await this.confirmed(tabId));
     let tab = this.tabState(tabId);
     let created = false;
     if (!tab) {
@@ -1147,11 +1170,21 @@ class Connection {
         'children'
       ).catch(() => undefined);
     }
+    return this.announceAttach(tabId, targetId, created);
+  }
+
+  async announceAttach(tabId, targetId, created) {
+    let tab = this.tabState(tabId);
+    if (!tab || !(await this.sameInventoriedRoot(tabId, tab))) {
+      if (created) await this.abortAttach(tabId);
+      refusal();
+    }
     const current = await readTab(this.api, tabId).catch(() => undefined);
     if (!current) {
       if (created) await this.abortAttach(tabId);
       refusal();
     }
+    let seen;
     try {
       seen = await demandTab(this.api, this.view(current));
     } catch (error) {
@@ -2459,11 +2492,21 @@ class Connection {
     const isProtected = originProtected || urlIsProtected || ancestorProtected;
     if (!frame.parentId && url.startsWith('chrome-error:')) {
       tab.mainFrameId = textOf(frame.id);
+      tab.attachRoot = {
+        frameId: textOf(frame.id),
+        loaderId: textOf(frame.loaderId),
+        unreachableUrl: textOf(frame.unreachableUrl),
+      };
       return urlProtected(guard, textOf(frame.unreachableUrl));
     }
     if (!frame.parentId) {
       this.state.failed.delete(tabId);
       tab.mainFrameId = textOf(frame.id);
+      tab.attachRoot = {
+        frameId: textOf(frame.id),
+        loaderId: textOf(frame.loaderId),
+        unreachableUrl: '',
+      };
       if (isProtected || this.leaves(tab, url)) {
         this.release(tabId);
         return true;

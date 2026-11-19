@@ -479,7 +479,9 @@ export function __bridgePortSnapshotForTest(port: ChromeRuntimePort):
 }
 
 export function __noteFailedForTest(tabId: number, url: string): void {
-  failuresOf(tabId).set(url.split('#')[0] ?? url, true);
+  const known = failuresOf(tabId);
+  known.clear();
+  known.set(url.split('#')[0] ?? url, true);
 }
 
 type DebuggerEventSink = (tabId: number, method: string, params?: CDPPayload) => void;
@@ -1133,6 +1135,11 @@ async function cdpAttachToTarget(
   } catch (err) {
     await abortOwnedAttach(tabId, state, deps);
     throw err;
+  }
+  const shield = tabShields.get(tabId);
+  if (!shield || !(await shield.sameInventoriedRoot())) {
+    await abortOwnedAttach(tabId, state, deps);
+    throw new Error(PROTECTED_REFUSAL);
   }
   const tab = await deps.getTab(tabId);
   if (!tab) {

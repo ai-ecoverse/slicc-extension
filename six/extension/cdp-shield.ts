@@ -1508,6 +1508,7 @@ export class TabShield {
   private seal: Sealed | undefined;
   private readonly cut = new Set<unknown>();
   private mainFrameId = '';
+  private rootUnreachable = '';
   private blockedFlag = false;
   private epoch = 0;
   private content: ContentTree | undefined;
@@ -1577,15 +1578,37 @@ export class TabShield {
     this.documents.remember(root);
     const mainFrame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
     const main = mainFrame ? str(mainFrame['id']) : undefined;
-    if (!main || !mainFrame) refuse(PROTECTED_RULES.refusal);
+    const loaderId = mainFrame ? str(mainFrame['loaderId']) : undefined;
+    if (!main || !mainFrame || !loaderId) refuse(PROTECTED_RULES.refusal);
     if (!(await this.errorRootAllowed(mainFrame))) refuse(PROTECTED_RULES.refusal);
     this.mainFrameId = main;
+    this.rootUnreachable = str(mainFrame['unreachableUrl']) ?? '';
     const pending: { node: unknown; parentId: string }[] = [{ node: root, parentId: '' }];
     while (pending.length > 0) {
       const next = pending.pop();
       if (!next) continue;
       await this.inventoryNode(next.node, next.parentId, main, pending);
     }
+  }
+
+  async sameInventoriedRoot(): Promise<boolean> {
+    const expected = this.documents.frames.get(this.mainFrameId);
+    if (!expected?.frameId || !expected.loaderId) return false;
+    let tree: CDPPayload;
+    try {
+      tree = await this.send('Page.getFrameTree', {});
+    } catch {
+      return false;
+    }
+    const root = tree['frameTree'];
+    const main = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
+    if (!main) return false;
+    if (str(main['id']) !== expected.frameId) return false;
+    if (str(main['loaderId']) !== expected.loaderId) return false;
+    if ((str(main['url']) ?? '').startsWith('chrome-error:')) {
+      if ((str(main['unreachableUrl']) ?? '') !== this.rootUnreachable) return false;
+    }
+    return true;
   }
 
   private async inventoryNode(
@@ -2502,6 +2525,7 @@ export class TabShield {
     const networkId = str(paused['networkId']);
     if (networkId) this.requests.set(networkId, tainted || this.requests.get(networkId) === true);
     if (protectedUrl && paused['resourceType'] === 'Document') {
+      this.failedDocuments.clear();
       this.failedDocuments.set((requestUrl(paused) ?? '').split('#')[0] ?? '', true);
       this.answer('Fetch.failRequest', { requestId: id, errorReason: 'BlockedByClient' });
       return [];
@@ -2649,6 +2673,10 @@ export class TabShield {
     const { id, url, origin, state } = this.rememberCommit(frame);
     if (frame['parentId'] === undefined) {
       if (id) this.mainFrameId = id;
+      this.documents.frame(frame);
+      this.rootUnreachable = url.startsWith('chrome-error:')
+        ? (str(frame['unreachableUrl']) ?? '')
+        : '';
       if (urlProtected(url) || urlProtected(origin)) this.block();
       return this.finishCommit(id, false);
     }
