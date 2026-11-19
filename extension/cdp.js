@@ -1159,6 +1159,10 @@ class Connection {
       throw error;
     }
     tab = this.tabState(tabId);
+    if (!tab) {
+      if (created) await this.abortAttach(tabId);
+      refusal();
+    }
     tab.pageUrl = seen.url;
     const sessionId = this.state.sessions.has(targetId)
       ? `${targetId}.${++this.state.counter}`

@@ -559,6 +559,26 @@ export function urlProtected(text: string, readOnly = false): boolean {
   return web !== text && isProtectedUrl(web, readOnly);
 }
 
+const SIGN_IN_MARKERS = ['redirect_uri=', 'client_id=', '/auth/callback'];
+const DECODE_ROUNDS = 8;
+
+function signInMarked(text: string): boolean {
+  let current = text;
+  for (let round = 0; ; round += 1) {
+    const lower = current.toLowerCase();
+    if (SIGN_IN_MARKERS.some((marker) => lower.includes(marker))) return true;
+    let next: string;
+    try {
+      next = decodeURIComponent(current);
+    } catch {
+      return true;
+    }
+    if (next === current) return false;
+    if (round === DECODE_ROUNDS) return true;
+    current = next;
+  }
+}
+
 const SCHEME = /[a-z0-9+.-]/i;
 const LETTER = /[a-z]/i;
 const URL_END = /[\s"'<>`\u0000-\u001f]/;
@@ -1547,6 +1567,7 @@ export class TabShield {
     if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) return false;
     if (parsed.username || parsed.password) return false;
     if (isUnparseableUrl(unreachable) || urlProtected(unreachable)) return false;
+    if (signInMarked(unreachable) || signInMarked(parsed.href)) return false;
     return true;
   }
 

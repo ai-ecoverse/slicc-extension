@@ -458,6 +458,26 @@ export function __clearTabShieldsForTest(): void {
   shieldFanouts.clear();
 }
 
+export function __hasTabShieldForTest(tabId: number): boolean {
+  return tabShields.has(tabId);
+}
+
+export function __bridgePortSnapshotForTest(port: ChromeRuntimePort):
+  | {
+      sessions: string[];
+      refs: number[];
+      owned: number[];
+    }
+  | undefined {
+  const state = liveBridgePortStates.get(port);
+  if (!state) return undefined;
+  return {
+    sessions: [...state.sessionToTab.keys()],
+    refs: [...state.attachRefCounts.keys()],
+    owned: [...state.ownedTabs],
+  };
+}
+
 export function __noteFailedForTest(tabId: number, url: string): void {
   failuresOf(tabId).set(url.split('#')[0] ?? url, true);
 }
@@ -525,7 +545,6 @@ async function ensureTabShield(tabId: number, deps: BridgeSwDeps): Promise<void>
   try {
     await shield.install();
   } catch {
-    if (tabShields.get(tabId) === shield) tabShields.delete(tabId);
     throw new Error(`${PROTECTED_REFUSAL} (the tab could not be guarded)`);
   }
 }
@@ -1073,11 +1092,13 @@ async function abortOwnedAttach(
   state: PortState,
   deps: BridgeSwDeps
 ): Promise<void> {
-  await deps.sendDebuggerCommand(tabId, 'Fetch.disable').catch(() => {});
-  tabShields.delete(tabId);
   if (state.ownedTabs.has(tabId)) {
     state.ownedTabs.delete(tabId);
-    await deps.detachDebugger(tabId);
+    if (!tabInUse(tabId)) {
+      await deps.sendDebuggerCommand(tabId, 'Fetch.disable').catch(() => {});
+      tabShields.delete(tabId);
+      await deps.detachDebugger(tabId);
+    }
   } else {
     await releaseTabShield(tabId, deps);
   }

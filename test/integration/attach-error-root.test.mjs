@@ -412,4 +412,243 @@ for (const transport of ['seven', 'six-bridge']) {
     assert.ok(enableAt >= 0);
     assert.ok(disableAt > enableAt);
   });
+
+  test(`${transport}: sign-in-marked failed URL is refused; plain stays attachable`, async () => {
+    const title = 'Missing page';
+    let deep = ' ';
+    for (let i = 0; i < 12; i += 1) deep = encodeURIComponent(deep);
+    for (const marked of [
+      `${ordinaryFailed}?client_id=abc`,
+      `${ordinaryFailed}?redirect_uri=https://app.test/cb`,
+      `${ordinaryFailed}/auth/callback`,
+      `${ordinaryFailed}?q=%E0%A4%A`,
+      `${ordinaryFailed}?q=${deep}`,
+    ]) {
+      const out = await run(() => ({ url: marked, title, status: 'complete' }), {
+        tree: errorTree(marked),
+        navUrl: marked,
+      });
+      assertRefused(out);
+    }
+    const plain = await run(() => ({ url: ordinaryFailed, title, status: 'complete' }), {
+      tree: errorTree(ordinaryFailed),
+      navUrl: ordinaryFailed,
+    });
+    assertAttached(plain, title);
+  });
 }
+
+test('seven: tab state gone after fresh re-read refuses cleanly', async () => {
+  let conn;
+  const forwarded = [];
+  const detached = [];
+  const published = [];
+  const ordinaryTree = {
+    frameTree: {
+      frame: {
+        id: 'ROOT',
+        loaderId: 'L1',
+        url: ordinary,
+        securityOrigin: 'https://ordinary.test',
+        mimeType: 'text/html',
+      },
+    },
+  };
+  let phase = 0;
+  const api = {
+    tabs: {
+      get: async () => {
+        phase += 1;
+        if (phase >= 2 && conn) conn.state.tabs.delete(1);
+        return { id: 1, url: ordinary, title: 'start', status: 'complete' };
+      },
+      query: async () => [],
+      onUpdated: event(),
+      onCreated: event(),
+      onRemoved: event(),
+      onActivated: event(),
+    },
+    windows: { onRemoved: event() },
+    webNavigation: {
+      getAllFrames: async () => [],
+      getFrame: async () => ({ errorOccurred: false, url: ordinary }),
+      onCreatedNavigationTarget: event(),
+      onCommitted: event(),
+    },
+    debugger: {
+      onEvent: event(),
+      onDetach: event(),
+      attach: async () => {},
+      detach: async () => {
+        detached.push(1);
+      },
+      sendCommand: async (_t, method) => {
+        forwarded.push(method);
+        if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree')
+          return ordinaryTree;
+        if (method === 'Runtime.evaluate') return { result: { type: 'string', value: 'ok' } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 5 };
+        return {};
+      },
+    },
+  };
+  conn = listen(
+    {
+      name: 'slicc-fetch',
+      sender: { id: 'fx', url: 'https://seven.sliccy.ai/', origin: 'https://seven.sliccy.ai' },
+      onDisconnect: event(),
+      postMessage: (m) => published.push(m),
+    },
+    'fx',
+    api
+  );
+  await assert.rejects(
+    () => conn.attach({ targetId: '1', flatten: true }),
+    (error) => refusal.test(String(error?.message ?? error))
+  );
+  assert.equal(published.filter((m) => m.method === 'Target.attachedToTarget').length, 0);
+  assert.ok(forwarded.includes('Fetch.disable'));
+  assert.ok(detached.length > 0);
+  assert.deepEqual([...conn.state.sessions.keys()], []);
+  assert.deepEqual([...conn.state.tabs.keys()], []);
+  assert.deepEqual([...conn.state.ownedTabs], []);
+  conn.close();
+});
+
+test('six-bridge: non-owner abort leaves a live peer shield and session alone', async () => {
+  for (const trigger of ['fresh', 'gone', 'shield']) {
+    six.__clearTabShieldsForTest();
+    six.__clearWelcomedLeaderPortsForTest();
+    const forwarded = [];
+    const detached = [];
+    let attached = false;
+    let bPhase = false;
+    let bReads = 0;
+    const live = { id: 1, url: ordinaryFailed, title: 'Missing page', status: 'complete' };
+    const ordinaryTree = {
+      frameTree: {
+        frame: {
+          id: 'ROOT',
+          loaderId: 'L1',
+          url: ordinaryFailed,
+          securityOrigin: 'https://ordinary.test',
+          mimeType: 'text/html',
+        },
+      },
+    };
+    const makePort = (doc) => {
+      const listeners = { msg: new Set(), disc: new Set() };
+      const published = [];
+      const port = {
+        name: 'slicc.cdp-bridge',
+        sender: {
+          origin: 'https://www.sliccy.ai',
+          url: 'https://www.sliccy.ai/?slicc=leader',
+          tab: { id: 99 },
+          frameId: 0,
+          documentId: doc,
+        },
+        onMessage: {
+          addListener: (f) => listeners.msg.add(f),
+          removeListener: (f) => listeners.msg.delete(f),
+        },
+        onDisconnect: {
+          addListener: (f) => listeners.disc.add(f),
+          removeListener: () => {},
+        },
+        postMessage: (m) => published.push(m),
+        disconnect: () => {},
+      };
+      return { port, listeners, published };
+    };
+    const a = makePort('doc-a');
+    const b = makePort('doc-b');
+    const deps = six.buildDefaultBridgeSwDeps({
+      readStoredLeaderTabId: async () => 99,
+      readLeaderKind: async () => 'six',
+      isLeaderDocument: async () => true,
+      tabHasProtectedFrame: async () => trigger === 'shield' && bPhase,
+      attachDebugger: async () => {
+        if (attached) return false;
+        attached = true;
+        return true;
+      },
+      detachDebugger: async () => {
+        detached.push(1);
+      },
+      subscribeDebuggerEvents: () => () => {},
+      queryTabs: async () => [live],
+      queryActiveTabId: async () => 1,
+      getTab: async () => {
+        if (!bPhase) return live;
+        bReads += 1;
+        if (trigger === 'gone' && bReads >= 3) return undefined;
+        if (trigger === 'fresh' && bReads >= 3) {
+          return { id: 1, url: failed, title: 'vault.sliccy.ai', status: 'complete' };
+        }
+        return live;
+      },
+      sendDebuggerCommand: async (_tab, method) => {
+        forwarded.push(method);
+        if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree')
+          return ordinaryTree;
+        if (method === 'Page.getNavigationHistory') {
+          return {
+            currentIndex: 0,
+            entries: [{ id: 1, url: ordinaryFailed, title: 'Missing page' }],
+          };
+        }
+        if (method === 'Runtime.evaluate') return { result: { type: 'string', value: 'ok' } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 5 };
+        return {};
+      },
+    });
+    const send = async (side, raw) => {
+      for (const f of side.listeners.msg) f(raw);
+      for (let i = 0; i < 200; i++) {
+        await new Promise((r) => setTimeout(r, 2));
+        const reply = side.published.find((m) => m.kind === 'cdp.response' && m.id === raw.id);
+        if (reply) return reply;
+      }
+      return { timeout: true };
+    };
+    await six.handleBridgePortConnect(a.port, deps);
+    await six.handleBridgePortConnect(b.port, deps);
+    await send(a, { bridge: 1, channelId: 'ca', kind: 'handshake.hello' });
+    await send(b, { bridge: 1, channelId: 'cb', kind: 'handshake.hello' });
+    await new Promise((r) => setTimeout(r, 10));
+    const aAttach = await send(a, {
+      bridge: 1,
+      channelId: 'ca',
+      kind: 'cdp.request',
+      id: 1,
+      method: 'Target.attachToTarget',
+      params: { targetId: '1', flatten: true },
+    });
+    assert.equal(typeof aAttach.result?.sessionId, 'string');
+    assert.equal(six.__hasTabShieldForTest(1), true);
+    const afterA = forwarded.filter((m) => m === 'Fetch.disable').length;
+    const detachedAfterA = detached.length;
+    bPhase = true;
+    bReads = 0;
+    const bAttach = await send(b, {
+      bridge: 1,
+      channelId: 'cb',
+      kind: 'cdp.request',
+      id: 2,
+      method: 'Target.attachToTarget',
+      params: { targetId: '1', flatten: true },
+    });
+    assert.ok(bAttach.error);
+    assert.equal(six.__hasTabShieldForTest(1), true);
+    assert.equal(forwarded.filter((m) => m === 'Fetch.disable').length, afterA);
+    assert.equal(detached.length, detachedAfterA);
+    const snap = six.__bridgePortSnapshotForTest(b.port);
+    assert.deepEqual(snap?.sessions ?? ['missing'], []);
+    assert.deepEqual(snap?.refs ?? ['missing'], []);
+    assert.ok(!(snap?.owned ?? [1]).includes(1));
+    for (const f of a.listeners.disc) f();
+    for (const f of b.listeners.disc) f();
+    six.__clearTabShieldsForTest();
+  }
+});
