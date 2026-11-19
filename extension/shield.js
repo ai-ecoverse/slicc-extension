@@ -129,6 +129,36 @@ export function urlProtected(guard, text, options = {}) {
   return web !== text && guard.url(web, options);
 }
 
+const SIGN_IN_MARKERS = ['redirect_uri=', 'client_id=', '/auth/callback'];
+const DECODE_ROUNDS = 8;
+
+function signInMarked(text) {
+  let current = text;
+  for (let round = 0; ; round += 1) {
+    const lower = current.toLowerCase();
+    if (SIGN_IN_MARKERS.some((marker) => lower.includes(marker))) return true;
+    let next;
+    try {
+      next = decodeURIComponent(current);
+    } catch {
+      return true;
+    }
+    if (next === current) return false;
+    if (round === DECODE_ROUNDS) return true;
+    current = next;
+  }
+}
+
+export function errorUrlProtected(guard, text) {
+  if (typeof text !== 'string' || /[\s\\\u0000-\u001f\u007f]/.test(text) || !URL.canParse(text))
+    return true;
+  const u = new URL(text);
+  if (!['http:', 'https:'].includes(u.protocol) || !u.hostname || u.username || u.password)
+    return true;
+  if (guard.unparseable(text) || urlProtected(guard, text)) return true;
+  return signInMarked(text) || signInMarked(u.href);
+}
+
 const SCHEME = /[a-z0-9+.-]/i;
 const LETTER = /[a-z]/i;
 const URL_END = /[\s"'<>`\u0000-\u001f]/;
