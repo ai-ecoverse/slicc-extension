@@ -652,3 +652,119 @@ test('six-bridge: non-owner abort leaves a live peer shield and session alone', 
     six.__clearTabShieldsForTest();
   }
 });
+
+test('six-bridge: owner abort tears down even when a live session still uses the tab', async () => {
+  six.__clearTabShieldsForTest();
+  six.__clearWelcomedLeaderPortsForTest();
+  const forwarded = [];
+  const detached = [];
+  const published = [];
+  const listeners = { msg: new Set(), disc: new Set() };
+  let phase = 'first';
+  let reads = 0;
+  const live = { id: 1, url: ordinaryFailed, title: 'Missing page', status: 'complete' };
+  const ordinaryTree = {
+    frameTree: {
+      frame: {
+        id: 'ROOT',
+        loaderId: 'L1',
+        url: ordinaryFailed,
+        securityOrigin: 'https://ordinary.test',
+        mimeType: 'text/html',
+      },
+    },
+  };
+  const port = {
+    name: 'slicc.cdp-bridge',
+    sender: {
+      origin: 'https://www.sliccy.ai',
+      url: 'https://www.sliccy.ai/?slicc=leader',
+      tab: { id: 99 },
+      frameId: 0,
+      documentId: 'doc-owner',
+    },
+    onMessage: {
+      addListener: (f) => listeners.msg.add(f),
+      removeListener: (f) => listeners.msg.delete(f),
+    },
+    onDisconnect: {
+      addListener: (f) => listeners.disc.add(f),
+      removeListener: () => {},
+    },
+    postMessage: (m) => published.push(m),
+    disconnect: () => {},
+  };
+  const deps = six.buildDefaultBridgeSwDeps({
+    readStoredLeaderTabId: async () => 99,
+    readLeaderKind: async () => 'six',
+    isLeaderDocument: async () => true,
+    tabHasProtectedFrame: async () => false,
+    attachDebugger: async () => true,
+    detachDebugger: async () => {
+      detached.push(1);
+    },
+    subscribeDebuggerEvents: () => () => {},
+    queryTabs: async () => [live],
+    queryActiveTabId: async () => 1,
+    getTab: async () => {
+      if (phase !== 'second') return live;
+      reads += 1;
+      if (reads >= 3) return { id: 1, url: failed, title: 'vault.sliccy.ai', status: 'complete' };
+      return live;
+    },
+    sendDebuggerCommand: async (_tab, method) => {
+      forwarded.push(method);
+      if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') return ordinaryTree;
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 0,
+          entries: [{ id: 1, url: ordinaryFailed, title: 'Missing page' }],
+        };
+      }
+      if (method === 'Runtime.evaluate') return { result: { type: 'string', value: 'ok' } };
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 5 };
+      return {};
+    },
+  });
+  const send = async (raw) => {
+    for (const f of listeners.msg) f(raw);
+    for (let i = 0; i < 200; i++) {
+      await new Promise((r) => setTimeout(r, 2));
+      const reply = published.find((m) => m.kind === 'cdp.response' && m.id === raw.id);
+      if (reply) return reply;
+    }
+    return { timeout: true };
+  };
+  await six.handleBridgePortConnect(port, deps);
+  await send({ bridge: 1, channelId: 'c', kind: 'handshake.hello' });
+  await new Promise((r) => setTimeout(r, 10));
+  const first = await send({
+    bridge: 1,
+    channelId: 'c',
+    kind: 'cdp.request',
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '1', flatten: true },
+  });
+  assert.equal(typeof first.result?.sessionId, 'string');
+  assert.equal(six.__hasTabShieldForTest(1), true);
+  assert.ok((six.__bridgePortSnapshotForTest(port)?.owned ?? []).includes(1));
+  phase = 'second';
+  reads = 0;
+  const second = await send({
+    bridge: 1,
+    channelId: 'c',
+    kind: 'cdp.request',
+    id: 2,
+    method: 'Target.attachToTarget',
+    params: { targetId: '1', flatten: true },
+  });
+  assert.ok(second.error);
+  assert.ok(forwarded.includes('Fetch.disable'));
+  assert.ok(detached.length > 0);
+  assert.equal(six.__hasTabShieldForTest(1), false);
+  const snap = six.__bridgePortSnapshotForTest(port);
+  assert.ok(!(snap?.owned ?? [1]).includes(1));
+  for (const f of listeners.disc) f();
+  six.__clearTabShieldsForTest();
+});

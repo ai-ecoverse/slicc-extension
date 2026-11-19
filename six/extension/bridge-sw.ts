@@ -1094,11 +1094,9 @@ async function abortOwnedAttach(
 ): Promise<void> {
   if (state.ownedTabs.has(tabId)) {
     state.ownedTabs.delete(tabId);
-    if (!tabInUse(tabId)) {
-      await deps.sendDebuggerCommand(tabId, 'Fetch.disable').catch(() => {});
-      tabShields.delete(tabId);
-      await deps.detachDebugger(tabId);
-    }
+    await deps.sendDebuggerCommand(tabId, 'Fetch.disable').catch(() => {});
+    tabShields.delete(tabId);
+    await deps.detachDebugger(tabId);
   } else {
     await releaseTabShield(tabId, deps);
   }
