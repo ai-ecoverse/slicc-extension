@@ -15,6 +15,7 @@ import {
 import {
   ABOUT_WRAPPED,
   Bounded,
+  LEGACY_INTERCEPTION,
   redacted,
   redactProtected,
   redactText,
@@ -994,6 +995,8 @@ async function dispatchCdpCommand(
   deps: BridgeSwDeps
 ): Promise<CDPPayload> {
   const { method, params, sessionId } = req;
+  const legacy = LEGACY_INTERCEPTION.get(method);
+  if (legacy) throw new Error(legacy);
 
   if (method === 'Target.getTargets') return cdpGetTargets(state, deps);
   if (method === 'Target.attachToTarget') return cdpAttachToTarget(params ?? {}, state, deps);
