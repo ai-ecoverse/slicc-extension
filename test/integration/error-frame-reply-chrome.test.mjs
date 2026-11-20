@@ -49,7 +49,7 @@ async function snapshot(page, targetId, settled) {
       const off = sliccExtension.cdp.on((message) => events.push(message));
       let last;
       try {
-        for (let attempt = 0; attempt < 30; attempt += 1) {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
           try {
             last = { snapshot: await sliccExtension.frames(Number(targetId)) };
           } catch (error) {
