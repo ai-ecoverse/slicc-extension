@@ -1166,6 +1166,8 @@ class Connection {
         debuggerChildren: new Set(),
         debuggerChildInfo: new Map(),
         debuggerRevision: 0,
+        childReobserveRunning: null,
+        childReobservePending: null,
         wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
       this.state.tabs.set(tabId, tab);
@@ -2839,6 +2841,129 @@ class Connection {
     }
     tab.debuggerRevision += 1;
     this.debuggerGate.revoke(details.tabId);
+    this.scheduleChildReobserve(details.tabId);
+  }
+
+  scheduleChildReobserve(tabId) {
+    const tab = this.tabState(tabId);
+    if (!tab) return;
+    const started = tab.debuggerRevision;
+    if (tab.childReobserveRunning != null) {
+      tab.childReobservePending = started;
+      return;
+    }
+    tab.childReobserveRunning = started;
+    tab.childReobservePending = null;
+    void this.runChildReobserve(tabId, started);
+  }
+
+  async runChildReobserve(tabId, startedRevision) {
+    try {
+      await bounded(this.reobserveStaleChildren(tabId, startedRevision), 2000, 'child reobserve');
+    } catch {
+    } finally {
+      const tab = this.tabState(tabId);
+      if (tab) {
+        const bumped = tab.debuggerRevision !== startedRevision;
+        const pending = tab.childReobservePending;
+        tab.childReobserveRunning = null;
+        tab.childReobservePending = null;
+        if (
+          (bumped || pending != null) &&
+          [...(tab.debuggerChildInfo?.values() ?? [])].some(
+            (info) => info.revision !== tab.debuggerRevision
+          )
+        ) {
+          this.scheduleChildReobserve(tabId);
+        }
+      }
+    }
+  }
+
+  childReobserveUrl(targetInfo, tree) {
+    const root = tree?.frame;
+    if (root && textOf(root.url).startsWith('chrome-error:')) {
+      return textOf(root.unreachableUrl) || textOf(targetInfo?.url);
+    }
+    return textOf(targetInfo?.url) || textOf(root?.url);
+  }
+
+  async childReobservePass(tabId, targetInfo, tree) {
+    if (!targetInfo || !tree) return false;
+    const type = targetInfo?.type;
+    if (type && type !== 'iframe' && type !== 'worker') return false;
+    if (type && uiType(type)) return false;
+    const liveUrl = textOf(targetInfo?.url);
+    if (liveUrl && (urlProtected(guard, liveUrl) || this.protectedOrigin(liveUrl))) return false;
+    const root = tree?.frame;
+    if (root && textOf(root.url).startsWith('chrome-error:')) {
+      if (!(await this.errorRootAllowed(tabId, root))) return false;
+      const unreachable = textOf(root.unreachableUrl);
+      if (
+        !unreachable ||
+        !/^https?:\/\//.test(unreachable) ||
+        !URL.canParse(unreachable) ||
+        this.protectedOrigin(unreachable)
+      )
+        return false;
+      return true;
+    }
+    const url = liveUrl || textOf(root?.url);
+    if (!url || !/^https?:\/\//.test(url) || !URL.canParse(url)) return false;
+    if (urlProtected(guard, url) || this.protectedOrigin(url)) return false;
+    return true;
+  }
+
+  async reobserveStaleChildren(tabId, startedRevision) {
+    const tab = this.tabState(tabId);
+    if (!tab || tab.debuggerRevision !== startedRevision) return;
+    const stale = [...tab.debuggerChildInfo.entries()].filter(
+      ([, info]) => info.revision !== startedRevision
+    );
+    if (!stale.length) return;
+    const reads = await Promise.all(
+      stale.map(async ([sessionId, info]) => {
+        const tree = await this.inflight(
+          tabId,
+          this.api.debugger.sendCommand({ tabId, sessionId }, 'Page.getFrameTree', {})
+        ).then(
+          (result) => result?.frameTree,
+          () => undefined
+        );
+        let targetInfo;
+        try {
+          const answer = await this.api.debugger.sendCommand({ tabId }, 'Target.getTargetInfo', {
+            targetId: info.target,
+          });
+          targetInfo = answer?.targetInfo;
+        } catch {
+          targetInfo = undefined;
+        }
+        return { sessionId, info, tree, targetInfo };
+      })
+    );
+    if (this.tabState(tabId) !== tab || tab.debuggerRevision !== startedRevision) return;
+    let stamped = false;
+    for (const { sessionId, info, tree, targetInfo } of reads) {
+      const current = tab.debuggerChildInfo.get(sessionId);
+      if (!current || current.revision === startedRevision) continue;
+      if (current.target !== info.target) continue;
+      const ok = await this.childReobservePass(tabId, targetInfo, tree);
+      if (this.tabState(tabId) !== tab || tab.debuggerRevision !== startedRevision) return;
+      if (!ok) continue;
+      const url = this.childReobserveUrl(targetInfo, tree);
+      if (!url || !/^https?:\/\//.test(url) || !URL.canParse(url) || this.protectedOrigin(url))
+        continue;
+      tab.debuggerChildInfo.set(sessionId, {
+        target: textOf(targetInfo?.targetId) || current.target,
+        type: targetInfo?.type || current.type,
+        url,
+        generation: tab.documents.frames.get(tab.mainFrameId)?.loaderId,
+        revision: startedRevision,
+      });
+      stamped = true;
+    }
+    if (stamped) this.debuggerGate.revoke(tabId);
   }
 
   onFrames(details) {
