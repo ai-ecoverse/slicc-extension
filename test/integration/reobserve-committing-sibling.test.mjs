@@ -17,7 +17,6 @@ async function fixtureFor(
     canaryTarget = CANARY,
     tabUrl = ORDINARY,
     mainErrorOccurred = false,
-    documentChildren,
     owners,
     parentLoader = 'ordinary-document',
     getTargetInfoDelay = 0,
@@ -60,6 +59,8 @@ async function fixtureFor(
       ['ERROR_TARGET', 21],
       ['SIBLING_TARGET', 22],
     ]);
+  const sends = [];
+  let recording = false;
   let delay = getTargetInfoDelay;
   let fail = getTargetInfoFail;
   let parentTree = {
@@ -71,16 +72,18 @@ async function fixtureFor(
       securityOrigin: 'https://ordinary.test',
     },
   };
-  let documentRoot = {
+  const documentRoot = {
     nodeType: 9,
     nodeName: '#document',
+    nodeId: 1,
     frameId: 'root',
     backendNodeId: 1,
-    children: documentChildren ?? [
-      { nodeName: 'IFRAME', backendNodeId: 21 },
-      { nodeName: 'IFRAME', backendNodeId: 22 },
-    ],
+    children: [{ nodeName: 'DIV', nodeId: 2, backendNodeId: 2, attributes: ['id', 'mark'] }],
   };
+  const nodes = new Map([
+    [1, documentRoot],
+    [2, documentRoot.children[0]],
+  ]);
   fixture.api.tabs.get = async () => ({ id: 11, url: tabUrl, status: 'complete' });
   fixture.api.webNavigation.getFrame = async () => ({
     errorOccurred: mainErrorOccurred,
@@ -112,6 +115,7 @@ async function fixtureFor(
   ];
   const send = fixture.api.debugger.sendCommand;
   fixture.api.debugger.sendCommand = async (source, method, params) => {
+    if (recording) sends.push({ source, method, params });
     if (method === 'Target.getTargetInfo') {
       if (fail) throw new Error('target-info-failed');
       if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
@@ -133,6 +137,21 @@ async function fixtureFor(
     }
     if (method === 'DOM.getDocument') {
       return { root: structuredClone(documentRoot) };
+    }
+    if (method === 'DOM.querySelector') {
+      const node = [...nodes.values()].find(
+        (entry) =>
+          Array.isArray(entry.attributes) &&
+          entry.attributes.includes('id') &&
+          entry.attributes.includes(String(params?.selector ?? '').replace(/^#/, ''))
+      );
+      if (!node) return { nodeId: 0 };
+      return { nodeId: node.nodeId };
+    }
+    if (method === 'DOM.describeNode') {
+      const node = nodes.get(params?.nodeId);
+      if (!node) throw new Error('Could not find node with given id');
+      return { node: structuredClone(node) };
     }
     if (method === 'Page.getFrameTree' && !source?.sessionId) {
       return { frameTree: structuredClone(parentTree) };
@@ -174,6 +193,11 @@ async function fixtureFor(
     live,
     trees,
     ownerIds,
+    sends,
+    record: (on) => {
+      recording = on;
+      if (on) sends.length = 0;
+    },
     setDelay: (ms) => {
       delay = ms;
     },
@@ -183,10 +207,19 @@ async function fixtureFor(
     setParentTree: (next) => {
       parentTree = next;
     },
-    setDocumentRoot: (next) => {
-      documentRoot = next;
-    },
   };
+}
+
+function reobserveDomMethods(sends) {
+  return sends
+    .map((entry) => entry.method)
+    .filter(
+      (method) =>
+        method === 'DOM.getDocument' ||
+        method === 'DOM.enable' ||
+        method === 'DOM.getFrameOwner' ||
+        method.startsWith('DOM.')
+    );
 }
 
 async function settle(tab, rounds = 50) {
@@ -383,7 +416,7 @@ test('main confirmed error plus protected sign-in child stays locked', async (t)
 });
 
 test('an old-document child that still answers stays stale', async (t) => {
-  const { fixture, tab, setParentTree, setDocumentRoot } = await fixtureFor(t);
+  const { fixture, tab, setParentTree } = await fixtureFor(t);
   tab.documents.frames.set('root', { loaderId: 'next-document' });
   setParentTree({
     frame: {
@@ -393,13 +426,7 @@ test('an old-document child that still answers stays stale', async (t) => {
       securityOrigin: 'https://ordinary.test',
     },
   });
-  setDocumentRoot({
-    nodeType: 9,
-    nodeName: '#document',
-    frameId: 'root',
-    backendNodeId: 1,
-    children: [{ nodeName: 'IFRAME', backendNodeId: 22 }],
-  });
+  tab.frameParents.delete('ERROR_TARGET');
   await siblingCommit(fixture);
   await settle(tab);
   assert.equal(tab.debuggerChildInfo.get('error-session').revision, 0);
@@ -410,18 +437,9 @@ test('an old-document child that still answers stays stale', async (t) => {
   assert.equal(reply.error, 'slicc: refused: unsettled frame list');
 });
 
-test('an OOPIF child with an owner but an unknown parent chain stays stale', async (t) => {
-  const { fixture, tab, setDocumentRoot } = await fixtureFor(t, {
-    documentChildren: [{ nodeName: 'IFRAME', backendNodeId: 22 }],
-  });
+test('an OOPIF child with an unknown parent chain stays stale', async (t) => {
+  const { fixture, tab } = await fixtureFor(t);
   tab.frameParents.delete('ERROR_TARGET');
-  setDocumentRoot({
-    nodeType: 9,
-    nodeName: '#document',
-    frameId: 'root',
-    backendNodeId: 1,
-    children: [{ nodeName: 'IFRAME', backendNodeId: 22 }],
-  });
   await siblingCommit(fixture);
   await settle(tab);
   assert.equal(tab.debuggerChildInfo.get('error-session').revision, 0);
@@ -431,25 +449,96 @@ test('an OOPIF child with an owner but an unknown parent chain stays stale', asy
 });
 
 test('an ordinary OOPIF child whose parent is the main frame is stamped', async (t) => {
-  const { fixture, tab, setDocumentRoot } = await fixtureFor(t);
-  tab.frameParents.delete('ERROR_TARGET');
-  tab.frameParents.delete('SIBLING_TARGET');
-  setDocumentRoot({
-    nodeType: 9,
-    nodeName: '#document',
-    frameId: 'root',
-    backendNodeId: 1,
-    children: [
-      { nodeName: 'IFRAME', backendNodeId: 21 },
-      { nodeName: 'IFRAME', backendNodeId: 22 },
-    ],
-  });
+  const { fixture, tab } = await fixtureFor(t);
+  assert.equal(tab.frameParents.get('ERROR_TARGET'), 'root');
+  assert.equal(tab.frameParents.get('SIBLING_TARGET'), 'root');
   await siblingCommit(fixture);
   await settle(tab);
   assert.equal(tab.debuggerChildInfo.get('error-session').revision, tab.debuggerRevision);
   assert.equal(tab.debuggerChildInfo.get('sibling-session').revision, tab.debuggerRevision);
   const reply = await privateFrames(fixture);
   assert.equal(reply.error, undefined);
+});
+
+test('reobserve sends no DOM.getDocument, DOM.enable, or DOM.getFrameOwner', async (t) => {
+  const { fixture, tab, record, sends } = await fixtureFor(t);
+  record(true);
+  await siblingCommit(fixture);
+  await settle(tab);
+  record(false);
+  assert.equal(tab.debuggerChildInfo.get('error-session').revision, tab.debuggerRevision);
+  assert.deepEqual(reobserveDomMethods(sends), []);
+  assert.ok(sends.some((entry) => entry.method === 'Page.getFrameTree'));
+  assert.ok(sends.some((entry) => entry.method === 'Target.getTargetInfo'));
+});
+
+test('a client nodeId survives a child commit and reobserve pass', async (t) => {
+  const { fixture, tab, record, sends } = await fixtureFor(t);
+  const doc = await fixture.api.debugger.sendCommand({ tabId: 11 }, 'DOM.getDocument', {});
+  assert.equal(doc.root.nodeId, 1);
+  const selected = await fixture.api.debugger.sendCommand({ tabId: 11 }, 'DOM.querySelector', {
+    nodeId: doc.root.nodeId,
+    selector: '#mark',
+  });
+  assert.equal(selected.nodeId, 2);
+  record(true);
+  await siblingCommit(fixture);
+  await settle(tab);
+  record(false);
+  assert.equal(tab.debuggerChildInfo.get('error-session').revision, tab.debuggerRevision);
+  assert.deepEqual(reobserveDomMethods(sends), []);
+  const described = await fixture.api.debugger.sendCommand({ tabId: 11 }, 'DOM.describeNode', {
+    nodeId: selected.nodeId,
+  });
+  assert.equal(described.node.nodeId, 2);
+  assert.equal(described.node.backendNodeId, 2);
+});
+
+test('mutation: putting DOM.getDocument back into reobserve makes the no-DOM row red', async (t) => {
+  const { fixture, tab, record, sends } = await fixtureFor(t);
+  const prior = fixture.connection.reobserveStaleChildren.bind(fixture.connection);
+  fixture.connection.reobserveStaleChildren = async (tabId, startedRevision) => {
+    await fixture.api.debugger.sendCommand({ tabId }, 'DOM.getDocument', {
+      depth: -1,
+      pierce: true,
+    });
+    return prior(tabId, startedRevision);
+  };
+  record(true);
+  await siblingCommit(fixture);
+  await settle(tab);
+  record(false);
+  assert.equal(tab.debuggerChildInfo.get('error-session').revision, tab.debuggerRevision);
+  assert.ok(reobserveDomMethods(sends).includes('DOM.getDocument'));
+});
+
+test('reobserve sends nothing when no child is stale', async (t) => {
+  const { fixture, tab, record, sends } = await fixtureFor(t);
+  for (const info of tab.debuggerChildInfo.values()) info.revision = 1;
+  tab.debuggerRevision = 1;
+  record(true);
+  await fixture.connection.reobserveStaleChildren(11, 1);
+  record(false);
+  assert.deepEqual(sends, []);
+});
+
+test('N rapid child commits coalesce into one reobserve pass batch', async (t) => {
+  const { fixture, tab } = await fixtureFor(t);
+  let passes = 0;
+  const prior = fixture.connection.reobserveStaleChildren.bind(fixture.connection);
+  fixture.connection.reobserveStaleChildren = async (...args) => {
+    passes += 1;
+    return prior(...args);
+  };
+  const n = 5;
+  await Promise.all(Array.from({ length: n }, () => siblingCommit(fixture)));
+  await settle(tab);
+  await settle(tab);
+  assert.equal(tab.debuggerChildInfo.get('error-session').revision, tab.debuggerRevision);
+  assert.ok(
+    passes >= 1 && passes <= 2,
+    `expected 1 coalesced batch (got ${passes} for ${n} commits)`
+  );
 });
 
 test('reobserve does not mutate documents.frames or frameParents', async (t) => {
@@ -575,7 +664,7 @@ test('mutation: routing childReobservePass through errorRootAllowed admits the s
 });
 
 test('mutation: stamping the current loaderId blindly admits an old-document child', async (t) => {
-  const { fixture, tab, setParentTree, setDocumentRoot } = await fixtureFor(t);
+  const { fixture, tab, setParentTree } = await fixtureFor(t);
   tab.documents.frames.set('root', { loaderId: 'next-document' });
   setParentTree({
     frame: {
@@ -585,13 +674,7 @@ test('mutation: stamping the current loaderId blindly admits an old-document chi
       securityOrigin: 'https://ordinary.test',
     },
   });
-  setDocumentRoot({
-    nodeType: 9,
-    nodeName: '#document',
-    frameId: 'root',
-    backendNodeId: 1,
-    children: [{ nodeName: 'IFRAME', backendNodeId: 22 }],
-  });
+  tab.frameParents.delete('ERROR_TARGET');
   await siblingCommit(fixture);
   await settle(tab);
   assert.equal(tab.debuggerChildInfo.get('error-session').revision, 0);
