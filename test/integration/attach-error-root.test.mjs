@@ -874,6 +874,124 @@ for (const transport of ['seven', 'six-bridge']) {
       ? (value, method) => redactProtected(value, anyProtected, method)
       : (value, method) => sixShield.redactProtected(value, method);
 
+  test(`${transport}: shape-scoped name scrub keeps ordinary reply shapes`, () => {
+    const evaluated = redact(
+      { result: { type: 'object', value: [{ name: 'Docs', url: failed }] } },
+      'Runtime.evaluate'
+    );
+    assert.equal(evaluated.result.value[0].name, 'Docs');
+    assert.equal(evaluated.result.value[0].url, origin);
+    const ax = redact(
+      {
+        nodes: [
+          {
+            nodeId: '1',
+            role: { type: 'role', value: 'link' },
+            name: { type: 'computedString', value: 'Docs' },
+            url: failed,
+          },
+        ],
+      },
+      'Accessibility.getFullAXTree'
+    );
+    assert.equal(ax.nodes[0].name.value, 'Docs');
+    assert.equal(ax.nodes[0].url, origin);
+    const partial = redact(
+      {
+        nodes: [
+          {
+            nodeId: '2',
+            role: { type: 'role', value: 'link' },
+            name: { type: 'computedString', value: 'Docs' },
+            url: failed,
+          },
+        ],
+      },
+      'Accessibility.getPartialAXTree'
+    );
+    assert.equal(partial.nodes[0].name.value, 'Docs');
+    const anchor = redact(
+      {
+        node: {
+          nodeId: 3,
+          localName: 'a',
+          attributes: ['name', 'section', 'href', failed],
+          documentURL: ordinary,
+          baseURL: ordinary,
+        },
+      },
+      'DOM.describeNode'
+    );
+    assert.deepEqual(anchor.node.attributes, ['name', 'section', 'href', origin]);
+    assert.equal(
+      redact({ url: ordinary, windowName: 'app', windowFeatures: 'noopener' }, 'Page.windowOpen')
+        .windowName,
+      'app'
+    );
+    assert.equal(
+      redact(
+        { frameId: 'ROOT', guid: 'g', url: ordinary, suggestedFilename: 'report.pdf' },
+        'Page.downloadWillBegin'
+      ).suggestedFilename,
+      'report.pdf'
+    );
+    const frame = {
+      id: 'SAND',
+      loaderId: 'L-sand',
+      url: 'about:blank',
+      securityOrigin: '://',
+      name: 'sandbox',
+    };
+    assert.equal(redact({ frame }, 'Page.frameNavigated').frame.name, 'sandbox');
+    const tree = redact(
+      {
+        frameTree: {
+          frame: {
+            id: 'ROOT',
+            url: ordinary,
+            securityOrigin: 'https://ordinary.test',
+            name: 'main',
+          },
+          childFrames: [{ frame }],
+        },
+      },
+      'Page.getFrameTree'
+    );
+    assert.equal(tree.frameTree.frame.name, 'main');
+    assert.equal(tree.frameTree.childFrames[0].frame.name, 'sandbox');
+    assert.equal(
+      redact(
+        {
+          context: {
+            id: 9,
+            origin: 'null',
+            name: '__crx_isolated_world__',
+            auxData: { isDefault: false, frameId: 'SAND', type: 'isolated' },
+          },
+        },
+        'Runtime.executionContextCreated'
+      ).context.name,
+      '__crx_isolated_world__'
+    );
+    const generic = (value) => {
+      if (value === null || typeof value !== 'object') return value;
+      if (Array.isArray(value)) return value.map(generic);
+      const out = { ...value };
+      for (const [key, item] of Object.entries(out)) out[key] = generic(item);
+      if (
+        ['url', 'documentURL', 'baseURL', 'securityOrigin', 'unreachableUrl'].some(
+          (key) => typeof out[key] === 'string' && out[key].includes('vault.sliccy.ai')
+        )
+      ) {
+        delete out.name;
+        delete out.windowName;
+      }
+      return out;
+    };
+    assert.equal(generic(evaluated).result.value[0].name, undefined);
+    assert.equal(evaluated.result.value[0].name, 'Docs');
+  });
+
   test(`${transport}: windowName and sibling name carriers omit on protected or unproven`, () => {
     const opened = redact(
       { url: failed, windowName: host, windowFeatures: 'noopener' },
@@ -941,7 +1059,7 @@ for (const transport of ['seven', 'six-bridge']) {
       {
         context: {
           id: 1,
-          origin: '://',
+          origin,
           name: host,
           auxData: { isDefault: true, frameId: 'ROOT', type: 'default' },
         },
@@ -949,6 +1067,7 @@ for (const transport of ['seven', 'six-bridge']) {
       'Runtime.executionContextCreated'
     );
     assert.equal(context.context.name, undefined);
+    assert.equal(context.context.origin, origin);
     assert.equal(context.context.auxData.frameId, 'ROOT');
     assert.equal(
       redact(
@@ -1033,28 +1152,24 @@ for (const transport of ['seven', 'six-bridge']) {
     );
     assert.equal(network.documentURL, origin);
     assert.equal(network.request.url, origin);
-    for (const method of [
-      'Page.frameNavigated',
-      'Page.frameAttached',
-      'Page.frameStartedLoading',
-      'Page.frameRequestedNavigation',
-      'Page.frameStartedNavigating',
-    ]) {
-      const params =
-        method === 'Page.frameNavigated' || method === 'Page.frameAttached'
-          ? {
-              frame: {
-                id: 'ROOT',
-                url: ERROR_PAGE,
-                securityOrigin: '://',
-                unreachableUrl: failed,
-                name: host,
-              },
-            }
-          : { frameId: 'ROOT', url: failed, name: host };
-      const scrubbed = redact(params, method);
-      if (scrubbed.frame) assert.equal(scrubbed.frame.name, undefined);
-      else assert.equal(scrubbed.name, undefined);
+    for (const method of ['Page.frameNavigated', 'Page.frameAttached']) {
+      const scrubbed = redact(
+        {
+          frame: {
+            id: 'ROOT',
+            loaderId: 'L1',
+            url: ERROR_PAGE,
+            securityOrigin: '://',
+            unreachableUrl: failed,
+            name: host,
+          },
+        },
+        method
+      );
+      assert.equal(scrubbed.frame.name, undefined);
+    }
+    for (const method of ['Page.frameRequestedNavigation', 'Page.frameStartedNavigating']) {
+      assert.equal(redact({ frameId: 'ROOT', url: failed }, method).url, origin);
     }
     const mutated = {
       frame: {

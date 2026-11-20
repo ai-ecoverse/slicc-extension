@@ -180,7 +180,6 @@ export const KEY_COLLISION =
   'slicc: refused: two keys of this payload reduce to the same protected origin';
 export const ENCODED = 'slicc: refused: an encoded payload names a protected url';
 const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
-const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
 const TARGETS = new Set(['location', 'content-location', 'refresh', 'link']);
 
 const AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i;
@@ -608,10 +607,6 @@ function urlNamed(text, isProtected) {
   return typeof text === 'string' && text !== '' && isProtected(text);
 }
 
-function opaqueOrigin(text) {
-  return text === 'null' || text === '://' || text === ':///';
-}
-
 function nameSeedOrigin(value, isProtected) {
   for (const key of [
     'url',
@@ -632,17 +627,9 @@ function nameSeedOrigin(value, isProtected) {
   return 'about:blank';
 }
 
-function frameNameHidden(value, isProtected) {
-  if (
-    ['url', 'securityOrigin', 'unreachableUrl', 'documentURL', 'baseURL'].some((key) =>
-      urlNamed(value[key], isProtected)
-    )
-  )
+function errorDocumentHidden(value, isProtected) {
+  if (['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(value[key], isProtected)))
     return true;
-  const origin = value.origin;
-  if (typeof origin === 'string' && origin !== '') {
-    if (urlNamed(origin, isProtected) || opaqueOrigin(origin)) return true;
-  }
   const url = typeof value.url === 'string' ? value.url : '';
   if (!url.startsWith('chrome-error:')) return false;
   const unreachable = value.unreachableUrl;
@@ -650,21 +637,184 @@ function frameNameHidden(value, isProtected) {
   return urlNamed(unreachable, isProtected);
 }
 
-function hideNameCarriers(out, value, isProtected) {
-  delete out.name;
+function documentUrlHidden(value, isProtected) {
+  return ['documentURL', 'baseURL'].some((key) => urlNamed(value[key], isProtected));
+}
+
+function isFrameShape(value) {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    typeof value.id === 'string' &&
+    (typeof value.loaderId === 'string' || typeof value.securityOrigin === 'string')
+  );
+}
+
+function isTargetInfoShape(value) {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    typeof value.targetId === 'string' &&
+    typeof value.type === 'string' &&
+    typeof value.url === 'string'
+  );
+}
+
+const FRAME_NAME_METHODS = new Set([
+  'Page.frameNavigated',
+  'Page.frameAttached',
+  'Page.frameRequestedNavigation',
+  'Page.frameStartedNavigating',
+  'Page.getFrameTree',
+  'Page.getResourceTree',
+]);
+
+const DOM_NAME_METHODS = new Set(['DOM.getDocument', 'DOM.describeNode', 'DOM.getFrameOwner']);
+
+function dropAttributeName(attributes) {
+  if (!Array.isArray(attributes)) return attributes;
+  const next = [];
+  for (let i = 0; i < attributes.length; i += 2) {
+    if (attributes[i] === 'name') continue;
+    next.push(attributes[i]);
+    if (i + 1 < attributes.length) next.push(attributes[i + 1]);
+  }
+  return next;
+}
+
+function scrubFramesDeep(value, isProtected) {
+  if (Array.isArray(value)) {
+    let out = value;
+    value.forEach((item, index) => {
+      const next = scrubFramesDeep(item, isProtected);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (value === null || typeof value !== 'object') return value;
+  let out = value;
+  for (const [key, item] of Object.entries(value)) {
+    if (item === null || typeof item !== 'object') continue;
+    const next = scrubFramesDeep(item, isProtected);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  if (isFrameShape(out) && errorDocumentHidden(out, isProtected)) {
+    if (out === value) out = { ...value };
+    delete out.name;
+    delete out.urlFragment;
+  }
+  return out;
+}
+
+function scrubTargetInfoDeep(value, isProtected) {
+  if (Array.isArray(value)) {
+    let out = value;
+    value.forEach((item, index) => {
+      const next = scrubTargetInfoDeep(item, isProtected);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (value === null || typeof value !== 'object') return value;
+  let out = value;
+  for (const [key, item] of Object.entries(value)) {
+    if (item === null || typeof item !== 'object') continue;
+    const next = scrubTargetInfoDeep(item, isProtected);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  if (isTargetInfoShape(out) && urlNamed(out.url, isProtected)) {
+    if (out === value) out = { ...value };
+    if (typeof out.title === 'string' && out.title !== '')
+      out.title = nameSeedOrigin(out, isProtected);
+  }
+  return out;
+}
+
+function scrubDomDocumentNames(value, isProtected) {
+  if (Array.isArray(value)) {
+    let out = value;
+    value.forEach((item, index) => {
+      const next = scrubDomDocumentNames(item, isProtected);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (value === null || typeof value !== 'object') return value;
+  let out = value;
+  for (const [key, item] of Object.entries(value)) {
+    if (item === null || typeof item !== 'object') continue;
+    const next = scrubDomDocumentNames(item, isProtected);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  if (documentUrlHidden(out, isProtected) && Array.isArray(out.attributes)) {
+    if (out === value) out = { ...value };
+    out.attributes = dropAttributeName(out.attributes);
+  }
+  return out;
+}
+
+function urlOrErrorPage(url, isProtected) {
+  return urlNamed(url, isProtected) || (typeof url === 'string' && url.startsWith('chrome-error:'));
+}
+
+function scrubWindowOpen(value, isProtected) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  const url = typeof value.url === 'string' ? value.url : '';
+  if (!urlOrErrorPage(url, isProtected)) return value;
+  const out = { ...value };
   delete out.windowName;
-  delete out.urlFragment;
-  if ('suggestedFilename' in out) out.suggestedFilename = '';
   if (typeof out.title === 'string' && out.title !== '')
     out.title = nameSeedOrigin(value, isProtected);
-  if (!Array.isArray(out.attributes)) return;
-  const next = [];
-  for (let i = 0; i < out.attributes.length; i += 2) {
-    if (out.attributes[i] === 'name') continue;
-    next.push(out.attributes[i]);
-    if (i + 1 < out.attributes.length) next.push(out.attributes[i + 1]);
-  }
-  out.attributes = next;
+  return out;
+}
+
+function scrubDownload(value, isProtected) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  const url = typeof value.url === 'string' ? value.url : '';
+  if (!urlOrErrorPage(url, isProtected)) return value;
+  return { ...value, suggestedFilename: '' };
+}
+
+function scrubExecutionContext(value, isProtected) {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    value.context === null ||
+    typeof value.context !== 'object'
+  )
+    return value;
+  const origin = value.context.origin;
+  if (typeof origin !== 'string' || origin === '' || !urlNamed(origin, isProtected)) return value;
+  const next = { ...value.context };
+  delete next.name;
+  return { ...value, context: next };
+}
+
+function scrubKnownNameShapes(value, isProtected, method) {
+  if (typeof method !== 'string' || method === '') return value;
+  if (FRAME_NAME_METHODS.has(method)) return scrubFramesDeep(value, isProtected);
+  if (method === 'Page.windowOpen') return scrubWindowOpen(value, isProtected);
+  if (method === 'Page.downloadWillBegin') return scrubDownload(value, isProtected);
+  if (DOM_NAME_METHODS.has(method)) return scrubDomDocumentNames(value, isProtected);
+  if (method.startsWith('Target.')) return scrubTargetInfoDeep(value, isProtected);
+  if (method === 'Runtime.executionContextCreated')
+    return scrubExecutionContext(value, isProtected);
+  return value;
 }
 
 function historyTitleMarked(title, isProtected) {
@@ -730,13 +880,13 @@ function redactKeys(source, isProtected) {
   return Object.fromEntries(keys.map((key, index) => [renamed[index], source[key]]));
 }
 
-export function redactProtected(value, isProtected, method) {
+function redactDeep(value, isProtected, method) {
   if (typeof value === 'string') return redactText(value, isProtected);
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     let out = value;
     value.forEach((item, index) => {
-      const next = redactProtected(item, isProtected, method);
+      const next = redactDeep(item, isProtected, method);
       if (next === item) return;
       if (out === value) out = [...value];
       out[index] = next;
@@ -748,20 +898,16 @@ export function redactProtected(value, isProtected, method) {
   let out = redactKeys(source, isProtected);
   const keyed = out;
   for (const [key, item] of Object.entries(keyed)) {
-    const next = redactProtected(item, isProtected, method);
+    const next = redactDeep(item, isProtected, method);
     if (next === item) continue;
     if (out === source || out === keyed) out = { ...keyed };
     out[key] = next;
   }
-  if (frameNameHidden(value, isProtected)) {
-    out = { ...out };
-    hideNameCarriers(out, value, isProtected);
-  }
-  if ('urlFragment' in value && URL_KEYS.some((k) => urlNamed(value[k], isProtected))) {
-    if (out === value) out = { ...value };
-    delete out.urlFragment;
-  }
   return out;
+}
+
+export function redactProtected(value, isProtected, method) {
+  return scrubKnownNameShapes(redactDeep(value, isProtected, method), isProtected, method);
 }
 
 export function headersNameProtected(headers, isProtected, base = '') {
