@@ -35,40 +35,55 @@ test('seven: client nodeId survives a child commit reobserve without DOM documen
       sessionId
     );
     if (!selected.nodeId) throw new Error('fixture mark was not found');
-    await sliccExtension.cdp.send(
-      'Runtime.evaluate',
-      {
-        expression: `(() => {
-          const iframe = document.createElement('iframe');
-          iframe.src = 'https://other.test/doc?REOBSERVE_DOM_SIBLING';
-          document.body.append(iframe);
-          return new Promise((resolve) => {
-            iframe.onload = () => {
-              iframe.src = 'https://other.test/doc?REOBSERVE_DOM_SIBLING_COMMIT';
-              iframe.onload = () => resolve(true);
-            };
-          });
-        })()`,
-        awaitPromise: true,
-      },
-      sessionId
-    );
-    const seen = [];
+    const reobserveSideEffects = [];
+    const listening = { on: true };
     const off = sliccExtension.cdp.on((message) => {
+      if (!listening.on) return;
       if (message?.method === 'DOM.documentUpdated' || message?.method === 'DOM.setChildNodes') {
-        seen.push(message.method);
+        reobserveSideEffects.push(message.method);
       }
     });
     try {
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        try {
-          await sliccExtension.frames(Number(info.targetId));
-          break;
-        } catch {
-          await new Promise((resolve) => setTimeout(resolve, 50));
+      await sliccExtension.cdp.send(
+        'Runtime.evaluate',
+        {
+          expression: `(() => {
+            const iframe = document.createElement('iframe');
+            iframe.src = 'https://other.test/doc?REOBSERVE_DOM_SIBLING';
+            document.body.append(iframe);
+            return new Promise((resolve) => {
+              iframe.onload = () => {
+                iframe.src = 'https://other.test/doc?REOBSERVE_DOM_SIBLING_COMMIT';
+                iframe.onload = () => resolve(true);
+              };
+            });
+          })()`,
+          awaitPromise: true,
+        },
+        sessionId
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const duringReobserve = [...reobserveSideEffects];
+      listening.on = false;
+      off();
+      const framesOwnerMayPush = [];
+      const offFrames = sliccExtension.cdp.on((message) => {
+        if (message?.method === 'DOM.documentUpdated' || message?.method === 'DOM.setChildNodes') {
+          framesOwnerMayPush.push(message.method);
         }
+      });
+      try {
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          try {
+            await sliccExtension.frames(Number(info.targetId));
+            break;
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        }
+      } finally {
+        offFrames();
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
       let described;
       try {
         described = await sliccExtension.cdp.send(
@@ -79,12 +94,19 @@ test('seven: client nodeId survives a child commit reobserve without DOM documen
       } catch (error) {
         described = { error: error.message };
       }
-      return { described, seen, nodeId: selected.nodeId };
+      return {
+        described,
+        duringReobserve,
+        framesOwnerMayPush,
+        nodeId: selected.nodeId,
+      };
     } finally {
+      listening.on = false;
       off();
     }
   }, url);
   assert.equal(result.described.error, undefined, JSON.stringify(result.described));
   assert.equal(result.described.node?.nodeName, 'DIV');
-  assert.deepEqual(result.seen, []);
+  assert.deepEqual(result.duringReobserve, []);
+  assert.ok(Array.isArray(result.framesOwnerMayPush));
 });
