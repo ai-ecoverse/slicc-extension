@@ -7,7 +7,12 @@ const ordinary = 'https://ordinary.test/recovered';
 const protectedUrl = 'https://vault.sliccy.ai/blocked';
 const errorPage = 'chrome-error://chromewebdata/';
 const resultMarker = 'private-result-marker';
-const frame = (url) => ({ id: 'ROOT', url, securityOrigin: new URL(url).origin });
+const frame = (url) => ({
+  id: 'ROOT',
+  loaderId: 'L1',
+  url,
+  securityOrigin: new URL(url).origin,
+});
 const tree = (url) => ({ frameTree: { frame: frame(url) } });
 const event = () => ({ addListener() {}, removeListener() {} });
 const bundled = await build({
