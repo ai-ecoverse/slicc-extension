@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { listen } from '../../extension/cdp.js';
+import { protectedOrigins } from '../../extension/protected.mjs';
+import { protectedRules } from '../../extension/protected-rules.js';
+import { redactProtected, strictGuard, urlProtected } from '../../extension/shield.js';
 
 const ERROR_PAGE = 'chrome-error://chromewebdata/';
 const failed = 'https://vault.sliccy.ai/controller/FAKEATTACH?q=FAKEATTACH';
@@ -23,6 +26,9 @@ globalThis.chrome = {
   runtime: { id: 'fx' },
 };
 
+const guard = strictGuard(protectedOrigins(protectedRules), protectedRules);
+const anyProtected = (text, options) => urlProtected(guard, text, options);
+
 const bundled = await build({
   entryPoints: ['six/extension/bridge-sw.ts'],
   bundle: true,
@@ -33,6 +39,17 @@ const bundled = await build({
 });
 const six = await import(
   `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`
+);
+const shieldBundle = await build({
+  entryPoints: ['six/extension/cdp-shield.ts'],
+  bundle: true,
+  write: false,
+  format: 'esm',
+  platform: 'node',
+  define: { __SLICC_EXT_DEV__: 'false' },
+});
+const sixShield = await import(
+  `data:text/javascript;base64,${Buffer.from(shieldBundle.outputFiles[0].text).toString('base64')}`
 );
 
 function errorTree(unreachable, opts = {}) {
@@ -847,3 +864,214 @@ test('six-bridge: owner abort tears down even when a live session still uses the
   for (const f of listeners.disc) f();
   six.__clearTabShieldsForTest();
 });
+
+const host = 'vault.sliccy.ai';
+const origin = 'https://vault.sliccy.ai';
+
+for (const transport of ['seven', 'six-bridge']) {
+  const redact =
+    transport === 'seven'
+      ? (value, method) => redactProtected(value, anyProtected, method)
+      : (value, method) => sixShield.redactProtected(value, method);
+
+  test(`${transport}: windowName and sibling name carriers omit on protected or unproven`, () => {
+    const opened = redact(
+      { url: failed, windowName: host, windowFeatures: 'noopener' },
+      'Page.windowOpen'
+    );
+    assert.equal(opened.windowName, undefined);
+    assert.equal(opened.url, origin);
+    assert.equal(opened.windowFeatures, 'noopener');
+    const openedOrdinary = redact(
+      { url: ordinary, windowName: 'app', windowFeatures: 'noopener' },
+      'Page.windowOpen'
+    );
+    assert.equal(openedOrdinary.windowName, 'app');
+    const openedUnproven = redact(
+      { url: ERROR_PAGE, windowName: host, windowFeatures: '', title: host },
+      'Page.windowOpen'
+    );
+    assert.equal(openedUnproven.windowName, undefined);
+    assert.equal(openedUnproven.title, 'about:blank');
+    const resource = redact(
+      {
+        frameTree: {
+          frame: {
+            id: 'ROOT',
+            url: ERROR_PAGE,
+            securityOrigin: '://',
+            unreachableUrl: failed,
+            name: host,
+          },
+          childFrames: [
+            { frame: { id: 'CHILD', url: failed, securityOrigin: origin, name: host } },
+          ],
+        },
+      },
+      'Page.getResourceTree'
+    );
+    assert.equal(resource.frameTree.frame.name, undefined);
+    assert.equal(resource.frameTree.childFrames[0].frame.name, undefined);
+    const resourceOrdinary = redact(
+      {
+        frameTree: {
+          frame: {
+            id: 'ROOT',
+            url: ordinary,
+            securityOrigin: 'https://ordinary.test',
+            name: 'main',
+          },
+          childFrames: [
+            {
+              frame: {
+                id: 'CHILD',
+                url: `${ordinary}/i`,
+                securityOrigin: 'https://ordinary.test',
+                name: 'child',
+              },
+            },
+          ],
+        },
+      },
+      'Page.getResourceTree'
+    );
+    assert.equal(resourceOrdinary.frameTree.frame.name, 'main');
+    assert.equal(resourceOrdinary.frameTree.childFrames[0].frame.name, 'child');
+    const context = redact(
+      {
+        context: {
+          id: 1,
+          origin: '://',
+          name: host,
+          auxData: { isDefault: true, frameId: 'ROOT', type: 'default' },
+        },
+      },
+      'Runtime.executionContextCreated'
+    );
+    assert.equal(context.context.name, undefined);
+    assert.equal(context.context.auxData.frameId, 'ROOT');
+    assert.equal(
+      redact(
+        {
+          context: {
+            id: 2,
+            origin: 'https://ordinary.test',
+            name: 'world',
+            auxData: { isDefault: true, frameId: 'ROOT' },
+          },
+        },
+        'Runtime.executionContextCreated'
+      ).context.name,
+      'world'
+    );
+    const download = redact(
+      { frameId: 'ROOT', guid: 'g', url: failed, suggestedFilename: `${host}.bin` },
+      'Page.downloadWillBegin'
+    );
+    assert.equal(download.suggestedFilename, '');
+    assert.equal(download.url, origin);
+    assert.equal(
+      redact(
+        { frameId: 'ROOT', guid: 'g', url: ordinary, suggestedFilename: 'report.pdf' },
+        'Page.downloadWillBegin'
+      ).suggestedFilename,
+      'report.pdf'
+    );
+    const node = redact(
+      {
+        node: {
+          nodeId: 1,
+          localName: 'iframe',
+          attributes: ['name', host, 'src', failed],
+          documentURL: failed,
+          baseURL: failed,
+          frameId: 'CHILD',
+        },
+      },
+      'DOM.describeNode'
+    );
+    assert.deepEqual(node.node.attributes, ['src', origin]);
+    assert.deepEqual(
+      redact(
+        {
+          node: {
+            nodeId: 2,
+            attributes: ['name', 'panel', 'src', ordinary],
+            documentURL: ordinary,
+            baseURL: ordinary,
+          },
+        },
+        'DOM.describeNode'
+      ).node.attributes,
+      ['name', 'panel', 'src', ordinary]
+    );
+    const target = redact(
+      { targetInfo: { targetId: '1', type: 'page', title: host, url: failed, attached: true } },
+      'Target.targetInfoChanged'
+    );
+    assert.equal(target.targetInfo.title, origin);
+    assert.equal(target.targetInfo.url, origin);
+    assert.equal(
+      redact({ url: failed, message: 'alert', type: 'alert' }, 'Page.javascriptDialogOpening').url,
+      origin
+    );
+    assert.equal(
+      redact(
+        { entry: { source: 'network', level: 'error', text: 'fail', url: failed } },
+        'Log.entryAdded'
+      ).entry.url,
+      origin
+    );
+    const network = redact(
+      {
+        requestId: '1',
+        documentURL: failed,
+        request: { url: `${failed}/doc`, method: 'GET' },
+        type: 'Document',
+      },
+      'Network.requestWillBeSent'
+    );
+    assert.equal(network.documentURL, origin);
+    assert.equal(network.request.url, origin);
+    for (const method of [
+      'Page.frameNavigated',
+      'Page.frameAttached',
+      'Page.frameStartedLoading',
+      'Page.frameRequestedNavigation',
+      'Page.frameStartedNavigating',
+    ]) {
+      const params =
+        method === 'Page.frameNavigated' || method === 'Page.frameAttached'
+          ? {
+              frame: {
+                id: 'ROOT',
+                url: ERROR_PAGE,
+                securityOrigin: '://',
+                unreachableUrl: failed,
+                name: host,
+              },
+            }
+          : { frameId: 'ROOT', url: failed, name: host };
+      const scrubbed = redact(params, method);
+      if (scrubbed.frame) assert.equal(scrubbed.frame.name, undefined);
+      else assert.equal(scrubbed.name, undefined);
+    }
+    const mutated = {
+      frame: {
+        id: 'ROOT',
+        url: ERROR_PAGE,
+        securityOrigin: '://',
+        unreachableUrl: failed,
+        name: 'Missing page',
+      },
+    };
+    assert.equal(redact(mutated, 'Page.frameNavigated').frame.name, undefined);
+    mutated.frame.unreachableUrl = ordinaryFailed;
+    assert.equal(redact(mutated, 'Page.frameNavigated').frame.name, 'Missing page');
+    const openMutated = { url: failed, windowName: host, windowFeatures: 'noopener' };
+    assert.equal(redact(openMutated, 'Page.windowOpen').windowName, undefined);
+    openMutated.url = ordinary;
+    openMutated.windowName = 'app';
+    assert.equal(redact(openMutated, 'Page.windowOpen').windowName, 'app');
+  });
+}

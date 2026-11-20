@@ -608,14 +608,63 @@ function urlNamed(text, isProtected) {
   return typeof text === 'string' && text !== '' && isProtected(text);
 }
 
+function opaqueOrigin(text) {
+  return text === 'null' || text === '://' || text === ':///';
+}
+
+function nameSeedOrigin(value, isProtected) {
+  for (const key of [
+    'url',
+    'unreachableUrl',
+    'documentURL',
+    'baseURL',
+    'userTypedURL',
+    'origin',
+    'securityOrigin',
+  ]) {
+    const text = value[key];
+    if (typeof text !== 'string' || text === '' || !urlNamed(text, isProtected)) continue;
+    try {
+      const parsed = new URL(text);
+      if (parsed.origin !== 'null') return parsed.origin;
+    } catch {}
+  }
+  return 'about:blank';
+}
+
 function frameNameHidden(value, isProtected) {
-  if (['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(value[key], isProtected)))
+  if (
+    ['url', 'securityOrigin', 'unreachableUrl', 'documentURL', 'baseURL'].some((key) =>
+      urlNamed(value[key], isProtected)
+    )
+  )
     return true;
+  const origin = value.origin;
+  if (typeof origin === 'string' && origin !== '') {
+    if (urlNamed(origin, isProtected) || opaqueOrigin(origin)) return true;
+  }
   const url = typeof value.url === 'string' ? value.url : '';
   if (!url.startsWith('chrome-error:')) return false;
   const unreachable = value.unreachableUrl;
   if (typeof unreachable !== 'string' || unreachable === '') return true;
   return urlNamed(unreachable, isProtected);
+}
+
+function hideNameCarriers(out, value, isProtected) {
+  delete out.name;
+  delete out.windowName;
+  delete out.urlFragment;
+  if ('suggestedFilename' in out) out.suggestedFilename = '';
+  if (typeof out.title === 'string' && out.title !== '')
+    out.title = nameSeedOrigin(value, isProtected);
+  if (!Array.isArray(out.attributes)) return;
+  const next = [];
+  for (let i = 0; i < out.attributes.length; i += 2) {
+    if (out.attributes[i] === 'name') continue;
+    next.push(out.attributes[i]);
+    if (i + 1 < out.attributes.length) next.push(out.attributes[i + 1]);
+  }
+  out.attributes = next;
 }
 
 function historyTitleMarked(title, isProtected) {
@@ -706,8 +755,7 @@ export function redactProtected(value, isProtected, method) {
   }
   if (frameNameHidden(value, isProtected)) {
     out = { ...out };
-    delete out.name;
-    delete out.urlFragment;
+    hideNameCarriers(out, value, isProtected);
   }
   if ('urlFragment' in value && URL_KEYS.some((k) => urlNamed(value[k], isProtected))) {
     if (out === value) out = { ...value };

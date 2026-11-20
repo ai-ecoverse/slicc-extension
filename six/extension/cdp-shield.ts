@@ -1130,8 +1130,7 @@ export function redactProtected<T>(value: T, method?: string): T {
   }
   if (frameNameHidden(original)) {
     out = { ...out };
-    delete out['name'];
-    delete out['urlFragment'];
+    hideNameCarriers(out, original);
   }
   if ('urlFragment' in original && URL_KEYS.some((k) => urlNamed(original[k]))) {
     if (out === original) out = { ...original };
@@ -1345,13 +1344,63 @@ export function redacted(info: CDPPayload): CDPPayload {
   return { ...info, url: origin, title: origin };
 }
 
+function opaqueOrigin(text: string): boolean {
+  return text === 'null' || text === '://' || text === ':///';
+}
+
+function nameSeedOrigin(value: Record<string, unknown>): string {
+  for (const key of [
+    'url',
+    'unreachableUrl',
+    'documentURL',
+    'baseURL',
+    'userTypedURL',
+    'origin',
+    'securityOrigin',
+  ]) {
+    const text = str(value[key]);
+    if (!text || !urlNamed(text)) continue;
+    try {
+      const parsed = new URL(text);
+      if (parsed.origin !== 'null') return parsed.origin;
+    } catch {}
+  }
+  return 'about:blank';
+}
+
 function frameNameHidden(value: Record<string, unknown>): boolean {
-  if (['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(value[key]))) return true;
+  if (
+    ['url', 'securityOrigin', 'unreachableUrl', 'documentURL', 'baseURL'].some((key) =>
+      urlNamed(value[key])
+    )
+  )
+    return true;
+  const origin = str(value['origin']);
+  if (origin) {
+    if (urlNamed(origin) || opaqueOrigin(origin)) return true;
+  }
   const url = str(value['url']) ?? '';
   if (!url.startsWith('chrome-error:')) return false;
   const unreachable = value['unreachableUrl'];
   if (typeof unreachable !== 'string' || unreachable === '') return true;
   return urlNamed(unreachable);
+}
+
+function hideNameCarriers(out: Record<string, unknown>, value: Record<string, unknown>): void {
+  delete out['name'];
+  delete out['windowName'];
+  delete out['urlFragment'];
+  if ('suggestedFilename' in out) out['suggestedFilename'] = '';
+  if (typeof out['title'] === 'string' && out['title'] !== '') out['title'] = nameSeedOrigin(value);
+  const attributes = out['attributes'];
+  if (!Array.isArray(attributes)) return;
+  const next: unknown[] = [];
+  for (let i = 0; i < attributes.length; i += 2) {
+    if (attributes[i] === 'name') continue;
+    next.push(attributes[i]);
+    if (i + 1 < attributes.length) next.push(attributes[i + 1]);
+  }
+  out['attributes'] = next;
 }
 
 function historyTitleMarked(title: string): boolean {
