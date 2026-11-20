@@ -141,22 +141,31 @@ export class DebuggerGate {
   }
 
   knownChildren(tab) {
+    return this.knownChildrenWhy(tab) === undefined;
+  }
+
+  knownChildrenWhy(tab) {
     const c = this.connection;
-    return [...tab.debuggerChildren].every((id) => {
+    const kids = [...tab.debuggerChildren];
+    if (!kids.length) return undefined;
+    for (const id of kids) {
       const info = tab.debuggerChildInfo?.get(id);
-      return Boolean(
-        info &&
-          typeof info.target === 'string' &&
-          info.target &&
-          info.generation === tab.documents.frames.get(tab.mainFrameId)?.loaderId &&
-          info.revision === tab.debuggerRevision &&
-          (info.type === 'iframe' || info.type === 'worker') &&
-          typeof info.url === 'string' &&
-          /^https?:\/\//.test(info.url) &&
-          URL.canParse(info.url) &&
-          !c.protectedOrigin(info.url)
-      );
-    });
+      if (!info) return 'knownChildren:missing-info';
+      if (typeof info.target !== 'string' || !info.target) return 'knownChildren:bad-target';
+      if (info.generation !== tab.documents.frames.get(tab.mainFrameId)?.loaderId)
+        return 'knownChildren:generation';
+      if (info.revision !== tab.debuggerRevision) return 'knownChildren:revision';
+      if (info.type !== 'iframe' && info.type !== 'worker')
+        return `knownChildren:type:${String(info.type)}`;
+      if (typeof info.url !== 'string') return 'knownChildren:url-not-string';
+      if (!/^https?:\/\//.test(info.url)) {
+        const scheme = String(info.url).split(':')[0] || 'empty';
+        return `knownChildren:url-scheme:${scheme}`;
+      }
+      if (!URL.canParse(info.url)) return 'knownChildren:url-unparseable';
+      if (c.protectedOrigin(info.url)) return 'knownChildren:protected';
+    }
+    return undefined;
   }
 
   childrenPlaced(tabId, frameEvents) {

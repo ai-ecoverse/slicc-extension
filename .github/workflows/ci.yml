@@ -86,6 +86,7 @@ jobs:
         test/integration/upgrade.test.mjs
         test/integration/url-forms.test.mjs
         test/integration/worlds.test.mjs
+        test/integration/frame-list-diagnostic.test.mjs
       review-prompt: |
         SLICC-EXTENSION
 

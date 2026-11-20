@@ -492,86 +492,158 @@ class Connection {
       )
     )
       throw new FrameWitnessMoved(protectedRules.refusal);
-    throw new Error('slicc: refused: unsettled frame list');
-  }
-
-  async frames(tabId, { errors = false } = {}) {
-    const tab = this.tabState(tabId);
-    const refuse = () => {
-      throw new Error('slicc: refused: unsettled frame list');
-    };
-    if (this.closed || !Number.isSafeInteger(tabId) || !tab) refuse();
-    const revision = tab.frameEvents;
-    const debuggerRevision = tab.debuggerRevision;
-    const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
-    const children = this.debuggerGate.childKey(tab);
-    const [frames, tree, remoteOwners, childTrees] = await bounded(
-      (async () => {
-        if (!generation || !this.debuggerGate.knownChildren(tab)) refuse();
-        const entries = [...tab.debuggerChildInfo.values()].filter(
-          (info) => info.type === 'iframe'
-        );
-        const targets = new Set(entries.map((info) => info.target));
-        if (
-          targets.size !== entries.length ||
-          tab.debuggerChildInfo.size !== tab.debuggerChildren.size
-        )
-          refuse();
-        const [native, page, owners] = await Promise.all([
-          this.api.webNavigation?.getAllFrames?.({ tabId }),
-          this.send(tabId, 'Page.getFrameTree', {}),
-          Promise.all(
-            entries.map(async (info) => {
-              const owner = await this.send(tabId, 'DOM.getFrameOwner', { frameId: info.target });
-              if (!Number.isSafeInteger(owner?.backendNodeId) || owner.backendNodeId <= 0) refuse();
-              return { frameId: info.target, backendNodeId: owner.backendNodeId };
-            })
-          ),
-        ]);
-        if (new Set(owners.map((owner) => owner.backendNodeId)).size !== owners.length) refuse();
-        return [native, page, owners, await this.childTrees(tabId, tab, native, errors)];
-      })(),
-      2000,
-      'frame list'
-    ).catch(refuse);
+    const why = [];
+    if (tab.worlds.foreign) why.push('foreign');
+    if (tab.pendingFrames.size) why.push(`pendingFrames:${tab.pendingFrames.size}`);
+    if (tab.debuggerFrameBlocks?.size)
+      why.push(`debuggerFrameBlocks:${tab.debuggerFrameBlocks.size}`);
+    const known = this.debuggerGate.knownChildrenWhy(tab);
+    if (known) why.push(known);
+    if (this.debuggerGate.unplaced(tab)) why.push('unplaced');
+    if ([...tab.documents.frames.values()].some((entry) => this.debuggerGate.frameBlocked(entry)))
+      why.push('frameBlocked');
     if (
-      this.closed ||
-      this.tabState(tabId) !== tab ||
-      tab.debuggerRevision !== debuggerRevision ||
-      tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation ||
-      this.debuggerGate.childKey(tab) !== children ||
-      !Array.isArray(frames) ||
-      !frames.length
-    )
-      refuse();
-    const ids = new Set(frames.map((frame) => frame?.frameId));
-    const root = frames.find((frame) => frame?.frameId === 0);
-    if (
-      ids.size !== frames.length ||
-      root?.parentFrameId !== -1 ||
-      !root.documentId ||
-      frames.some(
-        (frame) =>
-          !Number.isSafeInteger(frame.frameId) ||
-          typeof frame.documentId !== 'string' ||
-          !frame.documentId ||
-          typeof frame.url !== 'string' ||
-          !frame.url ||
-          nativeFailed(frame, errors) ||
-          (frame.documentLifecycle !== undefined && frame.documentLifecycle !== 'active')
+      !frames.every(
+        (entry) =>
+          /^https?:\/\//.test(entry.url) &&
+          URL.canParse(entry.url) &&
+          !this.protectedOrigin(entry.url)
       )
     )
-      refuse();
+      why.push('witness-native-url');
+    throw new Error(`slicc: frame-diag: witness:${why.join(',') || 'moved'}`);
+  }
+
+  frameDiagSnapshot(tab, phases, extra = {}) {
+    const children = [...(tab?.debuggerChildInfo ?? [])].map(([sessionId, info]) => ({
+      sessionId: String(sessionId).slice(0, 12),
+      target: String(info?.target ?? '').slice(0, 12),
+      type: info?.type,
+      scheme: typeof info?.url === 'string' ? info.url.split(':')[0] : typeof info?.url,
+      resumed: info?.resumed === true,
+      waiting: info?.waiting === true,
+      resumeMs: info?.resumeMs,
+      resumeError: info?.resumeError,
+    }));
+    return {
+      ...extra,
+      phases,
+      known: this.debuggerGate.knownChildrenWhy(tab) ?? 'ok',
+      debuggerRevision: tab?.debuggerRevision,
+      childCount: tab?.debuggerChildren?.size,
+      children,
+    };
+  }
+
+  frameDiagRefuse(reason, diag) {
+    const payload = diag ? `${reason} FRAME_DIAG_JSON:${JSON.stringify(diag)}` : reason;
+    throw new Error(`slicc: frame-diag: ${payload}`);
+  }
+
+  async loadFrameInventory(tabId, tab, generation, errors, refuse) {
+    const phases = {};
+    const timed = (name, promise) => {
+      const started = Date.now();
+      return promise.then(
+        (value) => {
+          phases[name] = { ms: Date.now() - started, ok: true };
+          return value;
+        },
+        (error) => {
+          phases[name] = {
+            ms: Date.now() - started,
+            ok: false,
+            error: String(error?.message ?? error).slice(0, 80),
+          };
+          throw error;
+        }
+      );
+    };
+    const snap = (extra) => this.frameDiagSnapshot(tab, phases, extra);
+    if (!generation) refuse('no-generation', snap());
+    const known = this.debuggerGate.knownChildrenWhy(tab);
+    if (known) refuse(known, snap());
+    const entries = [...tab.debuggerChildInfo.entries()].filter(
+      ([, info]) => info.type === 'iframe'
+    );
+    const targets = new Set(entries.map(([, info]) => info.target));
+    if (targets.size !== entries.length) refuse('iframe-target-dup', snap());
+    if (tab.debuggerChildInfo.size !== tab.debuggerChildren.size)
+      refuse('childInfo-size-mismatch', snap());
+    try {
+      const [native, page, owners] = await Promise.all([
+        timed('native', this.api.webNavigation?.getAllFrames?.({ tabId })),
+        timed('pageTree', this.send(tabId, 'Page.getFrameTree', {})),
+        timed(
+          'owners',
+          Promise.all(
+            entries.map(async ([, info]) => {
+              const owner = await this.send(tabId, 'DOM.getFrameOwner', { frameId: info.target });
+              if (!Number.isSafeInteger(owner?.backendNodeId) || owner.backendNodeId <= 0)
+                refuse('frame-owner', snap({ ownerTarget: String(info.target).slice(0, 12) }));
+              return { frameId: info.target, backendNodeId: owner.backendNodeId };
+            })
+          )
+        ),
+      ]);
+      if (new Set(owners.map((owner) => owner.backendNodeId)).size !== owners.length)
+        refuse('owner-backend-dup', snap());
+      const childTrees = await this.childTrees(tabId, tab, native, errors, phases, timed);
+      this._frameDiag = snap({ inventoryOk: true });
+      return [native, page, owners, childTrees];
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      if (message.startsWith('slicc: frame-diag:')) throw error;
+      refuse(`inventory:${message.slice(0, 80)}`, snap());
+    }
+  }
+
+  assertFrameSnapshotStable(tabId, tab, debuggerRevision, generation, children, refuse) {
+    if (this.closed) refuse('closed-after');
+    if (this.tabState(tabId) !== tab) refuse('tab-replaced');
+    if (tab.debuggerRevision !== debuggerRevision) refuse('debuggerRevision-churn');
+    if (tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation)
+      refuse('generation-churn');
+    if (this.debuggerGate.childKey(tab) !== children) refuse('childKey-churn');
+  }
+
+  assertNativeFrameList(frames, errors, refuse) {
+    if (!Array.isArray(frames) || !frames.length) refuse('native-frames-empty');
+    const ids = new Set(frames.map((frame) => frame?.frameId));
+    const root = frames.find((frame) => frame?.frameId === 0);
+    if (ids.size !== frames.length) refuse('native-id-dup');
+    if (root?.parentFrameId !== -1) refuse('native-root-parent');
+    if (!root.documentId) refuse('native-root-documentId');
+    const badNative = frames.find(
+      (frame) =>
+        !Number.isSafeInteger(frame.frameId) ||
+        typeof frame.documentId !== 'string' ||
+        !frame.documentId ||
+        typeof frame.url !== 'string' ||
+        !frame.url ||
+        nativeFailed(frame, errors) ||
+        (frame.documentLifecycle !== undefined && frame.documentLifecycle !== 'active')
+    );
+    if (badNative) {
+      if (nativeFailed(badNative, errors)) refuse('nativeFailed-root');
+      if (badNative.documentLifecycle !== undefined && badNative.documentLifecycle !== 'active')
+        refuse(`native-lifecycle:${badNative.documentLifecycle}`);
+      refuse('native-frame-shape');
+    }
     for (const frame of frames) {
       const seen = new Set();
       let current = frame;
       while (current.frameId !== 0) {
-        if (seen.has(current.frameId)) refuse();
+        if (seen.has(current.frameId)) refuse('native-parent-cycle');
         seen.add(current.frameId);
         current = frames.find((candidate) => candidate.frameId === current.parentFrameId);
-        if (!current) refuse();
+        if (!current) refuse('native-parent-missing');
       }
     }
+    return root;
+  }
+
+  assertPageTreeCounts(tab, tree, generation, frames, remoteOwners, refuse) {
     const frame = tree?.frameTree?.frame;
     if (
       typeof frame?.id !== 'string' ||
@@ -581,7 +653,7 @@ class Connection {
       frame.id !== tab.mainFrameId ||
       frame.loaderId !== generation
     )
-      refuse();
+      refuse('page-tree-root');
     const localFrames = [];
     const pending = [tree.frameTree];
     while (pending.length) {
@@ -593,16 +665,53 @@ class Connection {
         !entry.frame.loaderId ||
         (entry.childFrames !== undefined && !Array.isArray(entry.childFrames))
       )
-        refuse();
+        refuse('page-tree-shape');
       localFrames.push(entry.frame.id);
       pending.push(...(entry.childFrames ?? []));
     }
-    if (
-      new Set(localFrames).size !== localFrames.length ||
-      remoteOwners.some((owner) => localFrames.includes(owner.frameId)) ||
-      localFrames.length + remoteOwners.length !== frames.length
-    )
-      refuse();
+    if (new Set(localFrames).size !== localFrames.length) refuse('local-dup');
+    if (remoteOwners.some((owner) => localFrames.includes(owner.frameId)))
+      refuse('remote-in-local');
+    if (localFrames.length + remoteOwners.length !== frames.length)
+      refuse(
+        `count-mismatch:local=${localFrames.length}+remote=${remoteOwners.length}!=native=${frames.length}`
+      );
+    return { frame, localFrames };
+  }
+
+  async frames(tabId, { errors = false } = {}) {
+    const tab = this.tabState(tabId);
+    const started = Date.now();
+    const refuse = (reason, diag) =>
+      this.frameDiagRefuse(reason, {
+        ...(diag || this.frameDiagSnapshot(tab, {})),
+        elapsed: Date.now() - started,
+        debuggerRevisionAtStart: tab?.debuggerRevision,
+      });
+    if (this.closed || !Number.isSafeInteger(tabId) || !tab) refuse('closed-or-missing-tab');
+    const revision = tab.frameEvents;
+    const debuggerRevision = tab.debuggerRevision;
+    const generation = tab.documents.frames.get(tab.mainFrameId)?.loaderId;
+    const children = this.debuggerGate.childKey(tab);
+    const [frames, tree, remoteOwners, childTrees] = await bounded(
+      this.loadFrameInventory(tabId, tab, generation, errors, refuse),
+      2000,
+      'frame list'
+    ).catch((error) => {
+      const message = String(error?.message ?? error);
+      if (message.startsWith('slicc: frame-diag:')) throw error;
+      refuse(`bounded:${message.slice(0, 80)}`, this._frameDiag || this.frameDiagSnapshot(tab, {}));
+    });
+    this.assertFrameSnapshotStable(tabId, tab, debuggerRevision, generation, children, refuse);
+    const root = this.assertNativeFrameList(frames, errors, refuse);
+    const { frame, localFrames } = this.assertPageTreeCounts(
+      tab,
+      tree,
+      generation,
+      frames,
+      remoteOwners,
+      refuse
+    );
     this.checkFrameWitness(tab, frames, revision);
     return {
       ...this.errorTaint(errors, frames, tree.frameTree, childTrees, refuse),
@@ -617,21 +726,30 @@ class Connection {
     };
   }
 
-  childTrees(tabId, tab, native, errors) {
+  childTrees(tabId, tab, native, errors, phases = {}, timed = (name, promise) => promise) {
     if (!errors || !Array.isArray(native) || !native.some((entry) => erroredFrame(entry ?? {})))
       return [];
     return Promise.all(
       [...tab.debuggerChildInfo]
         .filter(([, info]) => info.type === 'iframe')
-        .map(([sessionId, info]) =>
-          this.inflight(
-            tabId,
-            this.api.debugger.sendCommand({ tabId, sessionId }, 'Page.getFrameTree', {})
-          ).then(
-            (result) => ({ target: info.target, tree: result?.frameTree }),
-            () => ({ target: info.target })
-          )
-        )
+        .map(([sessionId, info]) => {
+          const scheme = typeof info.url === 'string' ? info.url.split(':')[0] : 'none';
+          const name = `childTree:${scheme}:resumed=${info.resumed === true}:waiting=${info.waiting === true}`;
+          return timed(
+            name,
+            this.inflight(
+              tabId,
+              this.api.debugger.sendCommand({ tabId, sessionId }, 'Page.getFrameTree', {})
+            ).then(
+              (result) => ({ target: info.target, tree: result?.frameTree, sessionId }),
+              (error) => ({
+                target: info.target,
+                sessionId,
+                treeError: String(error?.message ?? error).slice(0, 80),
+              })
+            )
+          );
+        })
     );
   }
 
@@ -660,7 +778,9 @@ class Connection {
         taint = true;
       if (tree) collect(tree);
     }
-    if (pages.length !== frames.filter((frame) => erroredFrame(frame)).length) refuse();
+    const errored = frames.filter((frame) => erroredFrame(frame)).length;
+    if (pages.length !== errored)
+      refuse(`errorTaint-count:pages=${pages.length}:errored=${errored}:taint=${taint}`);
     return {
       errorTaint: taint || pages.some((page) => errorUrlProtected(guard, page.unreachableUrl)),
     };
@@ -2458,12 +2578,17 @@ class Connection {
     }
     if (method === 'Target.attachedToTarget' || method === 'Target.targetInfoChanged') {
       tab?.debuggerChildren.add(child);
+      const prior = tab?.debuggerChildInfo.get(child);
       tab?.debuggerChildInfo.set(child, {
         target: p.targetInfo?.targetId,
         type: p.targetInfo?.type,
         url: p.targetInfo?.url,
         generation: tab.documents.frames.get(tab.mainFrameId)?.loaderId,
         revision: tab.debuggerRevision,
+        resumed: prior?.resumed === true,
+        resumeMs: prior?.resumeMs,
+        resumeError: prior?.resumeError,
+        waiting: method === 'Target.attachedToTarget' ? true : prior?.waiting === true,
       });
       this.debuggerGate.revoke(tabId);
     }
@@ -2478,9 +2603,24 @@ class Connection {
       }
       const sessionId = textOf(p.sessionId);
       if (!sessionId) return;
+      const started = Date.now();
       void this.api.debugger
         .sendCommand({ tabId, sessionId }, 'Runtime.runIfWaitingForDebugger', {})
-        .catch(() => undefined);
+        .then(
+          () => {
+            const info = tab?.debuggerChildInfo.get(sessionId);
+            if (!info) return;
+            info.resumed = true;
+            info.waiting = false;
+            info.resumeMs = Date.now() - started;
+          },
+          (error) => {
+            const info = tab?.debuggerChildInfo.get(sessionId);
+            if (!info) return;
+            info.resumeError = String(error?.message ?? error).slice(0, 80);
+            info.waiting = false;
+          }
+        );
       return;
     }
     if (method === 'Target.targetInfoChanged' && hidden) {
@@ -2946,10 +3086,17 @@ class Connection {
         .then(
           (result) =>
             this.port.postMessage({ privateFrames: { id, result: this.frameReply(result) } }),
-          () =>
+          (error) => {
+            const message = String(error?.message ?? error);
             this.port.postMessage({
-              privateFrames: { id, error: 'slicc: refused: unsettled frame list' },
-            })
+              privateFrames: {
+                id,
+                error: message.startsWith('slicc: frame-diag:')
+                  ? message
+                  : 'slicc: refused: unsettled frame list',
+              },
+            });
+          }
         )
         .catch(() => undefined);
       this.pending = Promise.all([this.pending, task]).then(() => undefined);
