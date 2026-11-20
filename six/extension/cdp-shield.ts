@@ -1973,6 +1973,19 @@ export class TabShield {
     return true;
   }
 
+  async stabilizeInventoriedRoot(judged: {
+    frameId: string;
+    loaderId: string;
+    unreachableUrl: string;
+  }): Promise<{ frameId: string; loaderId: string; unreachableUrl: string }> {
+    let current = judged;
+    for (let attempt = 0; ; attempt++) {
+      if (await this.sameInventoriedRoot(current)) return current;
+      if (attempt === 3) refuse(PROTECTED_RULES.refusal);
+      current = await this.inventoryFrames();
+    }
+  }
+
   private async inventoryNode(
     node: unknown,
     parentId: string,

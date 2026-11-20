@@ -1137,15 +1137,10 @@ async function cdpAttachToTarget(
     throw err;
   }
   const shield = tabShields.get(tabId);
-  let judged: { frameId: string; loaderId: string; unreachableUrl: string };
   try {
     if (!shield) throw new Error(PROTECTED_REFUSAL);
-    judged = await shield.refreshInventoriedRoot();
+    await shield.stabilizeInventoriedRoot(await shield.refreshInventoriedRoot());
   } catch {
-    await abortOwnedAttach(tabId, state, deps);
-    throw new Error(PROTECTED_REFUSAL);
-  }
-  if (!(await shield.sameInventoriedRoot(judged))) {
     await abortOwnedAttach(tabId, state, deps);
     throw new Error(PROTECTED_REFUSAL);
   }

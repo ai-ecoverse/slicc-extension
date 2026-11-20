@@ -1019,6 +1019,16 @@ class Connection {
     return true;
   }
 
+  async stabilizeInventoriedRoot(tabId, tab, judged) {
+    let current = judged;
+    for (let attempt = 0; ; attempt++) {
+      if (await this.sameInventoriedRoot(tabId, tab, current)) return current;
+      if (attempt === 3) return undefined;
+      current = await this.inventory(tabId, tab);
+      if (!current) return undefined;
+    }
+  }
+
   async indexFrames(tabId, tab, tree) {
     const pending = [{ node: tree, parentId: '' }];
     while (pending.length > 0) {
@@ -1199,7 +1209,8 @@ class Connection {
 
   async announceAttach(tabId, targetId, created, judged) {
     let tab = this.tabState(tabId);
-    if (!tab || !(await this.sameInventoriedRoot(tabId, tab, judged))) {
+    const stable = tab ? await this.stabilizeInventoriedRoot(tabId, tab, judged) : undefined;
+    if (!tab || !stable) {
       if (created) await this.abortAttach(tabId);
       refusal();
     }

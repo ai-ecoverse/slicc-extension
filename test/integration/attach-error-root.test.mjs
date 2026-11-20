@@ -442,11 +442,18 @@ for (const transport of ['seven', 'six-bridge']) {
   });
 
   test(`${transport}: guard-recorded failure still attaches the first client`, async () => {
+    const origin = 'https://vault.sliccy.ai';
     const out = await run(() => ({ url: failed, title: 'vault.sliccy.ai', status: 'complete' }), {
       failedRecord: true,
     });
-    assertAttached(out, '');
-    assert.ok(!String(out.announced[0]?.params?.targetInfo?.title ?? '').includes('vault'));
+    assertAttached(out, origin);
+    const title = String(out.announced[0]?.params?.targetInfo?.title ?? '');
+    assert.equal(title, origin);
+    const parsed = new URL(title);
+    assert.ok(parsed.pathname === '/' || parsed.pathname === '');
+    assert.equal(parsed.search, '');
+    assert.equal(parsed.hash, '');
+    assert.ok(!title.includes('FAKEATTACH'));
   });
 
   test(`${transport}: refused attach leaves Fetch disabled and the tab usable`, async () => {
@@ -572,6 +579,85 @@ for (const transport of ['seven', 'six-bridge']) {
     );
     assertRefused(out);
     assert.equal(out.announced.length, 0);
+  });
+
+  test(`${transport}: ordinary root that commits between inventory and announce still attaches`, async () => {
+    let trees = 0;
+    const out = await run(() => ({ url: ordinary, title: 'start', status: 'complete' }), {
+      tree: () => {
+        trees += 1;
+        const first = transport === 'seven' ? trees === 1 : trees <= 2;
+        return {
+          frameTree: {
+            frame: {
+              id: 'ROOT',
+              loaderId: first ? 'L-blank' : 'L-committed',
+              url: ordinary,
+              securityOrigin: 'https://ordinary.test',
+              mimeType: 'text/html',
+            },
+          },
+        };
+      },
+      navUrl: ordinary,
+    });
+    assertAttached(out, 'start');
+    assert.equal(out.announced[0].params.targetInfo.url, ordinary);
+  });
+
+  test(`${transport}: ordinary root that becomes a protected error between inventory and announce is refused`, async () => {
+    let trees = 0;
+    const out = await run(() => ({ url: ordinary, title: 'start', status: 'complete' }), {
+      tree: () => {
+        trees += 1;
+        const first = transport === 'seven' ? trees === 1 : trees <= 2;
+        if (first) {
+          return {
+            frameTree: {
+              frame: {
+                id: 'ROOT',
+                loaderId: 'L-ordinary',
+                url: ordinary,
+                securityOrigin: 'https://ordinary.test',
+                mimeType: 'text/html',
+              },
+            },
+          };
+        }
+        return errorTree(failed, { loaderId: 'L-protected' });
+      },
+      navUrl: ordinary,
+    });
+    assertRefused(out);
+    assert.equal(out.announced.length, 0);
+  });
+
+  test(`${transport}: unstable inventory root refuses after the re-judgement bound`, async () => {
+    let trees = 0;
+    const out = await run(() => ({ url: ordinary, title: 'start', status: 'complete' }), {
+      tree: () => {
+        trees += 1;
+        return {
+          frameTree: {
+            frame: {
+              id: 'ROOT',
+              loaderId: `L-${trees}`,
+              url: ordinary,
+              securityOrigin: 'https://ordinary.test',
+              mimeType: 'text/html',
+            },
+          },
+        };
+      },
+      navUrl: ordinary,
+    });
+    assertRefused(out);
+    assert.equal(out.announced.length, 0);
+    if (transport === 'seven') {
+      assert.deepEqual(out.sessions, []);
+      assert.deepEqual(out.tabs, []);
+      assert.deepEqual(out.owned, []);
+    }
   });
 
   test(`${transport}: failed record for another URL does not prove the current error root`, async () => {
