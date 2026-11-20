@@ -33,6 +33,7 @@ jobs:
         **/*guard*.test.*
         **/*security*.test.*
         test/integration/agent-path.test.mjs
+        test/integration/attach-error-root.test.mjs
         test/integration/background-screenshots.test.mjs
         test/integration/binary-carriers.test.mjs
         test/integration/binary-stream-splits.test.mjs

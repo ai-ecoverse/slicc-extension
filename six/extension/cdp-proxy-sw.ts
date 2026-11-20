@@ -21,6 +21,7 @@ export async function releaseDebuggerAttachment(
 ): Promise<void> {
   if (debuggerAttachmentOwners.get(tabId) !== owner) return;
   debuggerAttachmentOwners.delete(tabId);
+  await chrome.debugger.sendCommand({ tabId }, 'Fetch.disable').catch(() => {});
   await chrome.debugger.detach({ tabId }).catch(() => {});
 }
 

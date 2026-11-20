@@ -54,6 +54,7 @@ import {
   pruneSealed,
   pruneSnapshot,
   RESERVED_WORLD,
+  redactHistory,
   redactProtected,
   redactText,
   refusedOutright,
@@ -940,7 +941,69 @@ class Connection {
     return { success: true };
   }
 
+  async errorRootAllowed(tabId, frame) {
+    const url = textOf(frame?.url);
+    if (!url.startsWith('chrome-error:')) return true;
+    const raw = await readTab(this.api, tabId).catch(() => undefined);
+    if (raw && (await this.confirmedError(tabId, raw))) return true;
+    const unreachable = textOf(frame?.unreachableUrl);
+    if (!unreachable) return false;
+    return !errorUrlProtected(guard, unreachable);
+  }
+
+  async abortAttach(tabId) {
+    await this.send(tabId, 'Fetch.disable', {}).catch(() => undefined);
+    this.forget(tabId);
+    await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+  }
+
   async inventory(tabId, tab) {
+    let tree;
+    try {
+      tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
+    } catch {
+      return undefined;
+    }
+    let main = tree?.frameTree?.frame;
+    tab.documents.remember(tree?.frameTree);
+    if (!main || typeof main.id !== 'string' || main.id === '') return undefined;
+    const url = textOf(main.url);
+    const unsettled =
+      typeof main.loaderId !== 'string' ||
+      main.loaderId === '' ||
+      url === '' ||
+      url.startsWith('about:');
+    if (unsettled) {
+      if (await this.inheritedProtected(tabId, main)) return undefined;
+      try {
+        tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
+      } catch {
+        return undefined;
+      }
+      main = tree?.frameTree?.frame;
+      tab.documents.remember(tree?.frameTree);
+      if (!main || typeof main.id !== 'string' || main.id === '') return undefined;
+    }
+    if (typeof main.loaderId !== 'string' || main.loaderId === '') return undefined;
+    if (this.protectedOrigin(textOf(main.securityOrigin))) return undefined;
+    if (!(await this.errorRootAllowed(tabId, main))) return undefined;
+    if (await this.inheritedProtected(tabId, main)) return undefined;
+    if (!tab.mainFrameId) tab.mainFrameId = main.id;
+    tab.attachRoot = {
+      frameId: main.id,
+      loaderId: main.loaderId,
+      unreachableUrl: textOf(main.unreachableUrl),
+    };
+    await this.indexFrames(tabId, tab, tree.frameTree);
+    return {
+      frameId: main.id,
+      loaderId: main.loaderId,
+      unreachableUrl: textOf(main.unreachableUrl),
+    };
+  }
+
+  async sameInventoriedRoot(tabId, tab, expected) {
+    if (!expected?.frameId || !expected?.loaderId) return false;
     let tree;
     try {
       tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
@@ -948,13 +1011,23 @@ class Connection {
       return false;
     }
     const main = tree?.frameTree?.frame;
-    tab.documents.remember(tree?.frameTree);
-    if (!main || typeof main.id !== 'string' || main.id === '') return false;
-    if (this.protectedOrigin(textOf(main.securityOrigin))) return false;
-    if (await this.inheritedProtected(tabId, main)) return false;
-    if (!tab.mainFrameId) tab.mainFrameId = main.id;
-    await this.indexFrames(tabId, tab, tree.frameTree);
+    if (!main || main.id !== expected.frameId || main.loaderId !== expected.loaderId) return false;
+    if (textOf(main.url).startsWith('chrome-error:')) {
+      if (textOf(main.unreachableUrl) !== expected.unreachableUrl) return false;
+    }
+    if (!(await this.errorRootAllowed(tabId, main))) return false;
     return true;
+  }
+
+  async stabilizeInventoriedRoot(tabId, tab, judged) {
+    let current = judged;
+    for (let attempt = 0; ; attempt++) {
+      if (await this.sameInventoriedRoot(tabId, tab, current)) return current;
+      if (attempt === 3) return undefined;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      current = await this.inventory(tabId, tab);
+      if (!current) return undefined;
+    }
   }
 
   async indexFrames(tabId, tab, tree) {
@@ -1052,6 +1125,7 @@ class Connection {
     const tabId = tabFrom(targetId);
     const seen = await demandTab(this.api, await this.confirmed(tabId));
     let tab = this.tabState(tabId);
+    let created = false;
     if (!tab) {
       if (!this.state.ownedTabs.has(tabId)) {
         await bounded(
@@ -1095,11 +1169,11 @@ class Connection {
         wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
       this.state.tabs.set(tabId, tab);
+      created = true;
       try {
         await bounded(this.applyFetch(tabId), 10000, 'Target.attachToTarget');
       } catch (error) {
-        this.forget(tabId);
-        await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+        await this.abortAttach(tabId);
         throw error;
       }
       tab.pageObserved = await bounded(
@@ -1112,14 +1186,45 @@ class Connection {
         () => true,
         () => false
       );
-      const unwatched = !(await this.inventory(tabId, tab))
-        ? protectedRules.refusal
-        : await this.watchRuntime(tabId);
+      const judged = await this.inventory(tabId, tab);
+      const unwatched = !judged ? protectedRules.refusal : await this.watchRuntime(tabId);
       if (unwatched) {
-        this.forget(tabId);
-        await bounded(this.api.debugger.detach({ tabId }), 5000, 'detach').catch(() => undefined);
+        await this.abortAttach(tabId);
         throw new Error(unwatched);
       }
+      return this.announceAttach(tabId, targetId, created, judged);
+    }
+    const judged = await this.inventory(tabId, tab);
+    if (!judged) refusal();
+    return this.announceAttach(tabId, targetId, created, judged);
+  }
+
+  async announceAttach(tabId, targetId, created, judged) {
+    let tab = this.tabState(tabId);
+    const stable = tab ? await this.stabilizeInventoriedRoot(tabId, tab, judged) : undefined;
+    if (!tab || !stable) {
+      if (created) await this.abortAttach(tabId);
+      refusal();
+    }
+    const current = await readTab(this.api, tabId).catch(() => undefined);
+    if (!current) {
+      if (created) await this.abortAttach(tabId);
+      refusal();
+    }
+    const viewed = this.view(current);
+    let seen;
+    try {
+      seen = await demandTab(this.api, viewed);
+    } catch (error) {
+      if (created) await this.abortAttach(tabId);
+      throw error;
+    }
+    tab = this.tabState(tabId);
+    if (!tab) {
+      if (created) await this.abortAttach(tabId);
+      refusal();
+    }
+    if (created) {
       await bounded(
         this.send(tabId, 'Target.setAutoAttach', {
           autoAttach: true,
@@ -1138,17 +1243,14 @@ class Connection {
     this.state.sessions.set(sessionId, { tabId, patterns: null, auth: false });
     tab.sessions.add(sessionId);
     this.state.seen.add(tabId);
-    const current = await readTab(this.api, tabId).catch(() => undefined);
-    if (current) {
-      this.post({
-        method: 'Target.attachedToTarget',
-        params: {
-          sessionId,
-          targetInfo: { ...this.info(current), attached: true },
-          waitingForDebugger: false,
-        },
-      });
-    }
+    this.post({
+      method: 'Target.attachedToTarget',
+      params: {
+        sessionId,
+        targetInfo: { ...this.info(current), attached: true },
+        waitingForDebugger: false,
+      },
+    });
     return { sessionId };
   }
 
@@ -1909,6 +2011,7 @@ class Connection {
     tab.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') tab.worlds.seen(result.executionContextId);
     this.debuggerGate.revoke(tabId);
+    if (method === 'Page.getNavigationHistory') redactHistory(result, anyProtected);
     if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
       await resolveFrameOrigins(result.frameTree, tab.uncertain ?? new Set(), (id) =>
         this.documentOrigin(tabId, id)
@@ -2429,11 +2532,21 @@ class Connection {
     const isProtected = originProtected || urlIsProtected || ancestorProtected;
     if (!frame.parentId && url.startsWith('chrome-error:')) {
       tab.mainFrameId = textOf(frame.id);
+      tab.attachRoot = {
+        frameId: textOf(frame.id),
+        loaderId: textOf(frame.loaderId),
+        unreachableUrl: textOf(frame.unreachableUrl),
+      };
       return urlProtected(guard, textOf(frame.unreachableUrl));
     }
     if (!frame.parentId) {
       this.state.failed.delete(tabId);
       tab.mainFrameId = textOf(frame.id);
+      tab.attachRoot = {
+        frameId: textOf(frame.id),
+        loaderId: textOf(frame.loaderId),
+        unreachableUrl: '',
+      };
       if (isProtected || this.leaves(tab, url)) {
         this.release(tabId);
         return true;

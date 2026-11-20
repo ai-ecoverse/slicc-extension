@@ -559,6 +559,26 @@ export function urlProtected(text: string, readOnly = false): boolean {
   return web !== text && isProtectedUrl(web, readOnly);
 }
 
+const SIGN_IN_MARKERS = ['redirect_uri=', 'client_id=', '/auth/callback'];
+const DECODE_ROUNDS = 8;
+
+function signInMarked(text: string): boolean {
+  let current = text;
+  for (let round = 0; ; round += 1) {
+    const lower = current.toLowerCase();
+    if (SIGN_IN_MARKERS.some((marker) => lower.includes(marker))) return true;
+    let next: string;
+    try {
+      next = decodeURIComponent(current);
+    } catch {
+      return true;
+    }
+    if (next === current) return false;
+    if (round === DECODE_ROUNDS) return true;
+    current = next;
+  }
+}
+
 const SCHEME = /[a-z0-9+.-]/i;
 const LETTER = /[a-z]/i;
 const URL_END = /[\s"'<>`\u0000-\u001f]/;
@@ -1085,13 +1105,13 @@ function redactKeys(source: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(keys.map((key, index) => [renamed[index], source[key]]));
 }
 
-export function redactProtected<T>(value: T, method?: string): T {
+function redactDeep<T>(value: T, method?: string): T {
   if (typeof value === 'string') return redactText(value) as T;
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     let out: unknown[] = value;
     value.forEach((item: unknown, index) => {
-      const next = redactProtected(item, method);
+      const next = redactDeep(item, method);
       if (next === item) return;
       if (out === value) out = [...value];
       out[index] = next;
@@ -1103,24 +1123,20 @@ export function redactProtected<T>(value: T, method?: string): T {
   const source = redactKeys(withHeaders(original));
   let out = source;
   for (const [key, item] of Object.entries(source)) {
-    const next = redactProtected(item, method);
+    const next = redactDeep(item, method);
     if (next === item) continue;
     if (out === source) out = { ...source };
     out[key] = next;
-  }
-  if (
-    method === 'Page.getFrameTree' &&
-    ['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(original[key]))
-  ) {
-    out = { ...out };
-    delete out['name'];
-    delete out['urlFragment'];
   }
   if ('urlFragment' in original && URL_KEYS.some((k) => urlNamed(original[k]))) {
     if (out === original) out = { ...original };
     delete out['urlFragment'];
   }
   return out as T;
+}
+
+export function redactProtected<T>(value: T, method?: string): T {
+  return scrubKnownNameShapes(redactDeep(value, method), method);
 }
 
 export function headersNameProtected(headers: unknown, base = ''): boolean {
@@ -1328,6 +1344,322 @@ export function redacted(info: CDPPayload): CDPPayload {
   return { ...info, url: origin, title: origin };
 }
 
+function nameSeedOrigin(value: Record<string, unknown>): string {
+  for (const key of [
+    'url',
+    'unreachableUrl',
+    'documentURL',
+    'baseURL',
+    'userTypedURL',
+    'origin',
+    'securityOrigin',
+  ]) {
+    const text = str(value[key]);
+    if (!text || !urlNamed(text)) continue;
+    try {
+      const parsed = new URL(text);
+      if (parsed.origin !== 'null') return parsed.origin;
+    } catch {}
+  }
+  return 'about:blank';
+}
+
+function errorDocumentHidden(value: Record<string, unknown>): boolean {
+  if (['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(value[key]))) return true;
+  const url = str(value['url']) ?? '';
+  if (!url.startsWith('chrome-error:')) return false;
+  const unreachable = value['unreachableUrl'];
+  if (typeof unreachable !== 'string' || unreachable === '') return true;
+  return urlNamed(unreachable);
+}
+
+function documentUrlHidden(value: Record<string, unknown>): boolean {
+  return ['documentURL', 'baseURL'].some((key) => urlNamed(value[key]));
+}
+
+function isFrameShape(value: unknown): value is Record<string, unknown> {
+  return (
+    isObj(value) &&
+    typeof value['id'] === 'string' &&
+    (typeof value['loaderId'] === 'string' || typeof value['securityOrigin'] === 'string')
+  );
+}
+
+function isTargetInfoShape(value: unknown): value is Record<string, unknown> {
+  return (
+    isObj(value) &&
+    typeof value['targetId'] === 'string' &&
+    typeof value['type'] === 'string' &&
+    typeof value['url'] === 'string'
+  );
+}
+
+const FRAME_NAME_METHODS = new Set([
+  'Page.frameNavigated',
+  'Page.frameAttached',
+  'Page.frameRequestedNavigation',
+  'Page.frameStartedNavigating',
+  'Page.getFrameTree',
+  'Page.getResourceTree',
+]);
+
+const DOM_NAME_METHODS = new Set(['DOM.getDocument', 'DOM.describeNode', 'DOM.getFrameOwner']);
+
+function dropAttributeName(attributes: unknown[]): unknown[] {
+  const next: unknown[] = [];
+  for (let i = 0; i < attributes.length; i += 2) {
+    if (attributes[i] === 'name') continue;
+    next.push(attributes[i]);
+    if (i + 1 < attributes.length) next.push(attributes[i + 1]);
+  }
+  return next;
+}
+
+function scrubFramesDeep(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    let out: unknown[] = value;
+    value.forEach((item, index) => {
+      const next = scrubFramesDeep(item);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (!isObj(value)) return value;
+  let out: Record<string, unknown> = value;
+  for (const [key, item] of Object.entries(value)) {
+    if (item === null || typeof item !== 'object') continue;
+    const next = scrubFramesDeep(item);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  if (isFrameShape(out) && errorDocumentHidden(out)) {
+    if (out === value) out = { ...value };
+    delete out['name'];
+    delete out['urlFragment'];
+  }
+  return out;
+}
+
+function scrubTargetInfoTitle(info: Record<string, unknown>): Record<string, unknown> {
+  const url = str(info['url']) ?? '';
+  const title = str(info['title']) ?? '';
+  if (title === '') return info;
+  if (urlNamed(url)) return { ...info, title: nameSeedOrigin(info) };
+  if (!url.startsWith('chrome-error:')) return info;
+  if (!historyTitleMarked(title)) return { ...info, title: '' };
+  const seed = title.includes('://') ? title : `https://${title}/`;
+  return { ...info, title: nameSeedOrigin({ url: seed }) };
+}
+
+function scrubTargetInfoDeep(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    let out: unknown[] = value;
+    value.forEach((item, index) => {
+      const next = scrubTargetInfoDeep(item);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (!isObj(value)) return value;
+  let out: Record<string, unknown> = value;
+  for (const [key, item] of Object.entries(value)) {
+    if (item === null || typeof item !== 'object') continue;
+    const next = scrubTargetInfoDeep(item);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  if (!isTargetInfoShape(out)) return out;
+  const next = scrubTargetInfoTitle(out);
+  return next === out ? out : next;
+}
+
+function chromeErrorDocument(value: Record<string, unknown>): boolean {
+  return ['documentURL', 'baseURL', 'url'].some(
+    (key) => str(value[key])?.startsWith('chrome-error:') === true
+  );
+}
+
+function hostCarrier(text: unknown): boolean {
+  if (typeof text !== 'string' || text === '') return false;
+  if (text.includes('://') || text.startsWith('//')) return urlProtected(text);
+  if (!/^[A-Za-z0-9.-]+$/.test(text) || !text.includes('.')) return false;
+  return urlProtected(`https://${text}/`);
+}
+
+function hostOrigin(text: string): string {
+  const seed = text.includes('://') || text.startsWith('//') ? text : `https://${text}/`;
+  return nameSeedOrigin({ url: seed });
+}
+
+function scrubHostInText(text: string): string {
+  const out = redactText(text);
+  if (hostCarrier(out) && !out.includes('://') && !out.startsWith('//')) return hostOrigin(out);
+  return out.replace(/\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b/g, (token) => {
+    if (hostCarrier(token)) return hostOrigin(token);
+    return token;
+  });
+}
+
+function scrubErrorDocumentAttributes(attributes: unknown[]): unknown[] {
+  const next: unknown[] = [];
+  for (let i = 0; i < attributes.length; i += 2) {
+    const key = attributes[i];
+    const val = i + 1 < attributes.length ? attributes[i + 1] : undefined;
+    if (key === 'name' && hostCarrier(val)) continue;
+    next.push(hostCarrier(key) ? hostOrigin(String(key)) : key);
+    if (val === undefined) continue;
+    if (hostCarrier(val)) next.push(hostOrigin(String(val)));
+    else if (typeof val === 'string') next.push(scrubHostInText(val));
+    else next.push(val);
+  }
+  return next;
+}
+
+function scrubOuterHtml(value: unknown): unknown {
+  if (typeof value === 'string') return scrubHostInText(value);
+  if (Array.isArray(value)) {
+    let out: unknown[] = value;
+    value.forEach((item, index) => {
+      const next = scrubOuterHtml(item);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (!isObj(value)) return value;
+  let out: Record<string, unknown> = value;
+  for (const [key, item] of Object.entries(value)) {
+    const next = scrubOuterHtml(item);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  return out;
+}
+
+function scrubChromeErrorNodeValue(value: Record<string, unknown>): Record<string, unknown> {
+  const nodeValue = value['nodeValue'];
+  if (hostCarrier(nodeValue)) return { ...value, nodeValue: hostOrigin(String(nodeValue)) };
+  if (typeof nodeValue !== 'string') return value;
+  const next = scrubHostInText(nodeValue);
+  return next === nodeValue ? value : { ...value, nodeValue: next };
+}
+
+function scrubChromeErrorDomTree(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    let out: unknown[] = value;
+    value.forEach((item, index) => {
+      const next = scrubChromeErrorDomTree(item);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (!isObj(value)) return value;
+  let out: Record<string, unknown> = value;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'attributes' || item === null || typeof item !== 'object') continue;
+    const next = scrubChromeErrorDomTree(item);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  if (Array.isArray(out['attributes'])) {
+    const next = scrubErrorDocumentAttributes(out['attributes'] as unknown[]);
+    if (next !== out['attributes']) out = { ...out, attributes: next };
+  }
+  return scrubChromeErrorNodeValue(out);
+}
+
+function scrubDomDocumentNames(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    let out: unknown[] = value;
+    value.forEach((item, index) => {
+      const next = scrubDomDocumentNames(item);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (!isObj(value)) return value;
+  let out: Record<string, unknown> = value;
+  for (const [key, item] of Object.entries(value)) {
+    if (item === null || typeof item !== 'object') continue;
+    const next = scrubDomDocumentNames(item);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  if (documentUrlHidden(out) && Array.isArray(out['attributes'])) {
+    if (out === value) out = { ...value };
+    out['attributes'] = dropAttributeName(out['attributes'] as unknown[]);
+  } else if (chromeErrorDocument(out)) {
+    return scrubChromeErrorDomTree(out);
+  }
+  return out;
+}
+
+function urlOrErrorPage(url: string): boolean {
+  return urlNamed(url) || url.startsWith('chrome-error:');
+}
+
+function scrubWindowOpen(value: unknown): unknown {
+  if (!isObj(value)) return value;
+  const url = str(value['url']) ?? '';
+  if (!urlOrErrorPage(url)) return value;
+  const out = { ...value };
+  delete out['windowName'];
+  if (typeof out['title'] === 'string' && out['title'] !== '') {
+    out['title'] = nameSeedOrigin(value);
+  }
+  return out;
+}
+
+function scrubDownload(value: unknown): unknown {
+  if (!isObj(value)) return value;
+  const url = str(value['url']) ?? '';
+  if (!urlOrErrorPage(url)) return value;
+  return { ...value, suggestedFilename: '' };
+}
+
+function scrubExecutionContext(value: unknown): unknown {
+  if (!isObj(value) || !isObj(value['context'])) return value;
+  const context = value['context'] as Record<string, unknown>;
+  const origin = str(context['origin']);
+  if (!origin || !urlNamed(origin)) return value;
+  const next = { ...context };
+  delete next['name'];
+  return { ...value, context: next };
+}
+
+function scrubKnownNameShapes<T>(value: T, method?: string): T {
+  if (typeof method !== 'string' || method === '') return value;
+  if (FRAME_NAME_METHODS.has(method)) return scrubFramesDeep(value) as T;
+  if (method === 'Page.windowOpen') return scrubWindowOpen(value) as T;
+  if (method === 'Page.downloadWillBegin') return scrubDownload(value) as T;
+  if (DOM_NAME_METHODS.has(method)) return scrubDomDocumentNames(value) as T;
+  if (method === 'DOM.getOuterHTML') return scrubOuterHtml(value) as T;
+  if (method.startsWith('Target.')) return scrubTargetInfoDeep(value) as T;
+  if (method === 'Runtime.executionContextCreated') return scrubExecutionContext(value) as T;
+  return value;
+}
+
+function historyTitleMarked(title: string): boolean {
+  if (title === '') return false;
+  if (title.includes('://') || title.startsWith('//')) return urlProtected(title);
+  if (!/^[A-Za-z0-9.-]+$/.test(title) || !title.includes('.')) return false;
+  return urlProtected(title) || urlProtected(`https://${title}/`);
+}
+
 export function redactHistory(result: CDPPayload): void {
   const entries = result['entries'];
   if (!Array.isArray(entries)) return;
@@ -1335,8 +1667,17 @@ export function redactHistory(result: CDPPayload): void {
     if (!isObj(entry)) return entry;
     const url = str(entry['url']) ?? '';
     const typed = str(entry['userTypedURL']) ?? '';
-    if (!urlProtected(url) && !urlProtected(typed)) return entry;
-    const origin = str(redacted({ url: urlProtected(url) ? url : typed })['url']) ?? 'about:blank';
+    const title = str(entry['title']) ?? '';
+    const marked = urlProtected(url) || urlProtected(typed) || historyTitleMarked(title);
+    if (!marked) return entry;
+    const seed = urlProtected(url)
+      ? url
+      : urlProtected(typed)
+        ? typed
+        : title.includes('://')
+          ? title
+          : `https://${title}/`;
+    const origin = str(redacted({ url: seed })['url']) ?? 'about:blank';
     return { ...entry, url: origin, userTypedURL: origin, title: origin };
   });
 }
@@ -1488,6 +1829,7 @@ export class TabShield {
   private seal: Sealed | undefined;
   private readonly cut = new Set<unknown>();
   private mainFrameId = '';
+  private rootUnreachable = '';
   private blockedFlag = false;
   private epoch = 0;
   private content: ContentTree | undefined;
@@ -1535,18 +1877,113 @@ export class TabShield {
     );
   }
 
-  private async inventoryFrames(): Promise<void> {
-    const tree = await this.send('Page.getFrameTree', {});
-    const root = tree['frameTree'];
+  private async errorRootAllowed(frame: CDPPayload): Promise<boolean> {
+    const url = str(frame['url']) ?? '';
+    if (!url.startsWith('chrome-error:')) return true;
+    const tab = await this.readLive();
+    if (await this.confirmedError(tab)) return true;
+    const unreachable = str(frame['unreachableUrl']);
+    if (unreachable === undefined || unreachable === '') return false;
+    if (/[\s\\\u0000-\u001f\u007f]/.test(unreachable) || !URL.canParse(unreachable)) return false;
+    const parsed = new URL(unreachable);
+    if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) return false;
+    if (parsed.username || parsed.password) return false;
+    if (isUnparseableUrl(unreachable) || urlProtected(unreachable)) return false;
+    if (signInMarked(unreachable) || signInMarked(parsed.href)) return false;
+    return true;
+  }
+
+  private async settleInventoriedRoot(
+    mainFrame: Record<string, unknown>
+  ): Promise<CDPPayload | undefined> {
+    const frameUrl = str(mainFrame['url']) ?? '';
+    const loaderId = str(mainFrame['loaderId']);
+    if (loaderId && frameUrl !== '' && !frameUrl.startsWith('about:')) return undefined;
+    if (await this.inheritedProtected(mainFrame)) refuse(PROTECTED_RULES.refusal);
+    return this.send('Page.getFrameTree', {});
+  }
+
+  private async inventoryFrames(): Promise<{
+    frameId: string;
+    loaderId: string;
+    unreachableUrl: string;
+  }> {
+    let tree = await this.send('Page.getFrameTree', {});
+    let root = tree['frameTree'];
     this.documents.remember(root);
-    const main = isObj(root) && isObj(root['frame']) ? str(root['frame']['id']) : undefined;
-    if (!main) refuse(PROTECTED_RULES.refusal);
+    let mainFrame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
+    let main = mainFrame ? str(mainFrame['id']) : undefined;
+    if (!main || !mainFrame) refuse(PROTECTED_RULES.refusal);
+    const refreshed = await this.settleInventoriedRoot(mainFrame);
+    if (refreshed) {
+      tree = refreshed;
+      root = tree['frameTree'];
+      this.documents.remember(root);
+      mainFrame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
+      main = mainFrame ? str(mainFrame['id']) : undefined;
+      if (!main || !mainFrame) refuse(PROTECTED_RULES.refusal);
+    }
+    const loaderId = str(mainFrame['loaderId']);
+    if (!loaderId) refuse(PROTECTED_RULES.refusal);
+    if (!(await this.errorRootAllowed(mainFrame))) refuse(PROTECTED_RULES.refusal);
     this.mainFrameId = main;
+    this.rootUnreachable = str(mainFrame['unreachableUrl']) ?? '';
     const pending: { node: unknown; parentId: string }[] = [{ node: root, parentId: '' }];
     while (pending.length > 0) {
       const next = pending.pop();
       if (!next) continue;
       await this.inventoryNode(next.node, next.parentId, main, pending);
+    }
+    return {
+      frameId: main,
+      loaderId,
+      unreachableUrl: str(mainFrame['unreachableUrl']) ?? '',
+    };
+  }
+
+  async refreshInventoriedRoot(): Promise<{
+    frameId: string;
+    loaderId: string;
+    unreachableUrl: string;
+  }> {
+    return this.inventoryFrames();
+  }
+
+  async sameInventoriedRoot(expected: {
+    frameId: string;
+    loaderId: string;
+    unreachableUrl: string;
+  }): Promise<boolean> {
+    if (!expected?.frameId || !expected.loaderId) return false;
+    let tree: CDPPayload;
+    try {
+      tree = await this.send('Page.getFrameTree', {});
+    } catch {
+      return false;
+    }
+    const root = tree['frameTree'];
+    const main = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
+    if (!main) return false;
+    if (str(main['id']) !== expected.frameId) return false;
+    if (str(main['loaderId']) !== expected.loaderId) return false;
+    if ((str(main['url']) ?? '').startsWith('chrome-error:')) {
+      if ((str(main['unreachableUrl']) ?? '') !== expected.unreachableUrl) return false;
+    }
+    if (!(await this.errorRootAllowed(main))) return false;
+    return true;
+  }
+
+  async stabilizeInventoriedRoot(judged: {
+    frameId: string;
+    loaderId: string;
+    unreachableUrl: string;
+  }): Promise<{ frameId: string; loaderId: string; unreachableUrl: string }> {
+    let current = judged;
+    for (let attempt = 0; ; attempt++) {
+      if (await this.sameInventoriedRoot(current)) return current;
+      if (attempt === 3) refuse(PROTECTED_RULES.refusal);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      current = await this.inventoryFrames();
     }
   }
 
@@ -2464,6 +2901,7 @@ export class TabShield {
     const networkId = str(paused['networkId']);
     if (networkId) this.requests.set(networkId, tainted || this.requests.get(networkId) === true);
     if (protectedUrl && paused['resourceType'] === 'Document') {
+      this.failedDocuments.clear();
       this.failedDocuments.set((requestUrl(paused) ?? '').split('#')[0] ?? '', true);
       this.answer('Fetch.failRequest', { requestId: id, errorReason: 'BlockedByClient' });
       return [];
@@ -2611,6 +3049,10 @@ export class TabShield {
     const { id, url, origin, state } = this.rememberCommit(frame);
     if (frame['parentId'] === undefined) {
       if (id) this.mainFrameId = id;
+      this.documents.frame(frame);
+      this.rootUnreachable = url.startsWith('chrome-error:')
+        ? (str(frame['unreachableUrl']) ?? '')
+        : '';
       if (urlProtected(url) || urlProtected(origin)) this.block();
       return this.finishCommit(id, false);
     }
