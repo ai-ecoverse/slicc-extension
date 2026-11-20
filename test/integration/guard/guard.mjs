@@ -75,6 +75,9 @@ export function capabilities(transport) {
     clientExit: true,
     siteIsolationOff: true,
     inboundDelay: true,
+    requestInterception: true,
+    fetchInterception: true,
+    legacyInterception: true,
   };
 }
 
