@@ -1474,6 +1474,106 @@ function scrubTargetInfoDeep(value: unknown): unknown {
   return next === out ? out : next;
 }
 
+function chromeErrorDocument(value: Record<string, unknown>): boolean {
+  return ['documentURL', 'baseURL', 'url'].some(
+    (key) => str(value[key])?.startsWith('chrome-error:') === true
+  );
+}
+
+function hostCarrier(text: unknown): boolean {
+  if (typeof text !== 'string' || text === '') return false;
+  if (text.includes('://') || text.startsWith('//')) return urlProtected(text);
+  if (!/^[A-Za-z0-9.-]+$/.test(text) || !text.includes('.')) return false;
+  return urlProtected(`https://${text}/`);
+}
+
+function hostOrigin(text: string): string {
+  const seed = text.includes('://') || text.startsWith('//') ? text : `https://${text}/`;
+  return nameSeedOrigin({ url: seed });
+}
+
+function scrubHostInText(text: string): string {
+  const out = redactText(text);
+  if (hostCarrier(out) && !out.includes('://') && !out.startsWith('//')) return hostOrigin(out);
+  return out.replace(/\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b/g, (token) => {
+    if (hostCarrier(token)) return hostOrigin(token);
+    return token;
+  });
+}
+
+function scrubErrorDocumentAttributes(attributes: unknown[]): unknown[] {
+  const next: unknown[] = [];
+  for (let i = 0; i < attributes.length; i += 2) {
+    const key = attributes[i];
+    const val = i + 1 < attributes.length ? attributes[i + 1] : undefined;
+    if (key === 'name' && hostCarrier(val)) continue;
+    next.push(hostCarrier(key) ? hostOrigin(String(key)) : key);
+    if (val === undefined) continue;
+    if (hostCarrier(val)) next.push(hostOrigin(String(val)));
+    else if (typeof val === 'string') next.push(scrubHostInText(val));
+    else next.push(val);
+  }
+  return next;
+}
+
+function scrubOuterHtml(value: unknown): unknown {
+  if (typeof value === 'string') return scrubHostInText(value);
+  if (Array.isArray(value)) {
+    let out: unknown[] = value;
+    value.forEach((item, index) => {
+      const next = scrubOuterHtml(item);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (!isObj(value)) return value;
+  let out: Record<string, unknown> = value;
+  for (const [key, item] of Object.entries(value)) {
+    const next = scrubOuterHtml(item);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  return out;
+}
+
+function scrubChromeErrorNodeValue(value: Record<string, unknown>): Record<string, unknown> {
+  const nodeValue = value['nodeValue'];
+  if (hostCarrier(nodeValue)) return { ...value, nodeValue: hostOrigin(String(nodeValue)) };
+  if (typeof nodeValue !== 'string') return value;
+  const next = scrubHostInText(nodeValue);
+  return next === nodeValue ? value : { ...value, nodeValue: next };
+}
+
+function scrubChromeErrorDomTree(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    let out: unknown[] = value;
+    value.forEach((item, index) => {
+      const next = scrubChromeErrorDomTree(item);
+      if (next === item) return;
+      if (out === value) out = [...value];
+      out[index] = next;
+    });
+    return out;
+  }
+  if (!isObj(value)) return value;
+  let out: Record<string, unknown> = value;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'attributes' || item === null || typeof item !== 'object') continue;
+    const next = scrubChromeErrorDomTree(item);
+    if (next === item) continue;
+    if (out === value) out = { ...value };
+    out[key] = next;
+  }
+  if (Array.isArray(out['attributes'])) {
+    const next = scrubErrorDocumentAttributes(out['attributes'] as unknown[]);
+    if (next !== out['attributes']) out = { ...out, attributes: next };
+  }
+  return scrubChromeErrorNodeValue(out);
+}
+
 function scrubDomDocumentNames(value: unknown): unknown {
   if (Array.isArray(value)) {
     let out: unknown[] = value;
@@ -1497,6 +1597,8 @@ function scrubDomDocumentNames(value: unknown): unknown {
   if (documentUrlHidden(out) && Array.isArray(out['attributes'])) {
     if (out === value) out = { ...value };
     out['attributes'] = dropAttributeName(out['attributes'] as unknown[]);
+  } else if (chromeErrorDocument(out)) {
+    return scrubChromeErrorDomTree(out);
   }
   return out;
 }
@@ -1540,6 +1642,7 @@ function scrubKnownNameShapes<T>(value: T, method?: string): T {
   if (method === 'Page.windowOpen') return scrubWindowOpen(value) as T;
   if (method === 'Page.downloadWillBegin') return scrubDownload(value) as T;
   if (DOM_NAME_METHODS.has(method)) return scrubDomDocumentNames(value) as T;
+  if (method === 'DOM.getOuterHTML') return scrubOuterHtml(value) as T;
   if (method.startsWith('Target.')) return scrubTargetInfoDeep(value) as T;
   if (method === 'Runtime.executionContextCreated') return scrubExecutionContext(value) as T;
   return value;

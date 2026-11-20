@@ -63,6 +63,7 @@ function errorTree(unreachable, opts = {}) {
     securityOrigin: '://',
     mimeType: 'text/html',
   };
+  if (opts.name !== undefined) frame.name = opts.name;
   if (unreachable !== undefined) frame.unreachableUrl = unreachable;
   return { frameTree: { frame } };
 }
@@ -994,19 +995,50 @@ for (const transport of ['seven', 'six-bridge']) {
       'Runtime.executionContextCreated'
     );
     assert.equal(named.context.name, '__crx_world__');
-    const node = redact(
+    const node = {
+      nodeId: 1,
+      attributes: ['name', host, 'id', 'panel'],
+      documentURL: ERROR_PAGE,
+      baseURL: ERROR_PAGE,
+      nodeValue: host,
+    };
+    const scrubbed = redact({ node }, 'DOM.describeNode');
+    assert.deepEqual(scrubbed.node.attributes, ['id', 'panel']);
+    assert.equal(scrubbed.node.nodeValue, origin);
+    assert.equal(scrubbed.node.documentURL, ERROR_PAGE);
+    assert.ok(!scrubbed.node.attributes.includes(host));
+    assert.notEqual(scrubbed.node.nodeValue, host);
+    const ordinaryName = redact(
       {
         node: {
-          nodeId: 1,
-          attributes: ['name', host],
+          nodeId: 2,
+          attributes: ['name', 'section'],
           documentURL: ERROR_PAGE,
           baseURL: ERROR_PAGE,
         },
       },
       'DOM.describeNode'
     );
-    assert.deepEqual(node.node.attributes, ['name', host]);
-    assert.equal(node.node.documentURL, ERROR_PAGE);
+    assert.deepEqual(ordinaryName.node.attributes, ['name', 'section']);
+    const outer = redact({ outerHTML: `<html name="${host}">${host}</html>` }, 'DOM.getOuterHTML');
+    assert.equal(outer.outerHTML, `<html name="${origin}">${origin}</html>`);
+    node.documentURL = ordinary;
+    node.baseURL = ordinary;
+    assert.deepEqual(redact({ node }, 'DOM.describeNode').node.attributes, [
+      'name',
+      host,
+      'id',
+      'panel',
+    ]);
+    node.documentURL = ERROR_PAGE;
+    node.baseURL = ERROR_PAGE;
+    node.attributes = ['name', 'section', 'id', host];
+    assert.deepEqual(redact({ node }, 'DOM.describeNode').node.attributes, [
+      'name',
+      'section',
+      'id',
+      origin,
+    ]);
   });
 
   test(`${transport}: shape-scoped name scrub keeps ordinary reply shapes`, () => {
@@ -1323,5 +1355,406 @@ for (const transport of ['seven', 'six-bridge']) {
     openMutated.url = ordinary;
     openMutated.windowName = 'app';
     assert.equal(redact(openMutated, 'Page.windowOpen').windowName, 'app');
+  });
+}
+
+function navFrame(url) {
+  return {
+    frameId: 0,
+    parentFrameId: -1,
+    url,
+    errorOccurred: true,
+    documentId: 'D',
+    documentLifecycle: 'active',
+  };
+}
+
+async function sevenSession(opts = {}) {
+  let tree = opts.tree ?? errorTree(ordinaryFailed, { loaderId: 'L1' });
+  let navUrl = opts.navUrl ?? ordinaryFailed;
+  let tabUrl = opts.tabUrl ?? navUrl;
+  let tabTitle = opts.tabTitle ?? 'Missing page';
+  const published = [];
+  const detached = [];
+  const api = {
+    tabs: {
+      get: async () => ({ id: 1, url: tabUrl, title: tabTitle, status: 'complete' }),
+      query: async () => [{ id: 1, url: tabUrl, title: tabTitle, status: 'complete' }],
+      onUpdated: event(),
+      onCreated: event(),
+      onRemoved: event(),
+      onActivated: event(),
+    },
+    windows: { onRemoved: event() },
+    webNavigation: {
+      getAllFrames: async () => [navFrame(navUrl)],
+      getFrame: async () => ({ errorOccurred: true, url: navUrl }),
+      onCreatedNavigationTarget: event(),
+      onCommitted: event(),
+    },
+    debugger: {
+      onEvent: event(),
+      onDetach: event(),
+      attach: async () => {},
+      detach: async () => {
+        detached.push(1);
+      },
+      sendCommand: async (_t, method) => {
+        if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') return tree;
+        if (method === 'Page.getNavigationHistory') {
+          return { currentIndex: 0, entries: [{ id: 1, url: tabUrl, title: tabTitle }] };
+        }
+        if (method === 'DOM.getDocument') {
+          return {
+            root: {
+              nodeId: 1,
+              documentURL: ERROR_PAGE,
+              baseURL: ERROR_PAGE,
+              attributes: opts.domAttributes ?? ['name', host, 'id', 'panel'],
+              children: [{ nodeId: 2, nodeName: '#text', nodeValue: opts.domText ?? host }],
+            },
+          };
+        }
+        if (method === 'DOM.describeNode') {
+          return {
+            node: {
+              nodeId: 1,
+              documentURL: ERROR_PAGE,
+              baseURL: ERROR_PAGE,
+              attributes: opts.domAttributes ?? ['name', host],
+            },
+          };
+        }
+        if (method === 'DOM.getOuterHTML') {
+          return {
+            outerHTML: opts.outerHTML ?? `<html name="${host}">${host}</html>`,
+          };
+        }
+        if (method === 'Runtime.evaluate') {
+          return { result: { type: 'string', value: opts.domText ?? host } };
+        }
+        if (method === 'Page.captureScreenshot') return { data: 'abc' };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 5 };
+        if (method === 'Input.dispatchMouseEvent') return {};
+        return {};
+      },
+    },
+  };
+  const conn = listen(
+    {
+      name: 'slicc-fetch',
+      sender: { id: 'fx', url: 'https://seven.sliccy.ai/', origin: 'https://seven.sliccy.ai' },
+      onDisconnect: event(),
+      postMessage: (m) => published.push(m),
+    },
+    'fx',
+    api
+  );
+  const attached = await conn.attach({ targetId: '1', flatten: true });
+  let nextId = 0;
+  const command = async (method, params = {}) => {
+    const id = ++nextId;
+    await conn.run({ id, method, params, sessionId: attached.sessionId });
+    const reply = published.findLast((m) => m.id === id);
+    if (reply?.error) return { error: reply.error };
+    return { result: reply?.result };
+  };
+  return {
+    sessionId: attached.sessionId,
+    published,
+    detached,
+    command,
+    navigate(nextTree, nextNav, title = tabTitle) {
+      tree = nextTree;
+      navUrl = nextNav;
+      tabUrl = nextNav;
+      tabTitle = title;
+      api.debugger.onEvent.fire({ tabId: 1 }, 'Page.frameNavigated', {
+        frame: nextTree.frameTree.frame,
+      });
+    },
+    fire(method, params) {
+      api.debugger.onEvent.fire({ tabId: 1 }, method, params);
+    },
+    stillAttached() {
+      return {
+        sessions: [...conn.state.sessions.keys()],
+        tabs: [...conn.state.tabs.keys()],
+        owned: [...conn.state.ownedTabs],
+        detached: detached.length,
+      };
+    },
+    info() {
+      return conn.info({ id: 1, url: tabUrl, title: tabTitle });
+    },
+    close() {
+      conn.close();
+    },
+  };
+}
+
+async function sixSession(opts = {}) {
+  six.__clearTabShieldsForTest();
+  six.__clearWelcomedLeaderPortsForTest();
+  let tree = opts.tree ?? errorTree(ordinaryFailed, { loaderId: 'L1' });
+  let navUrl = opts.navUrl ?? ordinaryFailed;
+  let tabUrl = opts.tabUrl ?? navUrl;
+  let tabTitle = opts.tabTitle ?? 'Missing page';
+  const published = [];
+  const detached = [];
+  const listeners = { msg: new Set(), disc: new Set() };
+  const debuggerHandlers = new Set();
+  const priorFrames = chrome.webNavigation.getAllFrames;
+  chrome.webNavigation.getAllFrames = async () => [navFrame(navUrl)];
+  const port = {
+    name: 'slicc.cdp-bridge',
+    sender: {
+      origin: 'https://www.sliccy.ai',
+      url: 'https://www.sliccy.ai/?slicc=leader',
+      tab: { id: 99 },
+      frameId: 0,
+      documentId: 'doc',
+    },
+    onMessage: {
+      addListener: (f) => listeners.msg.add(f),
+      removeListener: (f) => listeners.msg.delete(f),
+    },
+    onDisconnect: {
+      addListener: (f) => listeners.disc.add(f),
+      removeListener: () => {},
+    },
+    postMessage: (m) => published.push(m),
+    disconnect: () => {},
+  };
+  const deps = six.buildDefaultBridgeSwDeps({
+    readStoredLeaderTabId: async () => 99,
+    readLeaderKind: async () => 'six',
+    isLeaderDocument: async () => true,
+    tabHasProtectedFrame: async () => false,
+    attachDebugger: async () => true,
+    detachDebugger: async () => {
+      detached.push(1);
+    },
+    subscribeDebuggerEvents: (handler) => {
+      debuggerHandlers.add(handler);
+      return () => debuggerHandlers.delete(handler);
+    },
+    queryTabs: async () => [{ id: 1, url: tabUrl, title: tabTitle, status: 'complete' }],
+    queryActiveTabId: async () => 1,
+    getTab: async () => ({ id: 1, url: tabUrl, title: tabTitle, status: 'complete' }),
+    sendDebuggerCommand: async (_tab, method) => {
+      if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') return tree;
+      if (method === 'Page.getNavigationHistory') {
+        return { currentIndex: 0, entries: [{ id: 1, url: tabUrl, title: tabTitle }] };
+      }
+      if (method === 'DOM.getDocument') {
+        return {
+          root: {
+            nodeId: 1,
+            documentURL: ERROR_PAGE,
+            baseURL: ERROR_PAGE,
+            attributes: opts.domAttributes ?? ['name', host, 'id', 'panel'],
+            children: [{ nodeId: 2, nodeName: '#text', nodeValue: opts.domText ?? host }],
+          },
+        };
+      }
+      if (method === 'DOM.describeNode') {
+        return {
+          node: {
+            nodeId: 1,
+            documentURL: ERROR_PAGE,
+            baseURL: ERROR_PAGE,
+            attributes: opts.domAttributes ?? ['name', host],
+          },
+        };
+      }
+      if (method === 'DOM.getOuterHTML') {
+        return { outerHTML: opts.outerHTML ?? `<html name="${host}">${host}</html>` };
+      }
+      if (method === 'Runtime.evaluate') {
+        return { result: { type: 'string', value: opts.domText ?? host } };
+      }
+      if (method === 'Page.captureScreenshot') return { data: 'abc' };
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 5 };
+      if (method === 'Input.dispatchMouseEvent') return {};
+      return {};
+    },
+  });
+  await six.handleBridgePortConnect(port, deps);
+  const send = async (raw) => {
+    for (const f of listeners.msg) f(raw);
+    for (let i = 0; i < 200; i++) {
+      await new Promise((r) => setTimeout(r, 2));
+      const reply = published.find((m) => m.kind === 'cdp.response' && m.id === raw.id);
+      if (reply) return reply;
+    }
+    return { timeout: true };
+  };
+  await send({ bridge: 1, channelId: 'c', kind: 'handshake.hello' });
+  await new Promise((r) => setTimeout(r, 10));
+  let id = 0;
+  const cdp = (method, params = {}, sessionId) =>
+    send({
+      bridge: 1,
+      channelId: 'c',
+      kind: 'cdp.request',
+      id: ++id,
+      method,
+      params,
+      ...(sessionId ? { sessionId } : {}),
+    });
+  const a = await cdp('Target.attachToTarget', { targetId: '1', flatten: true });
+  if (a.error) {
+    chrome.webNavigation.getAllFrames = priorFrames;
+    throw new Error(typeof a.error === 'string' ? a.error : (a.error.message ?? String(a.error)));
+  }
+  const sessionId = a.result.sessionId;
+  return {
+    sessionId,
+    published,
+    detached,
+    command: async (method, params = {}) => {
+      const reply = await cdp(method, params, sessionId);
+      if (reply.error) {
+        return {
+          error:
+            typeof reply.error === 'string'
+              ? reply.error
+              : (reply.error.message ?? String(reply.error)),
+        };
+      }
+      return { result: reply.result };
+    },
+    navigate(nextTree, nextNav, title = tabTitle) {
+      tree = nextTree;
+      navUrl = nextNav;
+      tabUrl = nextNav;
+      tabTitle = title;
+      for (const handler of debuggerHandlers) {
+        handler(1, 'Page.frameNavigated', { frame: nextTree.frameTree.frame });
+      }
+    },
+    fire(method, params) {
+      for (const handler of debuggerHandlers) handler(1, method, params);
+    },
+    stillAttached() {
+      return {
+        sessions: six.__bridgePortSnapshotForTest(port)?.sessions ?? [],
+        shield: six.__hasTabShieldForTest(1),
+        owned: six.__bridgePortSnapshotForTest(port)?.owned ?? [],
+        detached: detached.length,
+      };
+    },
+    info() {
+      return undefined;
+    },
+    close() {
+      for (const f of listeners.disc) f();
+      six.__clearTabShieldsForTest();
+      chrome.webNavigation.getAllFrames = priorFrames;
+    },
+  };
+}
+
+for (const transport of ['seven', 'six-bridge']) {
+  const open = transport === 'seven' ? sevenSession : sixSession;
+
+  test(`${transport}: chrome-error DOM reads refuse protected and scrub unproven`, async () => {
+    const protectedSession = await open();
+    protectedSession.navigate(errorTree(failed, { loaderId: 'L-a' }), failed, host);
+    await new Promise((r) => setTimeout(r, 10));
+    for (const method of ['DOM.getDocument', 'DOM.describeNode', 'DOM.getOuterHTML']) {
+      const reply = await protectedSession.command(method);
+      assert.match(String(reply.error ?? ''), refusal, method);
+    }
+    const sealed = protectedSession.stillAttached();
+    if (transport === 'seven') {
+      assert.deepEqual(sealed.sessions, ['1']);
+      assert.deepEqual(sealed.tabs, [1]);
+      assert.deepEqual(sealed.owned, [1]);
+    } else {
+      assert.equal(sealed.shield, true);
+      assert.ok((sealed.owned ?? []).includes(1));
+    }
+    assert.equal(sealed.detached, 0);
+    protectedSession.close();
+
+    const unproven = await open();
+    unproven.navigate(errorTree(undefined, { loaderId: 'L-b' }), ordinaryFailed);
+    await new Promise((r) => setTimeout(r, 10));
+    const doc = await unproven.command('DOM.getDocument');
+    assert.equal(doc.error, undefined);
+    assert.deepEqual(doc.result.root.attributes, ['id', 'panel']);
+    assert.equal(doc.result.root.children[0].nodeValue, origin);
+    assert.ok(!doc.result.root.attributes.includes(host));
+    assert.notEqual(doc.result.root.children[0].nodeValue, host);
+    const described = await unproven.command('DOM.describeNode');
+    assert.equal(described.error, undefined);
+    assert.deepEqual(described.result.node.attributes, []);
+    const outer = await unproven.command('DOM.getOuterHTML');
+    assert.equal(outer.error, undefined);
+    assert.equal(outer.result.outerHTML, `<html name="${origin}">${origin}</html>`);
+    unproven.close();
+
+    const ordinarySession = await open({
+      domAttributes: ['name', 'section', 'id', 'panel'],
+      domText: 'Missing page',
+      outerHTML: '<html name="section">Missing page</html>',
+    });
+    const ordinaryDoc = await ordinarySession.command('DOM.getDocument');
+    assert.equal(ordinaryDoc.error, undefined);
+    assert.deepEqual(ordinaryDoc.result.root.attributes, ['name', 'section', 'id', 'panel']);
+    assert.equal(ordinaryDoc.result.root.children[0].nodeValue, 'Missing page');
+    const ordinaryOuter = await ordinarySession.command('DOM.getOuterHTML');
+    assert.equal(ordinaryOuter.error, undefined);
+    assert.equal(ordinaryOuter.result.outerHTML, '<html name="section">Missing page</html>');
+    ordinarySession.close();
+  });
+
+  test(`${transport}: sealed protected error session stays attached without host`, async () => {
+    const session = await open();
+    const before = session.published.length;
+    session.navigate(errorTree(failed, { loaderId: 'L-seal', name: host }), failed, host);
+    session.fire('Target.targetInfoChanged', {
+      targetInfo: {
+        targetId: '1',
+        type: 'page',
+        url: ERROR_PAGE,
+        title: host,
+        attached: true,
+      },
+    });
+    await new Promise((r) => setTimeout(r, 15));
+    const events = session.published.slice(before).filter((m) => m.method && !m.id);
+    assert.equal(events.filter((m) => m.method === 'Page.frameNavigated').length, 0);
+    assert.ok(!events.some((m) => JSON.stringify(m).includes(host)));
+    for (const method of [
+      'DOM.getDocument',
+      'Runtime.evaluate',
+      'Page.captureScreenshot',
+      'Input.dispatchMouseEvent',
+    ]) {
+      const reply = await session.command(
+        method,
+        method.startsWith('Input.')
+          ? { type: 'mousePressed', x: 1, y: 1, button: 'left', clickCount: 1 }
+          : {}
+      );
+      assert.match(String(reply.error ?? ''), refusal, method);
+    }
+    const live = session.stillAttached();
+    if (transport === 'seven') {
+      assert.deepEqual(live.sessions, ['1']);
+      assert.deepEqual(live.owned, [1]);
+      const info = session.info();
+      assert.equal(info.url, origin);
+      assert.equal(info.title, origin);
+      assert.ok(!String(info.title).includes(host) || info.title === origin);
+    } else {
+      assert.equal(live.shield, true);
+      assert.ok((live.owned ?? []).includes(1));
+    }
+    assert.equal(live.detached, 0);
+    session.close();
   });
 }
