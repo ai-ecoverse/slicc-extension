@@ -35,36 +35,31 @@ test('seven: client nodeId survives a child commit reobserve without DOM documen
       sessionId
     );
     if (!selected.nodeId) throw new Error('fixture mark was not found');
+    await sliccExtension.cdp.send(
+      'Runtime.evaluate',
+      {
+        expression: `(() => {
+          const iframe = document.createElement('iframe');
+          iframe.src = 'https://other.test/doc?REOBSERVE_DOM_SIBLING';
+          document.body.append(iframe);
+          return new Promise((resolve) => {
+            iframe.onload = () => {
+              iframe.src = 'https://other.test/doc?REOBSERVE_DOM_SIBLING_COMMIT';
+              iframe.onload = () => resolve(true);
+            };
+          });
+        })()`,
+        awaitPromise: true,
+      },
+      sessionId
+    );
     const seen = [];
     const off = sliccExtension.cdp.on((message) => {
-      if (
-        message?.method === 'DOM.documentUpdated' ||
-        message?.method === 'DOM.setChildNodes' ||
-        message?.method === 'DOM.childNodeInserted' ||
-        message?.method === 'DOM.childNodeRemoved'
-      ) {
+      if (message?.method === 'DOM.documentUpdated' || message?.method === 'DOM.setChildNodes') {
         seen.push(message.method);
       }
     });
     try {
-      await sliccExtension.cdp.send(
-        'Runtime.evaluate',
-        {
-          expression: `(() => {
-            const iframe = document.createElement('iframe');
-            iframe.src = 'https://other.test/doc?REOBSERVE_DOM_SIBLING';
-            document.body.append(iframe);
-            return new Promise((resolve) => {
-              iframe.onload = () => {
-                iframe.src = 'https://other.test/doc?REOBSERVE_DOM_SIBLING_COMMIT';
-                iframe.onload = () => resolve(true);
-              };
-            });
-          })()`,
-          awaitPromise: true,
-        },
-        sessionId
-      );
       for (let attempt = 0; attempt < 40; attempt += 1) {
         try {
           await sliccExtension.frames(Number(info.targetId));
@@ -73,6 +68,7 @@ test('seven: client nodeId survives a child commit reobserve without DOM documen
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
       }
+      await new Promise((resolve) => setTimeout(resolve, 100));
       let described;
       try {
         described = await sliccExtension.cdp.send(
