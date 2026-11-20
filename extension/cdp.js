@@ -2914,15 +2914,41 @@ class Connection {
     return true;
   }
 
-  childUnderCurrentMain(tab, parentTree, frameId, owned, generation) {
+  frameOfBackend(root, backendNodeId) {
+    if (!root || !Number.isSafeInteger(backendNodeId) || backendNodeId <= 0) return '';
+    const stack = [{ node: root, frameId: textOf(root.frameId) }];
+    while (stack.length) {
+      const { node, frameId } = stack.pop();
+      if (!node || typeof node !== 'object') continue;
+      if (node.backendNodeId === backendNodeId) return frameId;
+      const next =
+        (node.nodeName === '#document' || node.nodeType === 9) && textOf(node.frameId)
+          ? textOf(node.frameId)
+          : frameId;
+      for (const child of node.children ?? []) stack.push({ node: child, frameId: next });
+      if (node.contentDocument) {
+        stack.push({
+          node: node.contentDocument,
+          frameId: textOf(node.frameId) || textOf(node.contentDocument.frameId) || next,
+        });
+      }
+      for (const shadow of node.shadowRoots ?? []) stack.push({ node: shadow, frameId: next });
+    }
+    return '';
+  }
+
+  childUnderCurrentMain(tab, parentTree, frameId, ownerParent, generation) {
     if (!frameId || tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation)
       return false;
     if (frameIn(parentTree, frameId)) return true;
-    if (!owned) return false;
+    if (!textOf(ownerParent)) return false;
     tab.frameParents ??= new Map();
-    if (!tab.frameParents.has(frameId)) return true;
+    let parentId = tab.frameParents.has(frameId)
+      ? textOf(tab.frameParents.get(frameId))
+      : textOf(ownerParent);
+    if (!parentId) return false;
+    if (parentId === tab.mainFrameId) return true;
     const seen = new Set([frameId]);
-    let parentId = textOf(tab.frameParents.get(frameId));
     for (let depth = 0; parentId && depth < 8; depth += 1) {
       if (seen.has(parentId)) return false;
       seen.add(parentId);
@@ -2963,31 +2989,46 @@ class Connection {
       () => undefined
     );
     const type = targetInfo?.type || info.type;
-    let owned = type !== 'iframe';
+    let ownerBackendNodeId = 0;
     if (type === 'iframe' && info.target) {
-      owned = await this.inflight(
+      ownerBackendNodeId = await this.inflight(
         tabId,
         this.api.debugger.sendCommand({ tabId }, 'DOM.getFrameOwner', {
           frameId: info.target,
         })
       ).then(
-        (owner) => Number.isSafeInteger(owner?.backendNodeId) && owner.backendNodeId > 0,
-        () => false
+        (owner) =>
+          Number.isSafeInteger(owner?.backendNodeId) && owner.backendNodeId > 0
+            ? owner.backendNodeId
+            : 0,
+        () => 0
       );
     }
-    return { sessionId, info, tree, targetInfo, owned };
+    return { sessionId, info, tree, targetInfo, ownerBackendNodeId };
   }
 
-  async stampChildReobserve(tabId, tab, startedRevision, parentTree, generation, read) {
-    const { sessionId, info, tree, targetInfo, owned } = read;
+  async stampChildReobserve(
+    tabId,
+    tab,
+    startedRevision,
+    parentTree,
+    generation,
+    documentRoot,
+    read
+  ) {
+    const { sessionId, info, tree, targetInfo, ownerBackendNodeId } = read;
     const current = tab.debuggerChildInfo.get(sessionId);
     if (!current || current.revision === startedRevision || current.target !== info.target)
       return false;
     const target = textOf(targetInfo?.targetId) || current.target;
     const type = targetInfo?.type || current.type;
+    const ownerParent =
+      type === 'iframe' && ownerBackendNodeId
+        ? this.frameOfBackend(documentRoot, ownerBackendNodeId)
+        : '';
     if (
       type === 'iframe' &&
-      !this.childUnderCurrentMain(tab, parentTree, target, owned, generation)
+      !this.childUnderCurrentMain(tab, parentTree, target, ownerParent, generation)
     )
       return false;
     const ok = await this.childReobservePass(tabId, targetInfo, tree);
@@ -3014,9 +3055,16 @@ class Connection {
       ([, info]) => info.revision !== startedRevision
     );
     if (!stale.length) return;
-    const [parentTree, ...reads] = await Promise.all([
+    const [parentTree, documentRoot, ...reads] = await Promise.all([
       this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, 'Page.getFrameTree', {})).then(
         (result) => result?.frameTree,
+        () => undefined
+      ),
+      this.inflight(
+        tabId,
+        this.api.debugger.sendCommand({ tabId }, 'DOM.getDocument', { depth: -1, pierce: true })
+      ).then(
+        (result) => result?.root,
         () => undefined
       ),
       ...stale.map(([sessionId, info]) => this.readChildReobserve(tabId, sessionId, info)),
@@ -3024,8 +3072,6 @@ class Connection {
     if (this.tabState(tabId) !== tab || tab.debuggerRevision !== startedRevision) return;
     const generation = this.childReobserveGeneration(tab, parentTree);
     if (!generation) return;
-    tab.documents.remember(parentTree);
-    this.rememberParents(tab, parentTree);
     let stamped = false;
     for (const read of reads) {
       const result = await this.stampChildReobserve(
@@ -3034,6 +3080,7 @@ class Connection {
         startedRevision,
         parentTree,
         generation,
+        documentRoot,
         read
       );
       if (result == null) return;
