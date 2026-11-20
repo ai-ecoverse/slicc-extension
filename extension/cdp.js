@@ -962,15 +962,15 @@ class Connection {
     try {
       tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
     } catch {
-      return false;
+      return undefined;
     }
     const main = tree?.frameTree?.frame;
     tab.documents.remember(tree?.frameTree);
-    if (!main || typeof main.id !== 'string' || main.id === '') return false;
-    if (typeof main.loaderId !== 'string' || main.loaderId === '') return false;
-    if (this.protectedOrigin(textOf(main.securityOrigin))) return false;
-    if (!(await this.errorRootAllowed(tabId, main))) return false;
-    if (await this.inheritedProtected(tabId, main)) return false;
+    if (!main || typeof main.id !== 'string' || main.id === '') return undefined;
+    if (typeof main.loaderId !== 'string' || main.loaderId === '') return undefined;
+    if (this.protectedOrigin(textOf(main.securityOrigin))) return undefined;
+    if (!(await this.errorRootAllowed(tabId, main))) return undefined;
+    if (await this.inheritedProtected(tabId, main)) return undefined;
     if (!tab.mainFrameId) tab.mainFrameId = main.id;
     tab.attachRoot = {
       frameId: main.id,
@@ -978,11 +978,14 @@ class Connection {
       unreachableUrl: textOf(main.unreachableUrl),
     };
     await this.indexFrames(tabId, tab, tree.frameTree);
-    return true;
+    return {
+      frameId: main.id,
+      loaderId: main.loaderId,
+      unreachableUrl: textOf(main.unreachableUrl),
+    };
   }
 
-  async sameInventoriedRoot(tabId, tab) {
-    const expected = tab?.attachRoot;
+  async sameInventoriedRoot(tabId, tab, expected) {
     if (!expected?.frameId || !expected?.loaderId) return false;
     let tree;
     try {
@@ -995,6 +998,7 @@ class Connection {
     if (textOf(main.url).startsWith('chrome-error:')) {
       if (textOf(main.unreachableUrl) !== expected.unreachableUrl) return false;
     }
+    if (!(await this.errorRootAllowed(tabId, main))) return false;
     return true;
   }
 
@@ -1154,9 +1158,8 @@ class Connection {
         () => true,
         () => false
       );
-      const unwatched = !(await this.inventory(tabId, tab))
-        ? protectedRules.refusal
-        : await this.watchRuntime(tabId);
+      const judged = await this.inventory(tabId, tab);
+      const unwatched = !judged ? protectedRules.refusal : await this.watchRuntime(tabId);
       if (unwatched) {
         await this.abortAttach(tabId);
         throw new Error(unwatched);
@@ -1170,15 +1173,16 @@ class Connection {
         5000,
         'children'
       ).catch(() => undefined);
-    } else if (!(await this.inventory(tabId, tab))) {
-      refusal();
+      return this.announceAttach(tabId, targetId, created, judged);
     }
-    return this.announceAttach(tabId, targetId, created);
+    const judged = await this.inventory(tabId, tab);
+    if (!judged) refusal();
+    return this.announceAttach(tabId, targetId, created, judged);
   }
 
-  async announceAttach(tabId, targetId, created) {
+  async announceAttach(tabId, targetId, created, judged) {
     let tab = this.tabState(tabId);
-    if (!tab || !(await this.sameInventoriedRoot(tabId, tab))) {
+    if (!tab || !(await this.sameInventoriedRoot(tabId, tab, judged))) {
       if (created) await this.abortAttach(tabId);
       refusal();
     }
@@ -1187,9 +1191,10 @@ class Connection {
       if (created) await this.abortAttach(tabId);
       refusal();
     }
+    const viewed = this.view(current);
     let seen;
     try {
-      seen = await demandTab(this.api, this.view(current));
+      seen = await demandTab(this.api, viewed);
     } catch (error) {
       if (created) await this.abortAttach(tabId);
       throw error;
@@ -1211,7 +1216,7 @@ class Connection {
       method: 'Target.attachedToTarget',
       params: {
         sessionId,
-        targetInfo: { ...this.info(current), attached: true },
+        targetInfo: { ...this.info(viewed), attached: true },
         waitingForDebugger: false,
       },
     });

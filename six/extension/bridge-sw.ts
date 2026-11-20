@@ -141,7 +141,7 @@ function failuresOf(tabId: number): Bounded<true> {
 function failedView(tabId: number, tab: ChromeTab | undefined): ChromeTab | undefined {
   if (!tab || !failedBefore(tabId, tab.url)) return tab;
   const pending = failedBefore(tabId, tab.pendingUrl) ? '' : tab.pendingUrl;
-  return { ...tab, url: ERROR_PAGE, pendingUrl: pending };
+  return { ...tab, url: ERROR_PAGE, title: '', pendingUrl: pending };
 }
 
 async function confirmFailure(tabId: number, deps: BridgeSwDeps): Promise<void> {
@@ -1137,14 +1137,15 @@ async function cdpAttachToTarget(
     throw err;
   }
   const shield = tabShields.get(tabId);
+  let judged: { frameId: string; loaderId: string; unreachableUrl: string };
   try {
     if (!shield) throw new Error(PROTECTED_REFUSAL);
-    await shield.refreshInventoriedRoot();
+    judged = await shield.refreshInventoriedRoot();
   } catch {
     await abortOwnedAttach(tabId, state, deps);
     throw new Error(PROTECTED_REFUSAL);
   }
-  if (!(await shield.sameInventoriedRoot())) {
+  if (!(await shield.sameInventoriedRoot(judged))) {
     await abortOwnedAttach(tabId, state, deps);
     throw new Error(PROTECTED_REFUSAL);
   }
@@ -1153,7 +1154,8 @@ async function cdpAttachToTarget(
     await abortOwnedAttach(tabId, state, deps);
     throw new Error(PROTECTED_REFUSAL);
   }
-  if (await isProtectedTab(failedView(tabId, tab), deps.getTab)) {
+  const viewed = failedView(tabId, tab) ?? tab;
+  if (await isProtectedTab(viewed, deps.getTab)) {
     await abortOwnedAttach(tabId, state, deps);
     throw new Error(PROTECTED_REFUSAL);
   }
@@ -1161,19 +1163,18 @@ async function cdpAttachToTarget(
   state.cut.delete(sessionId);
   state.sessionToTab.set(sessionId, tabId);
   state.attachRefCounts.set(tabId, (state.attachRefCounts.get(tabId) ?? 0) + 1);
-  const url = tab.url || tab.pendingUrl || '';
+  const url = viewed.url || viewed.pendingUrl || '';
   const info = {
     targetId,
     type: 'page',
-    title: tab.title ?? '',
+    title: viewed.title ?? '',
     url,
     attached: true,
     canAccessOpener: false,
   };
   state.announce('Target.attachedToTarget', {
     sessionId,
-    targetInfo: url && isProtectedUrl(url) ? redacted(info) : info,
-    waitingForDebugger: false,
+    targetInfo: info,
   });
   return { sessionId };
 }

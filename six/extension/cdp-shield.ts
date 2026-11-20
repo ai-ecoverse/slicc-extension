@@ -1438,6 +1438,17 @@ function scrubFramesDeep(value: unknown): unknown {
   return out;
 }
 
+function scrubTargetInfoTitle(info: Record<string, unknown>): Record<string, unknown> {
+  const url = str(info['url']) ?? '';
+  const title = str(info['title']) ?? '';
+  if (title === '') return info;
+  if (urlNamed(url)) return { ...info, title: nameSeedOrigin(info) };
+  if (!url.startsWith('chrome-error:')) return info;
+  if (!historyTitleMarked(title)) return { ...info, title: '' };
+  const seed = title.includes('://') ? title : `https://${title}/`;
+  return { ...info, title: nameSeedOrigin({ url: seed }) };
+}
+
 function scrubTargetInfoDeep(value: unknown): unknown {
   if (Array.isArray(value)) {
     let out: unknown[] = value;
@@ -1458,13 +1469,9 @@ function scrubTargetInfoDeep(value: unknown): unknown {
     if (out === value) out = { ...value };
     out[key] = next;
   }
-  if (isTargetInfoShape(out) && urlNamed(out['url'])) {
-    if (out === value) out = { ...value };
-    if (typeof out['title'] === 'string' && out['title'] !== '') {
-      out['title'] = nameSeedOrigin(out);
-    }
-  }
-  return out;
+  if (!isTargetInfoShape(out)) return out;
+  const next = scrubTargetInfoTitle(out);
+  return next === out ? out : next;
 }
 
 function scrubDomDocumentNames(value: unknown): unknown {
@@ -1778,7 +1785,11 @@ export class TabShield {
     return true;
   }
 
-  private async inventoryFrames(): Promise<void> {
+  private async inventoryFrames(): Promise<{
+    frameId: string;
+    loaderId: string;
+    unreachableUrl: string;
+  }> {
     const tree = await this.send('Page.getFrameTree', {});
     const root = tree['frameTree'];
     this.documents.remember(root);
@@ -1795,14 +1806,26 @@ export class TabShield {
       if (!next) continue;
       await this.inventoryNode(next.node, next.parentId, main, pending);
     }
+    return {
+      frameId: main,
+      loaderId,
+      unreachableUrl: str(mainFrame['unreachableUrl']) ?? '',
+    };
   }
 
-  async refreshInventoriedRoot(): Promise<void> {
-    await this.inventoryFrames();
+  async refreshInventoriedRoot(): Promise<{
+    frameId: string;
+    loaderId: string;
+    unreachableUrl: string;
+  }> {
+    return this.inventoryFrames();
   }
 
-  async sameInventoriedRoot(): Promise<boolean> {
-    const expected = this.documents.frames.get(this.mainFrameId);
+  async sameInventoriedRoot(expected: {
+    frameId: string;
+    loaderId: string;
+    unreachableUrl: string;
+  }): Promise<boolean> {
     if (!expected?.frameId || !expected.loaderId) return false;
     let tree: CDPPayload;
     try {
@@ -1816,8 +1839,9 @@ export class TabShield {
     if (str(main['id']) !== expected.frameId) return false;
     if (str(main['loaderId']) !== expected.loaderId) return false;
     if ((str(main['url']) ?? '').startsWith('chrome-error:')) {
-      if ((str(main['unreachableUrl']) ?? '') !== this.rootUnreachable) return false;
+      if ((str(main['unreachableUrl']) ?? '') !== expected.unreachableUrl) return false;
     }
+    if (!(await this.errorRootAllowed(main))) return false;
     return true;
   }
 

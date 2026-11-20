@@ -16,6 +16,9 @@ const event = () => {
   return {
     addListener: (f) => fns.add(f),
     removeListener: (f) => fns.delete(f),
+    fire: (...args) => {
+      for (const f of fns) f(...args);
+    },
     fns,
   };
 };
@@ -110,7 +113,17 @@ async function sevenAttach(reads, opts = {}) {
         forwarded.push(method);
         if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
           if (opts.treeError) throw new Error(opts.treeError);
-          return typeof tree === 'function' ? tree(forwarded) : tree;
+          const answer = typeof tree === 'function' ? tree(forwarded) : tree;
+          if (opts.raceNavigated && method === 'Page.getFrameTree') {
+            const trees = forwarded.filter((m) => m === 'Page.getFrameTree').length;
+            if (trees === 1) {
+              const d2 = errorTree(failed, { loaderId: 'L-race' }).frameTree.frame;
+              queueMicrotask(() => {
+                api.debugger.onEvent.fire({ tabId: 1 }, 'Page.frameNavigated', { frame: d2 });
+              });
+            }
+          }
+          return answer;
         }
         if (method === 'Page.getNavigationHistory') {
           return {
@@ -211,6 +224,7 @@ async function sixAttach(reads, opts = {}) {
     postMessage: (m) => published.push(m),
     disconnect: () => {},
   };
+  const debuggerHandlers = new Set();
   const deps = six.buildDefaultBridgeSwDeps({
     readStoredLeaderTabId: async () => 99,
     readLeaderKind: async () => 'six',
@@ -220,7 +234,10 @@ async function sixAttach(reads, opts = {}) {
     detachDebugger: async () => {
       detached.push(1);
     },
-    subscribeDebuggerEvents: () => () => {},
+    subscribeDebuggerEvents: (handler) => {
+      debuggerHandlers.add(handler);
+      return () => debuggerHandlers.delete(handler);
+    },
     queryTabs: async () => [{ id: 1, ...reads(99) }],
     queryActiveTabId: async () => 1,
     getTab: async (id) => {
@@ -232,7 +249,18 @@ async function sixAttach(reads, opts = {}) {
       forwarded.push(method);
       if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
         if (opts.treeError) throw new Error(opts.treeError);
-        return typeof tree === 'function' ? tree(forwarded) : tree;
+        const answer = typeof tree === 'function' ? tree(forwarded) : tree;
+        if (opts.raceNavigated && method === 'Page.getFrameTree') {
+          const trees = forwarded.filter((m) => m === 'Page.getFrameTree').length;
+          if (trees === 2) {
+            const d2 = errorTree(failed, { loaderId: 'L-race' }).frameTree.frame;
+            queueMicrotask(() => {
+              for (const handler of debuggerHandlers)
+                handler(1, 'Page.frameNavigated', { frame: d2 });
+            });
+          }
+        }
+        return answer;
       }
       if (method === 'Page.getNavigationHistory') {
         return { currentIndex: 0, entries: [{ id: 1, url: ordinary, title: 'start' }] };
@@ -416,8 +444,8 @@ for (const transport of ['seven', 'six-bridge']) {
     const out = await run(() => ({ url: failed, title: 'vault.sliccy.ai', status: 'complete' }), {
       failedRecord: true,
     });
-    assertAttached(out);
-    assert.equal(out.announced.length, 1);
+    assertAttached(out, '');
+    assert.ok(!String(out.announced[0]?.params?.targetInfo?.title ?? '').includes('vault'));
   });
 
   test(`${transport}: refused attach leaves Fetch disabled and the tab usable`, async () => {
@@ -498,6 +526,32 @@ for (const transport of ['seven', 'six-bridge']) {
     );
     assertRefused(out);
     assert.equal(out.announced.length, 0);
+  });
+
+  test(`${transport}: frameNavigated after inventory cannot widen a frozen attach root`, async () => {
+    const d1 = errorTree(ordinaryFailed, { loaderId: 'L1' });
+    const d2 = errorTree(failed, { loaderId: 'L-race' });
+    const out = await run(
+      () => ({ url: ordinaryFailed, title: 'Missing page', status: 'complete' }),
+      {
+        raceNavigated: true,
+        tree: (forwarded) => {
+          const trees = forwarded.filter(
+            (m) => m === 'Page.getFrameTree' || m === 'Page.getResourceTree'
+          ).length;
+          if (transport === 'seven') return trees <= 1 ? d1 : d2;
+          return trees <= 2 ? d1 : d2;
+        },
+        navUrl: ordinaryFailed,
+      }
+    );
+    assertRefused(out);
+    assert.equal(out.announced.length, 0);
+    assert.ok(
+      !out.announced.some((m) => String(m.params?.targetInfo?.title ?? '').includes('vault'))
+    );
+    assert.equal(d2.frameTree.frame.loaderId, 'L-race');
+    assert.equal(d2.frameTree.frame.unreachableUrl, failed);
   });
 
   test(`${transport}: back-to-back navigation before announce refuses the stale inventory`, async () => {
@@ -873,6 +927,87 @@ for (const transport of ['seven', 'six-bridge']) {
     transport === 'seven'
       ? (value, method) => redactProtected(value, anyProtected, method)
       : (value, method) => sixShield.redactProtected(value, method);
+
+  test(`${transport}: chrome-error targetInfo title is not a failed host`, () => {
+    const changed = redact(
+      {
+        targetInfo: {
+          targetId: '1',
+          type: 'page',
+          url: ERROR_PAGE,
+          title: host,
+          attached: true,
+        },
+      },
+      'Target.targetInfoChanged'
+    );
+    assert.notEqual(changed.targetInfo.title, host);
+    assert.equal(changed.targetInfo.title, origin);
+    const targets = redact(
+      {
+        targetInfos: [
+          { targetId: '1', type: 'page', url: ERROR_PAGE, title: host },
+          { targetId: '2', type: 'page', url: ordinary, title: 'ok' },
+        ],
+      },
+      'Target.getTargets'
+    );
+    assert.equal(targets.targetInfos[0].title, origin);
+    assert.equal(targets.targetInfos[1].title, 'ok');
+    const plain = redact(
+      {
+        targetInfo: {
+          targetId: '3',
+          type: 'page',
+          url: ERROR_PAGE,
+          title: 'Missing page',
+          attached: false,
+        },
+      },
+      'Target.getTargetInfo'
+    );
+    assert.equal(plain.targetInfo.title, '');
+  });
+
+  test(`${transport}: error-document context and DOM name do not carry a failed host`, () => {
+    const context = redact(
+      {
+        context: {
+          id: 1,
+          origin: '://',
+          name: '',
+          auxData: { isDefault: true, frameId: 'ROOT', type: 'default' },
+        },
+      },
+      'Runtime.executionContextCreated'
+    );
+    assert.equal(context.context.name, '');
+    const named = redact(
+      {
+        context: {
+          id: 2,
+          origin: 'null',
+          name: '__crx_world__',
+          auxData: { isDefault: false, frameId: 'ROOT', type: 'isolated' },
+        },
+      },
+      'Runtime.executionContextCreated'
+    );
+    assert.equal(named.context.name, '__crx_world__');
+    const node = redact(
+      {
+        node: {
+          nodeId: 1,
+          attributes: ['name', host],
+          documentURL: ERROR_PAGE,
+          baseURL: ERROR_PAGE,
+        },
+      },
+      'DOM.describeNode'
+    );
+    assert.deepEqual(node.node.attributes, ['name', host]);
+    assert.equal(node.node.documentURL, ERROR_PAGE);
+  });
 
   test(`${transport}: shape-scoped name scrub keeps ordinary reply shapes`, () => {
     const evaluated = redact(

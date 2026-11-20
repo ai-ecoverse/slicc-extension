@@ -712,6 +712,19 @@ function scrubFramesDeep(value, isProtected) {
   return out;
 }
 
+function scrubTargetInfoTitle(info, isProtected) {
+  const url = typeof info.url === 'string' ? info.url : '';
+  const title = typeof info.title === 'string' ? info.title : '';
+  if (title === '') return info;
+  if (urlNamed(url, isProtected)) {
+    return { ...info, title: nameSeedOrigin(info, isProtected) };
+  }
+  if (!url.startsWith('chrome-error:')) return info;
+  if (!historyTitleMarked(title, isProtected)) return { ...info, title: '' };
+  const seed = title.includes('://') ? title : `https://${title}/`;
+  return { ...info, title: nameSeedOrigin({ url: seed }, isProtected) };
+}
+
 function scrubTargetInfoDeep(value, isProtected) {
   if (Array.isArray(value)) {
     let out = value;
@@ -732,12 +745,9 @@ function scrubTargetInfoDeep(value, isProtected) {
     if (out === value) out = { ...value };
     out[key] = next;
   }
-  if (isTargetInfoShape(out) && urlNamed(out.url, isProtected)) {
-    if (out === value) out = { ...value };
-    if (typeof out.title === 'string' && out.title !== '')
-      out.title = nameSeedOrigin(out, isProtected);
-  }
-  return out;
+  if (!isTargetInfoShape(out)) return out;
+  const next = scrubTargetInfoTitle(out, isProtected);
+  return next === out ? out : next;
 }
 
 function scrubDomDocumentNames(value, isProtected) {
