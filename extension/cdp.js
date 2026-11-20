@@ -1024,6 +1024,7 @@ class Connection {
     for (let attempt = 0; ; attempt++) {
       if (await this.sameInventoriedRoot(tabId, tab, current)) return current;
       if (attempt === 3) return undefined;
+      await new Promise((resolve) => setTimeout(resolve, 50));
       current = await this.inventory(tabId, tab);
       if (!current) return undefined;
     }
@@ -1191,15 +1192,6 @@ class Connection {
         await this.abortAttach(tabId);
         throw new Error(unwatched);
       }
-      await bounded(
-        this.send(tabId, 'Target.setAutoAttach', {
-          autoAttach: true,
-          waitForDebuggerOnStart: true,
-          flatten: true,
-        }),
-        5000,
-        'children'
-      ).catch(() => undefined);
       return this.announceAttach(tabId, targetId, created, judged);
     }
     const judged = await this.inventory(tabId, tab);
@@ -1231,6 +1223,17 @@ class Connection {
     if (!tab) {
       if (created) await this.abortAttach(tabId);
       refusal();
+    }
+    if (created) {
+      await bounded(
+        this.send(tabId, 'Target.setAutoAttach', {
+          autoAttach: true,
+          waitForDebuggerOnStart: true,
+          flatten: true,
+        }),
+        5000,
+        'children'
+      ).catch(() => undefined);
     }
     tab.pageUrl = seen.url;
     const sessionId = this.state.sessions.has(targetId)

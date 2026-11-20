@@ -1982,6 +1982,7 @@ export class TabShield {
     for (let attempt = 0; ; attempt++) {
       if (await this.sameInventoriedRoot(current)) return current;
       if (attempt === 3) refuse(PROTECTED_RULES.refusal);
+      await new Promise((resolve) => setTimeout(resolve, 50));
       current = await this.inventoryFrames();
     }
   }
