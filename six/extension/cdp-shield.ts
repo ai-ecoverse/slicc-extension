@@ -1128,10 +1128,7 @@ export function redactProtected<T>(value: T, method?: string): T {
     if (out === source) out = { ...source };
     out[key] = next;
   }
-  if (
-    method === 'Page.getFrameTree' &&
-    ['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(original[key]))
-  ) {
+  if (frameNameHidden(original)) {
     out = { ...out };
     delete out['name'];
     delete out['urlFragment'];
@@ -1348,6 +1345,22 @@ export function redacted(info: CDPPayload): CDPPayload {
   return { ...info, url: origin, title: origin };
 }
 
+function frameNameHidden(value: Record<string, unknown>): boolean {
+  if (['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(value[key]))) return true;
+  const url = str(value['url']) ?? '';
+  if (!url.startsWith('chrome-error:')) return false;
+  const unreachable = value['unreachableUrl'];
+  if (typeof unreachable !== 'string' || unreachable === '') return true;
+  return urlNamed(unreachable);
+}
+
+function historyTitleMarked(title: string): boolean {
+  if (title === '') return false;
+  if (title.includes('://') || title.startsWith('//')) return urlProtected(title);
+  if (!/^[A-Za-z0-9.-]+$/.test(title) || !title.includes('.')) return false;
+  return urlProtected(title) || urlProtected(`https://${title}/`);
+}
+
 export function redactHistory(result: CDPPayload): void {
   const entries = result['entries'];
   if (!Array.isArray(entries)) return;
@@ -1355,8 +1368,17 @@ export function redactHistory(result: CDPPayload): void {
     if (!isObj(entry)) return entry;
     const url = str(entry['url']) ?? '';
     const typed = str(entry['userTypedURL']) ?? '';
-    if (!urlProtected(url) && !urlProtected(typed)) return entry;
-    const origin = str(redacted({ url: urlProtected(url) ? url : typed })['url']) ?? 'about:blank';
+    const title = str(entry['title']) ?? '';
+    const marked = urlProtected(url) || urlProtected(typed) || historyTitleMarked(title);
+    if (!marked) return entry;
+    const seed = urlProtected(url)
+      ? url
+      : urlProtected(typed)
+        ? typed
+        : title.includes('://')
+          ? title
+          : `https://${title}/`;
+    const origin = str(redacted({ url: seed })['url']) ?? 'about:blank';
     return { ...entry, url: origin, userTypedURL: origin, title: origin };
   });
 }
@@ -1589,6 +1611,10 @@ export class TabShield {
       if (!next) continue;
       await this.inventoryNode(next.node, next.parentId, main, pending);
     }
+  }
+
+  async refreshInventoriedRoot(): Promise<void> {
+    await this.inventoryFrames();
   }
 
   async sameInventoriedRoot(): Promise<boolean> {

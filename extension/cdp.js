@@ -54,6 +54,7 @@ import {
   pruneSealed,
   pruneSnapshot,
   RESERVED_WORLD,
+  redactHistory,
   redactProtected,
   redactText,
   refusedOutright,
@@ -1169,6 +1170,8 @@ class Connection {
         5000,
         'children'
       ).catch(() => undefined);
+    } else if (!(await this.inventory(tabId, tab))) {
+      refusal();
     }
     return this.announceAttach(tabId, targetId, created);
   }
@@ -1972,6 +1975,7 @@ class Connection {
     tab.worlds.learn(result);
     if (method === 'Page.createIsolatedWorld') tab.worlds.seen(result.executionContextId);
     this.debuggerGate.revoke(tabId);
+    if (method === 'Page.getNavigationHistory') redactHistory(result, anyProtected);
     if (method === 'Page.getFrameTree' || method === 'Page.getResourceTree') {
       await resolveFrameOrigins(result.frameTree, tab.uncertain ?? new Set(), (id) =>
         this.documentOrigin(tabId, id)

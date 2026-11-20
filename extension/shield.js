@@ -608,6 +608,52 @@ function urlNamed(text, isProtected) {
   return typeof text === 'string' && text !== '' && isProtected(text);
 }
 
+function frameNameHidden(value, isProtected) {
+  if (['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(value[key], isProtected)))
+    return true;
+  const url = typeof value.url === 'string' ? value.url : '';
+  if (!url.startsWith('chrome-error:')) return false;
+  const unreachable = value.unreachableUrl;
+  if (typeof unreachable !== 'string' || unreachable === '') return true;
+  return urlNamed(unreachable, isProtected);
+}
+
+function historyTitleMarked(title, isProtected) {
+  if (typeof title !== 'string' || title === '') return false;
+  if (title.includes('://') || title.startsWith('//')) return isProtected(title);
+  if (!/^[A-Za-z0-9.-]+$/.test(title) || !title.includes('.')) return false;
+  return isProtected(title) || isProtected(`https://${title}/`);
+}
+
+export function redactHistory(result, isProtected) {
+  const entries = result?.entries;
+  if (!Array.isArray(entries)) return;
+  result.entries = entries.map((entry) => {
+    if (!entry || typeof entry !== 'object') return entry;
+    const url = typeof entry.url === 'string' ? entry.url : '';
+    const typed = typeof entry.userTypedURL === 'string' ? entry.userTypedURL : '';
+    const title = typeof entry.title === 'string' ? entry.title : '';
+    const marked =
+      urlNamed(url, isProtected) ||
+      urlNamed(typed, isProtected) ||
+      historyTitleMarked(title, isProtected);
+    if (!marked) return entry;
+    const seed = urlNamed(url, isProtected)
+      ? url
+      : urlNamed(typed, isProtected)
+        ? typed
+        : title.includes('://')
+          ? title
+          : `https://${title}/`;
+    let origin = 'about:blank';
+    try {
+      const parsed = new URL(seed);
+      if (parsed.origin !== 'null') origin = parsed.origin;
+    } catch {}
+    return { ...entry, url: origin, userTypedURL: origin, title: origin };
+  });
+}
+
 function withHeaders(value, isProtected) {
   let out = value;
   if (Array.isArray(value.responseHeaders)) {
@@ -658,10 +704,7 @@ export function redactProtected(value, isProtected, method) {
     if (out === source || out === keyed) out = { ...keyed };
     out[key] = next;
   }
-  if (
-    method === 'Page.getFrameTree' &&
-    ['url', 'securityOrigin', 'unreachableUrl'].some((key) => urlNamed(value[key], isProtected))
-  ) {
+  if (frameNameHidden(value, isProtected)) {
     out = { ...out };
     delete out.name;
     delete out.urlFragment;
