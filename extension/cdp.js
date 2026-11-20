@@ -1682,12 +1682,13 @@ class Connection {
     if (treeNamesProtected(tree?.frameTree, anyProtected)) refusal();
   }
 
-  async protectedHistory(tabId, onRefused) {
+  async protectedHistory(tabId, onRefused, opts = {}) {
     const history = await this.send(tabId, 'Page.getNavigationHistory', {}).catch(() =>
       unsettled()
     );
     const entry = history?.entries?.[history.currentIndex];
     if (!entry || typeof entry.url !== 'string' || !entry.url) unsettled();
+    if (opts.rejectAbout && entry.url.startsWith('about:')) unsettled();
     if (urlProtected(guard, entry.url)) {
       onRefused?.(entry.url);
       refusal();
@@ -1803,9 +1804,9 @@ class Connection {
     }
     await demandTab(this.api, raw);
     const url = textOf(raw.url);
-    if (protectedRules.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
-    if (raw.pendingUrl && raw.pendingUrl !== url) return;
-    await this.protectedHistory(tabId);
+    const wrapped = protectedRules.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`));
+    if (!wrapped && raw.pendingUrl && raw.pendingUrl !== url) return;
+    await this.protectedHistory(tabId, undefined, { rejectAbout: wrapped });
   }
 
   held(tab, method, params, sessionId) {

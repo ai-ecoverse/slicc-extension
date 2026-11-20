@@ -2545,7 +2545,10 @@ export class TabShield {
     return unreachable !== undefined && unfragmented(unreachable) === unfragmented(url);
   }
 
-  private async protectedHistory(onRefused?: (url: string) => void): Promise<void> {
+  private async protectedHistory(
+    onRefused?: (url: string) => void,
+    opts: { rejectAbout?: boolean } = {}
+  ): Promise<void> {
     const history = await this.send('Page.getNavigationHistory', {}).catch(() =>
       refuse(UNSETTLED_REFUSAL)
     );
@@ -2554,6 +2557,7 @@ export class TabShield {
     const entry = typeof index === 'number' ? entries[index] : undefined;
     if (!isObj(entry) || typeof entry['url'] !== 'string' || !entry['url'])
       refuse(UNSETTLED_REFUSAL);
+    if (opts.rejectAbout && entry['url'].startsWith('about:')) refuse(UNSETTLED_REFUSAL);
     if (urlProtected(entry['url'])) {
       onRefused?.(entry['url']);
       refuse(PROTECTED_RULES.refusal);
@@ -2643,9 +2647,9 @@ export class TabShield {
     }
     this.refuseShown(tab, await this.openerState(tab));
     const url = tab.url ?? '';
-    if (PROTECTED_RULES.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`))) return;
-    if (tab.pendingUrl && tab.pendingUrl !== url) return;
-    await this.protectedHistory();
+    const wrapped = PROTECTED_RULES.innerSchemes.some((scheme) => url.startsWith(`${scheme}:`));
+    if (!wrapped && tab.pendingUrl && tab.pendingUrl !== url) return;
+    await this.protectedHistory(undefined, { rejectAbout: wrapped });
   }
 
   private async admit(method: string, params: CDPPayload): Promise<void> {
