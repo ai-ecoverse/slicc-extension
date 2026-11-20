@@ -1163,18 +1163,19 @@ async function cdpAttachToTarget(
   state.cut.delete(sessionId);
   state.sessionToTab.set(sessionId, tabId);
   state.attachRefCounts.set(tabId, (state.attachRefCounts.get(tabId) ?? 0) + 1);
-  const url = viewed.url || viewed.pendingUrl || '';
+  const url = tab.url || tab.pendingUrl || '';
   const info = {
     targetId,
     type: 'page',
-    title: viewed.title ?? '',
+    title: tab.title ?? '',
     url,
     attached: true,
     canAccessOpener: false,
   };
   state.announce('Target.attachedToTarget', {
     sessionId,
-    targetInfo: info,
+    targetInfo: url && isProtectedUrl(url) ? redacted(info) : info,
+    waitingForDebugger: false,
   });
   return { sessionId };
 }

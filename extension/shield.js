@@ -180,6 +180,7 @@ export const KEY_COLLISION =
   'slicc: refused: two keys of this payload reduce to the same protected origin';
 export const ENCODED = 'slicc: refused: an encoded payload names a protected url';
 const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
+const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
 const TARGETS = new Set(['location', 'content-location', 'refresh', 'link']);
 
 const AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i;
@@ -1018,6 +1019,10 @@ function redactDeep(value, isProtected, method) {
     if (next === item) continue;
     if (out === source || out === keyed) out = { ...keyed };
     out[key] = next;
+  }
+  if ('urlFragment' in value && URL_KEYS.some((k) => urlNamed(value[k], isProtected))) {
+    if (out === value) out = { ...value };
+    delete out.urlFragment;
   }
   return out;
 }

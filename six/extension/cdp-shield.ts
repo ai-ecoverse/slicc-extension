@@ -600,6 +600,7 @@ export const KEY_COLLISION =
   'slicc: refused: two keys of this payload reduce to the same protected origin';
 export const ENCODED = 'slicc: refused: an encoded payload names a protected url';
 const WEB_SCHEMES = ['https', 'http', 'wss', 'ws'];
+const URL_KEYS = ['url', 'unreachableUrl', 'userTypedURL'];
 const TARGETS = new Set(['location', 'content-location', 'refresh', 'link']);
 
 const AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i;
@@ -1126,6 +1127,10 @@ function redactDeep<T>(value: T, method?: string): T {
     if (next === item) continue;
     if (out === source) out = { ...source };
     out[key] = next;
+  }
+  if ('urlFragment' in original && URL_KEYS.some((k) => urlNamed(original[k]))) {
+    if (out === original) out = { ...original };
+    delete out['urlFragment'];
   }
   return out as T;
 }
@@ -1888,18 +1893,38 @@ export class TabShield {
     return true;
   }
 
+  private async settleInventoriedRoot(
+    mainFrame: Record<string, unknown>
+  ): Promise<CDPPayload | undefined> {
+    const frameUrl = str(mainFrame['url']) ?? '';
+    const loaderId = str(mainFrame['loaderId']);
+    if (loaderId && frameUrl !== '' && !frameUrl.startsWith('about:')) return undefined;
+    if (await this.inheritedProtected(mainFrame)) refuse(PROTECTED_RULES.refusal);
+    return this.send('Page.getFrameTree', {});
+  }
+
   private async inventoryFrames(): Promise<{
     frameId: string;
     loaderId: string;
     unreachableUrl: string;
   }> {
-    const tree = await this.send('Page.getFrameTree', {});
-    const root = tree['frameTree'];
+    let tree = await this.send('Page.getFrameTree', {});
+    let root = tree['frameTree'];
     this.documents.remember(root);
-    const mainFrame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
-    const main = mainFrame ? str(mainFrame['id']) : undefined;
-    const loaderId = mainFrame ? str(mainFrame['loaderId']) : undefined;
-    if (!main || !mainFrame || !loaderId) refuse(PROTECTED_RULES.refusal);
+    let mainFrame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
+    let main = mainFrame ? str(mainFrame['id']) : undefined;
+    if (!main || !mainFrame) refuse(PROTECTED_RULES.refusal);
+    const refreshed = await this.settleInventoriedRoot(mainFrame);
+    if (refreshed) {
+      tree = refreshed;
+      root = tree['frameTree'];
+      this.documents.remember(root);
+      mainFrame = isObj(root) && isObj(root['frame']) ? root['frame'] : undefined;
+      main = mainFrame ? str(mainFrame['id']) : undefined;
+      if (!main || !mainFrame) refuse(PROTECTED_RULES.refusal);
+    }
+    const loaderId = str(mainFrame['loaderId']);
+    if (!loaderId) refuse(PROTECTED_RULES.refusal);
     if (!(await this.errorRootAllowed(mainFrame))) refuse(PROTECTED_RULES.refusal);
     this.mainFrameId = main;
     this.rootUnreachable = str(mainFrame['unreachableUrl']) ?? '';

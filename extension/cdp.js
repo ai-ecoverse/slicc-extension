@@ -964,9 +964,26 @@ class Connection {
     } catch {
       return undefined;
     }
-    const main = tree?.frameTree?.frame;
+    let main = tree?.frameTree?.frame;
     tab.documents.remember(tree?.frameTree);
     if (!main || typeof main.id !== 'string' || main.id === '') return undefined;
+    const url = textOf(main.url);
+    const unsettled =
+      typeof main.loaderId !== 'string' ||
+      main.loaderId === '' ||
+      url === '' ||
+      url.startsWith('about:');
+    if (unsettled) {
+      if (await this.inheritedProtected(tabId, main)) return undefined;
+      try {
+        tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
+      } catch {
+        return undefined;
+      }
+      main = tree?.frameTree?.frame;
+      tab.documents.remember(tree?.frameTree);
+      if (!main || typeof main.id !== 'string' || main.id === '') return undefined;
+    }
     if (typeof main.loaderId !== 'string' || main.loaderId === '') return undefined;
     if (this.protectedOrigin(textOf(main.securityOrigin))) return undefined;
     if (!(await this.errorRootAllowed(tabId, main))) return undefined;
@@ -1216,7 +1233,7 @@ class Connection {
       method: 'Target.attachedToTarget',
       params: {
         sessionId,
-        targetInfo: { ...this.info(viewed), attached: true },
+        targetInfo: { ...this.info(current), attached: true },
         waitingForDebugger: false,
       },
     });
