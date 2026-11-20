@@ -514,24 +514,90 @@ class Connection {
     throw new Error(`slicc: frame-diag: witness:${why.join(',') || 'moved'}`);
   }
 
+  bumpDebuggerRevision(tab, reason, detail = {}) {
+    if (!tab) return;
+    tab.debuggerRevision += 1;
+    const entry = {
+      at: Date.now(),
+      revision: tab.debuggerRevision,
+      reason,
+      ...detail,
+    };
+    const log = tab.debuggerRevisionLog ?? (tab.debuggerRevisionLog = []);
+    log.push(entry);
+    if (log.length > 40) log.splice(0, log.length - 40);
+    return entry;
+  }
+
+  noteChildRefresh(tab, method, detail = {}) {
+    if (!tab) return;
+    const entry = {
+      at: Date.now(),
+      method,
+      debuggerRevision: tab.debuggerRevision,
+      ...detail,
+    };
+    const log = tab.debuggerChildRefreshLog ?? (tab.debuggerChildRefreshLog = []);
+    log.push(entry);
+    if (log.length > 40) log.splice(0, log.length - 40);
+    return entry;
+  }
+
+  childDiagUrl(url) {
+    return {
+      scheme: typeof url === 'string' ? url.split(':')[0] : undefined,
+      urlTail: typeof url === 'string' ? url.slice(-48) : undefined,
+    };
+  }
+
+  recordChildDetach(tab, method, child, prior) {
+    this.noteChildRefresh(tab, method, {
+      sessionId: String(child ?? '').slice(0, 12),
+      target: String(prior?.target ?? '').slice(0, 12),
+      ...this.childDiagUrl(prior?.url),
+      childRevision: prior?.revision,
+    });
+  }
+
+  recordChildAttach(tab, method, child, info, prior) {
+    this.noteChildRefresh(tab, method, {
+      sessionId: String(child ?? '').slice(0, 12),
+      target: String(info?.targetId ?? '').slice(0, 12),
+      ...this.childDiagUrl(info?.url),
+      childRevision: tab.debuggerRevision,
+      priorChildRevision: prior?.revision,
+    });
+  }
+
   frameDiagSnapshot(tab, phases, extra = {}) {
+    const tabRevision = tab?.debuggerRevision;
     const children = [...(tab?.debuggerChildInfo ?? [])].map(([sessionId, info]) => ({
       sessionId: String(sessionId).slice(0, 12),
       target: String(info?.target ?? '').slice(0, 12),
       type: info?.type,
       scheme: typeof info?.url === 'string' ? info.url.split(':')[0] : typeof info?.url,
+      urlTail: typeof info?.url === 'string' ? info.url.slice(-48) : undefined,
+      childRevision: info?.revision,
+      tabRevision,
+      revisionMatch: info?.revision === tabRevision,
       resumed: info?.resumed === true,
       waiting: info?.waiting === true,
       resumeMs: info?.resumeMs,
       resumeError: info?.resumeError,
     }));
+    const bumps = tab?.debuggerRevisionLog ?? [];
+    const refreshes = tab?.debuggerChildRefreshLog ?? [];
     return {
       ...extra,
       phases,
       known: this.debuggerGate.knownChildrenWhy(tab) ?? 'ok',
-      debuggerRevision: tab?.debuggerRevision,
+      debuggerRevision: tabRevision,
       childCount: tab?.debuggerChildren?.size,
       children,
+      lastBump: bumps.at(-1) ?? null,
+      recentBumps: bumps.slice(-8),
+      lastChildRefresh: refreshes.at(-1) ?? null,
+      recentChildRefreshes: refreshes.slice(-8),
     };
   }
 
@@ -1286,6 +1352,8 @@ class Connection {
         debuggerChildren: new Set(),
         debuggerChildInfo: new Map(),
         debuggerRevision: 0,
+        debuggerRevisionLog: [],
+        debuggerChildRefreshLog: [],
         wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
       this.state.tabs.set(tabId, tab);
@@ -2573,8 +2641,10 @@ class Connection {
       )?.[0] ||
       textOf(p.targetInfo?.targetId);
     if (method === 'Target.detachedFromTarget') {
+      const prior = tab?.debuggerChildInfo.get(child);
       tab?.debuggerChildren.delete(child);
       tab?.debuggerChildInfo.delete(child);
+      this.recordChildDetach(tab, method, child, prior);
     }
     if (method === 'Target.attachedToTarget' || method === 'Target.targetInfoChanged') {
       tab?.debuggerChildren.add(child);
@@ -2590,6 +2660,7 @@ class Connection {
         resumeError: prior?.resumeError,
         waiting: method === 'Target.attachedToTarget' ? true : prior?.waiting === true,
       });
+      this.recordChildAttach(tab, method, child, p.targetInfo, prior);
       this.debuggerGate.revoke(tabId);
     }
     const url = textOf(p.targetInfo?.url);
@@ -2977,7 +3048,11 @@ class Connection {
       this.debuggerGate.childCommit(details.tabId, details);
       return;
     }
-    tab.debuggerRevision += 1;
+    this.bumpDebuggerRevision(tab, 'main-commit', {
+      frameId: details.frameId,
+      urlTail: typeof details.url === 'string' ? details.url.slice(-48) : undefined,
+      transitionType: details.transitionType,
+    });
     this.debuggerGate.revoke(details.tabId);
   }
 

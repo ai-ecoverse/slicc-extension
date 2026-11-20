@@ -807,7 +807,12 @@ export class DebuggerGate {
     const tab = this.connection.tabState(tabId);
     const state = this.states.get(tabId);
     const current = this.convertible(tabId, state, false);
-    tab.debuggerRevision += 1;
+    this.connection.bumpDebuggerRevision(tab, 'child-commit', {
+      frameId: frame?.frameId,
+      urlTail: typeof frame?.url === 'string' ? frame.url.slice(-48) : undefined,
+      errorOccurred: frame?.errorOccurred === true,
+      transitionType: frame?.transitionType,
+    });
     if (this.frameBlocked(frame)) {
       void this.drop(tabId);
       return;

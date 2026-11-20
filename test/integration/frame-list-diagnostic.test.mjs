@@ -290,6 +290,64 @@ test('frame list diagnostic ordinary unreachable iframe', async (t) => {
         diag: parsed.diag,
       };
     });
+    const revisionTrace = attempts
+      .filter((a) => !a.ok && a.diag)
+      .map((a) => ({
+        attempt: a.attempt,
+        at: a.at,
+        tabRevision: a.diag.debuggerRevision,
+        children: (a.diag.children || []).map((c) => ({
+          scheme: c.scheme,
+          childRevision: c.childRevision,
+          tabRevision: c.tabRevision,
+          match: c.revisionMatch,
+          urlTail: c.urlTail,
+        })),
+        lastBump: a.diag.lastBump,
+        lastChildRefresh: a.diag.lastChildRefresh,
+      }));
+    const tabRevisions = revisionTrace.map((t) => t.tabRevision).filter((v) => v != null);
+    const uniqueTabRevisions = [...new Set(tabRevisions)];
+    const revisionMoved = uniqueTabRevisions.length > 1;
+    let stabilizedAfterAttempt = null;
+    if (tabRevisions.length) {
+      let last = tabRevisions[0];
+      let lastChange = 0;
+      for (let i = 1; i < revisionTrace.length; i += 1) {
+        const value = revisionTrace[i].tabRevision;
+        if (value !== last) {
+          last = value;
+          lastChange = i;
+        }
+      }
+      if (!revisionMoved) stabilizedAfterAttempt = revisionTrace[0]?.attempt ?? 0;
+      else if (lastChange < revisionTrace.length - 1)
+        stabilizedAfterAttempt = revisionTrace[lastChange]?.attempt ?? null;
+    }
+    const anyChildMatched = revisionTrace.some((t) => t.children.some((c) => c.match));
+    const bumpReasons = {};
+    for (const t of revisionTrace) {
+      const reason = t.lastBump?.reason;
+      if (!reason) continue;
+      bumpReasons[reason] = (bumpReasons[reason] || 0) + 1;
+    }
+    const refreshMethods = {};
+    for (const t of revisionTrace) {
+      const method = t.lastChildRefresh?.method;
+      if (!method) continue;
+      refreshMethods[method] = (refreshMethods[method] || 0) + 1;
+    }
+    const revisionDecision = !revisionTrace.length
+      ? 'no-revision-fails'
+      : revisionMoved && stabilizedAfterAttempt == null
+        ? 'keeps-renavigating: debuggerRevision never stabilises in the window'
+        : revisionMoved && !anyChildMatched
+          ? 'stabilised-but-stale: debuggerRevision stopped moving; childRevision never caught up'
+          : !revisionMoved && !anyChildMatched
+            ? 'stale-from-start: debuggerRevision flat; childRevision never equals tab'
+            : anyChildMatched
+              ? 'child-revision-matched-at-least-once'
+              : 'mixed-revision';
     rows.push({
       i,
       ok: Boolean(result.snapshot),
@@ -304,6 +362,20 @@ test('frame list diagnostic ordinary unreachable iframe', async (t) => {
         sampleCount: reach.sampleCount,
         lastSample: reach.lastSample,
       },
+      revision: {
+        moved: revisionMoved,
+        uniqueTabRevisions,
+        stabilizedAfterAttempt,
+        anyChildMatched,
+        bumpReasons,
+        refreshMethods,
+        decision: revisionDecision,
+        first: revisionTrace[0] ?? null,
+        last: revisionTrace.at(-1) ?? null,
+        samples: revisionTrace.filter(
+          (_, idx) => idx === 0 || idx === revisionTrace.length - 1 || idx % 20 === 0
+        ),
+      },
       attempts,
       firstFail: attempts.find((a) => !a.ok) || null,
       lastFail: [...attempts].reverse().find((a) => !a.ok) || null,
@@ -316,10 +388,13 @@ test('frame list diagnostic ordinary unreachable iframe', async (t) => {
   let canaryErrorOnFail = 0;
   let canaryErrorOnPass = 0;
   let canaryMissingOnFail = 0;
+  const revisionDecisions = {};
   for (const row of rows) {
     if (row.ok && row.reach.canaryReachedChromeError) canaryErrorOnPass += 1;
     if (!row.ok && row.reach.canaryReachedChromeError) canaryErrorOnFail += 1;
     if (!row.ok && !row.reach.canaryReachedChromeError) canaryMissingOnFail += 1;
+    const rd = row.revision?.decision;
+    if (rd) revisionDecisions[rd] = (revisionDecisions[rd] || 0) + 1;
     for (const attempt of row.attempts) {
       if (attempt.ok) continue;
       const key = attempt.reason || 'unknown';
@@ -350,6 +425,7 @@ test('frame list diagnostic ordinary unreachable iframe', async (t) => {
           : rows.every((r) => r.ok)
             ? 'settled'
             : 'mixed',
+    revisionDecisions,
     boundedCount,
     waitingChildOnFail,
     reasonCounts,
