@@ -115,16 +115,18 @@ async function attach(page, url) {
 async function poll(page, targetId) {
   return page.evaluate(async (targetId) => {
     let last;
+    const reasons = [];
     for (let attempt = 0; attempt < 30; attempt += 1) {
       try {
         await sliccExtension.frames(Number(targetId));
         return { attempt, ok: true };
       } catch (error) {
         last = error.message;
+        reasons.push(last);
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return { ok: false, last };
+    return { ok: false, last, reasons: [...new Set(reasons)] };
   }, targetId);
 }
 
@@ -156,7 +158,7 @@ test('diag: repeated error frame settling on both hosts', async (t) => {
   const rows = [];
   for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
     const page = await chrome.visit(t, `https://${host}/`);
-    for (let rep = 0; rep < 15; rep += 1) {
+    for (let rep = 0; rep < 32; rep += 1) {
       const url = `https://ordinary.test/doc?swap-repeat-${host}-${rep}`;
       const target = await chrome.visit(t, url);
       const targetId = await attach(page, url);
@@ -170,7 +172,12 @@ test('diag: repeated error frame settling on both hosts', async (t) => {
       const committed = events.findIndex(
         (e) => e.method === 'webNavigation.onCommitted' && e.frameId > 0
       );
+      const swapped = events.findLastIndex(
+        (e) => e.method === 'Page.frameDetached' && e.reason === 'swap'
+      );
       rows.push({
+        swapBeforeCommit: swapped >= 0 && committed >= 0 && swapped < committed,
+        timeline: polled.ok ? undefined : events,
         host,
         rep,
         forcing: changed >= 0 && committed >= 0 && changed < committed,
@@ -180,12 +187,18 @@ test('diag: repeated error frame settling on both hosts', async (t) => {
     }
   }
   for (const row of rows) report('row', row);
-  report('summary', {
-    total: rows.length,
-    ok: rows.filter((row) => row.ok).length,
-    forcing: rows.filter((row) => row.forcing).length,
-    forcingOk: rows.filter((row) => row.forcing && row.ok).length,
-  });
+  for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
+    for (const forcing of [true, false]) {
+      const group = rows.filter((row) => row.host === host && row.forcing === forcing);
+      report('summary', {
+        host,
+        variant: forcing ? 'forcing' : 'other',
+        total: group.length,
+        ok: group.filter((row) => row.ok).length,
+        swapBeforeCommit: group.filter((row) => row.swapBeforeCommit).length,
+      });
+    }
+  }
   assert.deepEqual(
     rows.filter((row) => !row.ok),
     []
