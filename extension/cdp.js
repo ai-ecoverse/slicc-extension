@@ -1166,6 +1166,8 @@ class Connection {
         debuggerChildren: new Set(),
         debuggerChildInfo: new Map(),
         debuggerRevision: 0,
+        childReobserveRunning: null,
+        childReobservePending: null,
         wake: new Wake((method, params) => this.send(tabId, method, params)),
       };
       this.state.tabs.set(tabId, tab);
@@ -2839,6 +2841,188 @@ class Connection {
     }
     tab.debuggerRevision += 1;
     this.debuggerGate.revoke(details.tabId);
+    this.scheduleChildReobserve(details.tabId);
+  }
+
+  scheduleChildReobserve(tabId) {
+    const tab = this.tabState(tabId);
+    if (!tab) return;
+    const started = tab.debuggerRevision;
+    if (tab.childReobserveRunning != null) {
+      tab.childReobservePending = started;
+      return;
+    }
+    tab.childReobserveRunning = started;
+    tab.childReobservePending = null;
+    void this.runChildReobserve(tabId, started);
+  }
+
+  async runChildReobserve(tabId, startedRevision) {
+    try {
+      await bounded(this.reobserveStaleChildren(tabId, startedRevision), 2000, 'child reobserve');
+    } catch {
+    } finally {
+      const tab = this.tabState(tabId);
+      if (tab) {
+        const bumped = tab.debuggerRevision !== startedRevision;
+        const pending = tab.childReobservePending;
+        tab.childReobserveRunning = null;
+        tab.childReobservePending = null;
+        if (
+          (bumped || pending != null) &&
+          [...(tab.debuggerChildInfo?.values() ?? [])].some(
+            (info) => info.revision !== tab.debuggerRevision
+          )
+        ) {
+          this.scheduleChildReobserve(tabId);
+        }
+      }
+    }
+  }
+
+  childReobserveUrl(targetInfo, tree) {
+    const root = tree?.frame;
+    if (root && textOf(root.url).startsWith('chrome-error:')) {
+      return textOf(root.unreachableUrl) || textOf(targetInfo?.url);
+    }
+    return textOf(targetInfo?.url) || textOf(root?.url);
+  }
+
+  async childReobservePass(_tabId, targetInfo, tree) {
+    if (!targetInfo || !tree) return false;
+    const type = targetInfo?.type;
+    if (type && type !== 'iframe' && type !== 'worker') return false;
+    if (type && uiType(type)) return false;
+    const liveUrl = textOf(targetInfo?.url);
+    if (liveUrl && (urlProtected(guard, liveUrl) || this.protectedOrigin(liveUrl))) return false;
+    const root = tree?.frame;
+    if (root && textOf(root.url).startsWith('chrome-error:')) {
+      const unreachable = textOf(root.unreachableUrl);
+      if (
+        !unreachable ||
+        !/^https?:\/\//.test(unreachable) ||
+        !URL.canParse(unreachable) ||
+        this.protectedOrigin(unreachable) ||
+        errorUrlProtected(guard, unreachable)
+      )
+        return false;
+      return true;
+    }
+    const url = liveUrl || textOf(root?.url);
+    if (!url || !/^https?:\/\//.test(url) || !URL.canParse(url)) return false;
+    if (urlProtected(guard, url) || this.protectedOrigin(url)) return false;
+    return true;
+  }
+
+  childUnderCurrentMain(tab, parentTree, frameId, generation) {
+    if (!frameId || tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation)
+      return false;
+    if (frameIn(parentTree, frameId)) return true;
+    tab.frameParents ??= new Map();
+    if (!tab.frameParents.has(frameId)) return false;
+    let parentId = textOf(tab.frameParents.get(frameId));
+    if (!parentId) return false;
+    if (parentId === tab.mainFrameId) return true;
+    const seen = new Set([frameId]);
+    for (let depth = 0; parentId && depth < 8; depth += 1) {
+      if (seen.has(parentId)) return false;
+      seen.add(parentId);
+      if (parentId === tab.mainFrameId) return true;
+      if (!tab.frameParents.has(parentId)) return false;
+      parentId = textOf(tab.frameParents.get(parentId));
+    }
+    return parentId === tab.mainFrameId;
+  }
+
+  childReobserveGeneration(tab, parentTree) {
+    const main = parentTree?.frame;
+    const generation = textOf(main?.loaderId);
+    if (
+      !generation ||
+      textOf(main?.id) !== tab.mainFrameId ||
+      tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation
+    )
+      return '';
+    return generation;
+  }
+
+  async readChildReobserve(tabId, sessionId, info) {
+    const tree = await this.inflight(
+      tabId,
+      this.api.debugger.sendCommand({ tabId, sessionId }, 'Page.getFrameTree', {})
+    ).then(
+      (result) => result?.frameTree,
+      () => undefined
+    );
+    const targetInfo = await this.inflight(
+      tabId,
+      this.api.debugger.sendCommand({ tabId }, 'Target.getTargetInfo', {
+        targetId: info.target,
+      })
+    ).then(
+      (answer) => answer?.targetInfo,
+      () => undefined
+    );
+    return { sessionId, info, tree, targetInfo };
+  }
+
+  async stampChildReobserve(tabId, tab, startedRevision, parentTree, generation, read) {
+    const { sessionId, info, tree, targetInfo } = read;
+    const current = tab.debuggerChildInfo.get(sessionId);
+    if (!current || current.revision === startedRevision || current.target !== info.target)
+      return false;
+    const target = textOf(targetInfo?.targetId) || current.target;
+    const type = targetInfo?.type || current.type;
+    if (type === 'iframe' && !this.childUnderCurrentMain(tab, parentTree, target, generation))
+      return false;
+    const ok = await this.childReobservePass(tabId, targetInfo, tree);
+    if (this.tabState(tabId) !== tab || tab.debuggerRevision !== startedRevision) return null;
+    if (!ok) return false;
+    const url = this.childReobserveUrl(targetInfo, tree);
+    if (!url || !/^https?:\/\//.test(url) || !URL.canParse(url) || this.protectedOrigin(url))
+      return false;
+    if (tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation) return null;
+    tab.debuggerChildInfo.set(sessionId, {
+      target,
+      type,
+      url,
+      generation,
+      revision: startedRevision,
+    });
+    return true;
+  }
+
+  async reobserveStaleChildren(tabId, startedRevision) {
+    const tab = this.tabState(tabId);
+    if (!tab || tab.debuggerRevision !== startedRevision) return;
+    const stale = [...tab.debuggerChildInfo.entries()].filter(
+      ([, info]) => info.revision !== startedRevision
+    );
+    if (!stale.length) return;
+    const [parentTree, ...reads] = await Promise.all([
+      this.inflight(tabId, this.api.debugger.sendCommand({ tabId }, 'Page.getFrameTree', {})).then(
+        (result) => result?.frameTree,
+        () => undefined
+      ),
+      ...stale.map(([sessionId, info]) => this.readChildReobserve(tabId, sessionId, info)),
+    ]);
+    if (this.tabState(tabId) !== tab || tab.debuggerRevision !== startedRevision) return;
+    const generation = this.childReobserveGeneration(tab, parentTree);
+    if (!generation) return;
+    let stamped = false;
+    for (const read of reads) {
+      const result = await this.stampChildReobserve(
+        tabId,
+        tab,
+        startedRevision,
+        parentTree,
+        generation,
+        read
+      );
+      if (result == null) return;
+      if (result) stamped = true;
+    }
+    if (stamped) this.debuggerGate.revoke(tabId);
   }
 
   onFrames(details) {
