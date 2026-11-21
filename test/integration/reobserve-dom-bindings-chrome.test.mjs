@@ -7,57 +7,49 @@ import { extId } from './extension-page.mjs';
 
 const ALLOWED = new Set(['Page.getFrameTree', 'Target.getTargetInfo']);
 
-async function prepareSpy(paths) {
+const PASS_START = '  childReobserveUrl(targetInfo, tree) {';
+const PASS_END = '  onFrames(details) {';
+const SEND = 'this.api.debugger.sendCommand(';
+
+async function attribute(paths, mutate = (source) => source) {
   const backgroundPath = join(paths[0], 'background.js');
   const background = await readFile(backgroundPath, 'utf8');
   await writeFile(
     backgroundPath,
     `${background}
-const reobserveSend = chrome.debugger.sendCommand.bind(chrome.debugger);
-globalThis.__reobserveRecord = false;
 globalThis.__reobserveMethods = [];
-chrome.debugger.sendCommand = async (target, method, params) => {
-  if (globalThis.__reobserveRecord) {
-    globalThis.__reobserveMethods.push({
-      method,
-      sessionId: target?.sessionId ?? null,
-      tabId: target?.tabId,
-    });
-  }
-  return reobserveSend(target, method, params);
+chrome.debugger.__reobserveSend = (target, method, params) => {
+  globalThis.__reobserveMethods.push({
+    method,
+    sessionId: target?.sessionId ?? null,
+    tabId: target?.tabId,
+  });
+  return chrome.debugger.sendCommand(target, method, params);
 };
 `
   );
   const cdpPath = join(paths[0], 'cdp.js');
-  const cdp = await readFile(cdpPath, 'utf8');
-  const site = '  async reobserveStaleChildren(tabId, startedRevision) {';
-  assert.ok(cdp.includes(site), 'reobserve site');
+  const cdp = mutate(await readFile(cdpPath, 'utf8'));
+  const from = cdp.indexOf(PASS_START);
+  const to = cdp.indexOf(PASS_END, from);
+  assert.ok(from > 0 && to > from, 'reobserve span');
+  const span = cdp.slice(from, to);
+  assert.ok(span.split(SEND).length - 1 >= 3, 'reobserve send sites');
   await writeFile(
     cdpPath,
-    cdp.replace(
-      site,
-      `  async reobserveStaleChildren(tabId, startedRevision) {
-    globalThis.__reobserveRecord = true;
-    try {
-      return await this.__reobserveStaleChildrenMeasured(tabId, startedRevision);
-    } finally {
-      globalThis.__reobserveRecord = false;
-    }
-  }
-  async __reobserveStaleChildrenMeasured(tabId, startedRevision) {`
-    )
+    cdp.slice(0, from) + span.replaceAll(SEND, 'this.api.debugger.__reobserveSend(') + cdp.slice(to)
   );
 }
 
-async function prepareMutation(paths) {
-  await prepareSpy(paths);
-  const path = join(paths[0], 'cdp.js');
-  const source = await readFile(path, 'utf8');
+function prepareSpy(paths) {
+  return attribute(paths);
+}
+
+function prepareMutation(paths) {
   const site = '  async readChildReobserve(tabId, sessionId, info) {';
-  assert.ok(source.includes(site), 'readChildReobserve site');
-  await writeFile(
-    path,
-    source.replace(
+  return attribute(paths, (source) => {
+    assert.ok(source.includes(site), 'readChildReobserve site');
+    return source.replace(
       site,
       `  async readChildReobserve(tabId, sessionId, info) {
     await this.api.debugger.sendCommand({ tabId }, 'DOM.getDocument', {
@@ -65,8 +57,8 @@ async function prepareMutation(paths) {
       pierce: true,
     });
 `
-    )
-  );
+    );
+  });
 }
 
 async function untilWorker(chrome) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { backend } from './fixtures/cdp-675-extension-backend.mjs';
+import { backend, NOT_ALLOWED } from './fixtures/cdp-675-extension-backend.mjs';
 
 const ERROR = 'chrome-error://chromewebdata/';
 const ORDINARY = 'https://ordinary.test/';
@@ -8,6 +8,7 @@ const CANARY = 'https://127.0.0.1:1/ERROR_FRAME_CANARY';
 const SIBLING = 'https://other.test/doc';
 const SIGN_IN = 'https://ims-na1.adobelogin.com/auth/callback';
 const VAULT = 'https://vault.sliccy.ai/doc?SWAPPED';
+const SESSIONS = { 'error-session': 'ERROR_TARGET', 'sibling-session': 'SIBLING_TARGET' };
 
 function rootFrame(loaderId) {
   return { id: 'root', loaderId, url: ORDINARY, securityOrigin: 'https://ordinary.test' };
@@ -47,6 +48,7 @@ async function fixtureFor(t, { unreachable = CANARY, canaryTarget = CANARY } = {
   const sends = [];
   let recording = false;
   let parentTree = { frame: rootFrame('ordinary-document') };
+  let infoFails = false;
   fixture.api.tabs.get = async () => ({ id: 11, url: ORDINARY, status: 'complete' });
   fixture.api.webNavigation.getFrame = async () => ({ errorOccurred: false, url: ORDINARY });
   fixture.api.webNavigation.getAllFrames = async () => [
@@ -76,8 +78,9 @@ async function fixtureFor(t, { unreachable = CANARY, canaryTarget = CANARY } = {
   const send = fixture.api.debugger.sendCommand;
   fixture.api.debugger.sendCommand = async (source, method, params) => {
     if (recording) sends.push({ source, method, params });
-    if (method === 'Target.getTargetInfo') {
-      const info = live.get(params?.targetId);
+    if (method === 'Target.getTargetInfo' && source?.sessionId) {
+      if (infoFails) throw new Error('target-info-failed');
+      const info = live.get(SESSIONS[source.sessionId]);
       if (!info) throw new Error('missing target');
       return { targetInfo: { ...info } };
     }
@@ -122,6 +125,9 @@ async function fixtureFor(t, { unreachable = CANARY, canaryTarget = CANARY } = {
     },
     setParentTree: (next) => {
       parentTree = next;
+    },
+    failInfo: () => {
+      infoFails = true;
     },
   };
 }
@@ -406,6 +412,228 @@ test('the pass for a swapped-out child sends only Page.getFrameTree and Target.g
     'Page.getFrameTree',
     'Target.getTargetInfo',
   ]);
+});
+
+function errorTree(unreachable, extra = {}) {
+  return {
+    frame: {
+      id: 'ERROR_TARGET',
+      parentId: 'root',
+      loaderId: 'error-loader',
+      url: ERROR,
+      unreachableUrl: unreachable,
+      securityOrigin: '://',
+      ...extra,
+    },
+  };
+}
+
+function ordinaryTree(url = SIBLING, extra = {}) {
+  return {
+    frame: {
+      id: 'ERROR_TARGET',
+      parentId: 'root',
+      loaderId: 'error-loader',
+      url,
+      securityOrigin: new URL(url).origin,
+      ...extra,
+    },
+  };
+}
+
+async function stale(fixture, tab) {
+  assert.equal(canary(tab).revision, 0);
+  assert.equal((await privateFrames(fixture)).error, 'slicc: refused: unsettled frame list');
+}
+
+test('the tab-level target read is refused like Chrome and the child-session read is used', async (t) => {
+  const { fixture, tab, record, sends } = await fixtureFor(t);
+  await assert.rejects(
+    fixture.api.debugger.sendCommand({ tabId: 11 }, 'Target.getTargetInfo', {
+      targetId: 'ERROR_TARGET',
+    }),
+    { message: NOT_ALLOWED }
+  );
+  await canaryChanged(fixture);
+  await swapOut(fixture, 'ERROR_TARGET');
+  record(true);
+  await siblingCommit(fixture, tab);
+  record(false);
+  assert.equal(canary(tab).revision, tab.debuggerRevision);
+  const reads = sends.filter((entry) => entry.method === 'Target.getTargetInfo');
+  assert.ok(reads.length > 0);
+  assert.ok(reads.every((entry) => entry.source.sessionId && !entry.params.targetId));
+});
+
+test('a chrome-error child is stamped with the unreachable url the verdict used', async (t) => {
+  const { fixture, tab, live } = await fixtureFor(t);
+  live.set('ERROR_TARGET', { targetId: 'ERROR_TARGET', type: 'iframe', url: SIBLING });
+  await forcingOrder(fixture, tab, SIBLING);
+  assert.equal(canary(tab).revision, tab.debuggerRevision);
+  assert.equal(canary(tab).url, CANARY);
+});
+
+test('a target read naming another target is rejected', async (t) => {
+  const { fixture, tab, live } = await fixtureFor(t);
+  live.set('ERROR_TARGET', { targetId: 'OTHER_TARGET', type: 'iframe', url: CANARY });
+  await forcingOrder(fixture, tab);
+  await stale(fixture, tab);
+});
+
+test('a target read with another type is rejected', async (t) => {
+  const { fixture, tab, live } = await fixtureFor(t);
+  live.set('ERROR_TARGET', { targetId: 'ERROR_TARGET', type: 'worker', url: CANARY });
+  await forcingOrder(fixture, tab);
+  await stale(fixture, tab);
+});
+
+test('a protected target url with an ordinary tree root stays stale', async (t) => {
+  const { fixture, tab, live, trees } = await fixtureFor(t);
+  trees.set('error-session', ordinaryTree());
+  live.set('ERROR_TARGET', { targetId: 'ERROR_TARGET', type: 'iframe', url: VAULT });
+  await forcingOrder(fixture, tab, SIBLING);
+  await stale(fixture, tab);
+});
+
+test('a protected tree root with an ordinary target url stays stale', async (t) => {
+  const { fixture, tab, live, trees } = await fixtureFor(t);
+  trees.set('error-session', ordinaryTree(VAULT));
+  live.set('ERROR_TARGET', { targetId: 'ERROR_TARGET', type: 'iframe', url: SIBLING });
+  await forcingOrder(fixture, tab, SIBLING);
+  await stale(fixture, tab);
+});
+
+test('a protected tree url with an ordinary origin and target url stays stale', async (t) => {
+  const { fixture, tab, live, trees } = await fixtureFor(t);
+  trees.set('error-session', ordinaryTree(VAULT, { securityOrigin: 'https://other.test' }));
+  live.set('ERROR_TARGET', { targetId: 'ERROR_TARGET', type: 'iframe', url: SIBLING });
+  await forcingOrder(fixture, tab, SIBLING);
+  await stale(fixture, tab);
+});
+
+test('a protected tree origin with ordinary urls stays stale', async (t) => {
+  const { fixture, tab, live, trees } = await fixtureFor(t);
+  trees.set('error-session', ordinaryTree(SIBLING, { securityOrigin: 'https://vault.sliccy.ai' }));
+  live.set('ERROR_TARGET', { targetId: 'ERROR_TARGET', type: 'iframe', url: SIBLING });
+  await forcingOrder(fixture, tab, SIBLING);
+  await stale(fixture, tab);
+});
+
+test('an ordinary target url with a chrome-error tree root is judged by the unreachable url', async (t) => {
+  const { fixture, tab, live, trees } = await fixtureFor(t);
+  trees.set('error-session', errorTree(SIGN_IN));
+  live.set('ERROR_TARGET', { targetId: 'ERROR_TARGET', type: 'iframe', url: SIBLING });
+  await forcingOrder(fixture, tab, SIBLING);
+  await stale(fixture, tab);
+});
+
+test('a chrome-error target url with an ordinary tree root has no unreachable url and stays stale', async (t) => {
+  const { fixture, tab, live, trees } = await fixtureFor(t);
+  trees.set('error-session', ordinaryTree());
+  live.set('ERROR_TARGET', { targetId: 'ERROR_TARGET', type: 'iframe', url: ERROR });
+  await forcingOrder(fixture, tab, ERROR);
+  await stale(fixture, tab);
+});
+
+test('a target url that is not a web url with an ordinary tree root stays stale', async (t) => {
+  const { fixture, tab, live, trees } = await fixtureFor(t);
+  trees.set('error-session', ordinaryTree());
+  live.set('ERROR_TARGET', { targetId: 'ERROR_TARGET', type: 'iframe', url: 'about:blank' });
+  await forcingOrder(fixture, tab, 'about:blank');
+  await stale(fixture, tab);
+});
+
+test('both reads failing leave the child stale', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.delete('error-session');
+  await forcingOrder(fixture, tab);
+  await stale(fixture, tab);
+});
+
+test('tree-only: a bound ordinary chrome-error root is stamped', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.set('error-session', errorTree(CANARY));
+  trees.get('sibling-session').frame.parentId = 'root';
+  await forcingOrder(fixture, tab);
+  assert.equal(canary(tab).revision, tab.debuggerRevision);
+  assert.equal(canary(tab).url, CANARY);
+  assert.equal(canary(tab).type, 'iframe');
+  assert.equal(tab.debuggerChildInfo.get('sibling-session').url, SIBLING);
+  assert.equal((await privateFrames(fixture)).error, undefined);
+});
+
+test('tree-only: a bound ordinary document root is stamped with its url', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.set('error-session', ordinaryTree());
+  await forcingOrder(fixture, tab, SIBLING);
+  assert.equal(canary(tab).revision, tab.debuggerRevision);
+  assert.equal(canary(tab).url, SIBLING);
+});
+
+test('tree-only: a root frame id other than the target stays stale', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.set('error-session', errorTree(CANARY, { id: 'OTHER_FRAME' }));
+  await forcingOrder(fixture, tab);
+  await stale(fixture, tab);
+});
+
+test('a root frame id other than the target stays stale with a target read too', async (t) => {
+  const { fixture, tab, trees } = await fixtureFor(t);
+  trees.set('error-session', errorTree(CANARY, { id: 'OTHER_FRAME' }));
+  await forcingOrder(fixture, tab);
+  await stale(fixture, tab);
+});
+
+test('tree-only: a protected origin with an ordinary url stays stale', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.set('error-session', ordinaryTree(SIBLING, { securityOrigin: 'https://vault.sliccy.ai' }));
+  await forcingOrder(fixture, tab, SIBLING);
+  await stale(fixture, tab);
+});
+
+test('tree-only: a parentId other than the recorded parent stays stale', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.set('error-session', errorTree(CANARY, { parentId: 'elsewhere' }));
+  await forcingOrder(fixture, tab);
+  await stale(fixture, tab);
+});
+
+test('tree-only: a root without a parentId stays stale', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.set('error-session', errorTree(CANARY, { parentId: undefined }));
+  await forcingOrder(fixture, tab);
+  await stale(fixture, tab);
+});
+
+test('tree-only: a chrome-error root with a sign-in callback unreachable url stays stale', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.set('error-session', errorTree(SIGN_IN));
+  await forcingOrder(fixture, tab);
+  await stale(fixture, tab);
+});
+
+test('tree-only: a chrome-error root with a protected unreachable url stays stale', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.set('error-session', errorTree(VAULT));
+  await forcingOrder(fixture, tab);
+  await stale(fixture, tab);
+});
+
+test('tree-only: a protected document url stays stale', async (t) => {
+  const { fixture, tab, trees, failInfo } = await fixtureFor(t);
+  failInfo();
+  trees.set('error-session', ordinaryTree(VAULT));
+  await forcingOrder(fixture, tab, SIBLING);
+  await stale(fixture, tab);
 });
 
 test('mutation: default-true membership admits the old-document child', async (t) => {

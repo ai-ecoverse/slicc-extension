@@ -9,6 +9,7 @@ const SIBLING = 'https://other.test/doc';
 const SIGN_IN = 'https://ims-na1.adobelogin.com/auth/callback';
 const VAULT = 'https://vault.sliccy.ai/doc?REOBSERVE';
 const MAIN_FAILED = 'https://ordinary.test/missing';
+const SESSIONS = { 'error-session': 'ERROR_TARGET', 'sibling-session': 'SIBLING_TARGET' };
 
 async function fixtureFor(
   t,
@@ -116,10 +117,10 @@ async function fixtureFor(
   const send = fixture.api.debugger.sendCommand;
   fixture.api.debugger.sendCommand = async (source, method, params) => {
     if (recording) sends.push({ source, method, params });
-    if (method === 'Target.getTargetInfo') {
+    if (method === 'Target.getTargetInfo' && source?.sessionId) {
       if (fail) throw new Error('target-info-failed');
       if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-      const info = live.get(params?.targetId);
+      const info = live.get(SESSIONS[source.sessionId]);
       if (!info) throw new Error('missing target');
       return { targetInfo: { ...info } };
     }
@@ -636,7 +637,7 @@ test('mutation: routing childReobservePass through errorRootAllowed admits the s
     },
   });
   const pass = fixture.connection.childReobservePass.bind(fixture.connection);
-  fixture.connection.childReobservePass = async (tabId, targetInfo, childTree) => {
+  fixture.connection.childReobservePass = async (tabId, targetInfo, childTree, ...rest) => {
     if (!targetInfo || !childTree) return false;
     const type = targetInfo?.type;
     if (type && type !== 'iframe' && type !== 'worker') return false;
@@ -655,7 +656,7 @@ test('mutation: routing childReobservePass through errorRootAllowed admits the s
         return false;
       return true;
     }
-    return pass(tabId, targetInfo, childTree);
+    return pass(tabId, targetInfo, childTree, ...rest);
   };
   await siblingCommit(fixture);
   await settle(tab);
