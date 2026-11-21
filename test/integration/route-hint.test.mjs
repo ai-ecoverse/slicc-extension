@@ -144,9 +144,14 @@ for (const transport of transports) {
           targetId: '1',
           waitForDebuggerOnStart: false,
         });
+        const relatedOnSession = await h.attempt(
+          'Target.autoAttachRelated',
+          { targetId: '1', waitForDebuggerOnStart: false },
+          sessionId
+        );
         const onSession = await h.attempt('Target.setAutoAttach', auto, sessionId);
         const offSession = await h.attempt('Target.setAutoAttach', autoOff, sessionId);
-        return { sessionless, related, onSession, offSession };
+        return { sessionless, related, relatedOnSession, onSession, offSession };
       },
       { sessionId: opened.sessionId, auto: AUTO, autoOff: AUTO_OFF }
     );
@@ -159,26 +164,23 @@ for (const transport of transports) {
     );
     assert.deepEqual(refusedMethods, [], JSON.stringify(refusedMethods));
     await page.evaluate((targetId) => h.close(targetId), opened.targetId);
+    assert.equal(answer.relatedOnSession.error, SEVEN_RELATED);
+    assert.equal(
+      sent.some((row) => row.method === 'Target.setAutoAttach'),
+      false,
+      JSON.stringify(sent)
+    );
     if (transport === 'seven') {
       assert.equal(answer.sessionless.error, SEVEN_AUTO);
       assert.equal(answer.onSession.error, SEVEN_AUTO);
       assert.equal(answer.offSession.error, SEVEN_AUTO);
       assert.equal(answer.related.error, SEVEN_RELATED);
-      assert.equal(
-        sent.some((row) => row.method === 'Target.setAutoAttach'),
-        false,
-        JSON.stringify(sent)
-      );
       return;
     }
     assert.equal(answer.sessionless.error, SIX_SESSIONLESS);
     assert.equal(answer.onSession.error, SIX_SESSION);
     assert.equal(answer.offSession.error, undefined, JSON.stringify(answer.offSession));
+    assert.deepEqual(answer.offSession.result, {});
     assert.equal(answer.related.error, SIX_SESSIONLESS);
-    assert.equal(
-      sent.some((row) => row.method === 'Target.setAutoAttach' && row.params?.autoAttach === false),
-      true,
-      'six forwards autoAttach:false on a session'
-    );
   });
 }
