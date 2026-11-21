@@ -73,6 +73,8 @@ jobs:
         test/integration/private-extension.test.mjs
         test/integration/privileged.test.mjs
         test/integration/rebuild.test.mjs
+        test/integration/reobserve-committing-sibling.test.mjs
+        test/integration/reobserve-dom-bindings-chrome.test.mjs
         test/integration/redirect-leak.test.mjs
         test/integration/redirect-modes.test.mjs
         test/integration/route-hint.test.mjs

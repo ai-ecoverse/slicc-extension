@@ -799,6 +799,7 @@ export class DebuggerGate {
     const state = this.states.get(tabId);
     const current = this.convertible(tabId, state, false);
     tab.debuggerRevision += 1;
+    this.connection.scheduleChildReobserve(tabId);
     if (this.frameBlocked(frame)) {
       void this.drop(tabId);
       return;
