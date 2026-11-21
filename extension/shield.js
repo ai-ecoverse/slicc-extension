@@ -1864,6 +1864,18 @@ export function invalidates(method, params) {
   );
 }
 
+export function blobOrigin(url, isProtected) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'blob:' || !/^https?:\/\/./.test(parsed.origin)) return undefined;
+  if (isProtected(url) || isProtected(parsed.origin)) return undefined;
+  return parsed.origin;
+}
+
 export function framesKey(frames) {
   if (!frames.some((frame) => frame?.frameId === 0)) return undefined;
   const rows = [];

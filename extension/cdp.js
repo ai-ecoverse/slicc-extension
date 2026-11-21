@@ -21,6 +21,7 @@ import {
   aboutUrl,
   assignExpression,
   binaryHeadersNameProtected,
+  blobOrigin,
   bodyMethod,
   boundIds,
   COOKIES,
@@ -1627,6 +1628,7 @@ class Connection {
     const tab = this.tabState(tabId);
     const epoch = tab?.epoch;
     const frames = await this.contentFrames(tabId);
+    if (frames.length === 0) return this.blobTree(tabId);
     const key = framesKey(frames);
     const cached = tab?.content;
     if (
@@ -1650,9 +1652,20 @@ class Connection {
       2000,
       'content frames'
     ).catch(() => unsettled());
-    if (!Array.isArray(frames) || frames.length === 0) unsettled();
+    if (!Array.isArray(frames)) unsettled();
     if (frames.some((frame) => frame?.errorOccurred === true && anyProtected(frame.url))) refusal();
     return frames;
+  }
+
+  async blobTree(tabId) {
+    const raw = await readTab(this.api, tabId);
+    const url = textOf(raw.url);
+    const origin = blobOrigin(url, anyProtected);
+    if (!origin || (raw.pendingUrl && raw.pendingUrl !== url)) unsettled();
+    const tree = await this.contentTree(tabId);
+    const root = frameIn(tree.frameTree);
+    if (root.url !== url || root.securityOrigin !== origin) unsettled();
+    return tree;
   }
 
   async contentTree(tabId) {
