@@ -99,12 +99,14 @@ function __gateEvent(source, method, params, deliver) {
     if (!__force.changed) {
       __force.changed = true;
       if (__force.mode === 'bumpThenSwap' && __force.commits.length) {
-        __force.committed = true;
-        __flush('commits');
         setTimeout(() => {
-          __flush('swaps');
-          __finish();
-        }, 20);
+          __force.committed = true;
+          __flush('commits');
+          setTimeout(() => {
+            __flush('swaps');
+            __finish();
+          }, 20);
+        }, 0);
       }
     }
     return;
