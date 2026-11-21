@@ -2,10 +2,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { listen } from '../../extension/cdp.js';
+import { protectedOrigins } from '../../extension/protected.mjs';
 import { protectedRules } from '../../extension/protected-rules.js';
+import {
+  blobChildUrlProtected,
+  inheritsParentDocument,
+  strictGuard,
+  urlProtected,
+} from '../../extension/shield.js';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
 
 const event = () => ({ addListener() {}, removeListener() {} });
+const guard = strictGuard(protectedOrigins(protectedRules), protectedRules);
+const anyProtected = (text, options) => urlProtected(guard, text, options);
 const bundled = await build({
   entryPoints: ['six/extension/cdp-shield.ts'],
   bundle: true,
@@ -13,7 +22,13 @@ const bundled = await build({
   format: 'esm',
   platform: 'node',
 });
-const { TabShield, Bounded } = await import(
+const {
+  TabShield,
+  Bounded,
+  blobChildUrlProtected: sixChildUrl,
+  inheritsParentDocument: sixInherits,
+  urlProtected: sixUrlProtected,
+} = await import(
   `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`
 );
 
@@ -364,6 +379,38 @@ const FRAMING = {
     ],
     listed: [],
   },
+  'a data child with an opaque origin': {
+    children: [
+      {
+        frame: {
+          id: 'CHILD',
+          parentId: 'ROOT',
+          loaderId: 'L-data',
+          url: 'data:text/html,<p>ok</p>',
+          securityOrigin: 'null',
+        },
+      },
+    ],
+    listed: [],
+  },
+  'a nested protected blob child': {
+    children: [child(vaultBlob)],
+    listed: [{ url: vaultBlob }],
+  },
+  'an ordinary https child on a protected securityOrigin': {
+    children: [
+      {
+        frame: {
+          id: 'CHILD',
+          parentId: 'ROOT',
+          loaderId: 'L-origin-only',
+          url: ordinaryIframe,
+          securityOrigin: 'https://vault.sliccy.ai',
+        },
+      },
+    ],
+    listed: [{ url: ordinaryIframe }],
+  },
 };
 
 async function framedVerdicts(transport, rootUrl, name, t) {
@@ -378,6 +425,98 @@ async function framedVerdicts(transport, rootUrl, name, t) {
     (await f.attempt('DOMSnapshot.captureSnapshot', { computedStyles: [] })).result ?? {},
   ]);
   return { ...out, vault: shown.includes('vault.sliccy.ai') };
+}
+
+function walkChildren(tree, parentOrigin, { urlProtected: urlHit, originProtected, refuseOther }) {
+  const pending = Array.isArray(tree?.childFrames) ? [...tree.childFrames] : [];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    const frame = node?.frame;
+    const url = frame?.url;
+    const origin = frame?.securityOrigin;
+    if (refuseOther?.(url)) return true;
+    if (urlHit(url)) return true;
+    if (originProtected && typeof origin === 'string' && originProtected(origin)) return true;
+    const badUrl = typeof url !== 'string' || url === '';
+    const badOrigin = typeof origin !== 'string';
+    if ((badUrl || badOrigin) && !(inheritsParentDocument(url) && origin === parentOrigin))
+      return true;
+    if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
+  }
+  return false;
+}
+
+function walkTreatingBlobOrdinary(tree, parentOrigin, isProtected, inherits) {
+  const pending = Array.isArray(tree?.childFrames) ? [...tree.childFrames] : [];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    const frame = node?.frame;
+    const url = frame?.url;
+    const origin = frame?.securityOrigin;
+    if (typeof url === 'string' && url.startsWith('blob:')) {
+      if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
+      continue;
+    }
+    if (typeof url === 'string' && url !== '' && isProtected(url)) return true;
+    if (typeof origin === 'string' && isProtected(origin)) return true;
+    const badUrl = typeof url !== 'string' || url === '';
+    const badOrigin = typeof origin !== 'string';
+    if ((badUrl || badOrigin) && !(inherits(url) && origin === parentOrigin)) return true;
+    if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
+  }
+  return false;
+}
+
+function sevenWalk(kind) {
+  if (kind === 'withoutOrigin') {
+    return (tree, parentOrigin) =>
+      walkChildren(tree, parentOrigin, {
+        urlProtected: (url) => blobChildUrlProtected(url, anyProtected),
+        originProtected: undefined,
+      });
+  }
+  if (kind === 'withoutBlob') {
+    return (tree, parentOrigin) =>
+      walkTreatingBlobOrdinary(tree, parentOrigin, anyProtected, inheritsParentDocument);
+  }
+  return (tree, parentOrigin) =>
+    walkChildren(tree, parentOrigin, {
+      urlProtected: (url) => blobChildUrlProtected(url, anyProtected),
+      originProtected: anyProtected,
+      refuseOther: (url) =>
+        typeof url === 'string' &&
+        url !== '' &&
+        !/^https?:/i.test(url) &&
+        !inheritsParentDocument(url),
+    });
+}
+
+function sixWalk(kind) {
+  if (kind === 'withoutOrigin') {
+    return (tree, parentOrigin) =>
+      walkChildren(tree, parentOrigin, {
+        urlProtected: (url) => sixChildUrl(url),
+        originProtected: undefined,
+      });
+  }
+  if (kind === 'withoutBlob') {
+    return (tree, parentOrigin) =>
+      walkTreatingBlobOrdinary(tree, parentOrigin, sixUrlProtected, sixInherits);
+  }
+  return (tree, parentOrigin) =>
+    walkChildren(tree, parentOrigin, {
+      urlProtected: (url) => sixChildUrl(url),
+      originProtected: sixUrlProtected,
+      refuseOther: (url) =>
+        typeof url === 'string' && url !== '' && !/^https?:/i.test(url) && !sixInherits(url),
+    });
+}
+
+async function mutateBlobWalk(transport, url, t, kind) {
+  const f = await at(transport, url, t);
+  if (transport === 'seven') f.connection.blobFrameProtected = sevenWalk(kind);
+  else f.shield.blobFrameProtected = sixWalk(kind);
+  return f;
 }
 
 const SCENARIOS = {
@@ -495,6 +634,9 @@ const FRAMED_BLOB = {
   'an ordinary https iframe': 'answered',
   'an about:blank child that inherits the document origin': 'answered',
   'an about:srcdoc child that inherits the document origin': 'answered',
+  'a data child with an opaque origin': 'answered',
+  'a nested protected blob child': REFUSED,
+  'an ordinary https child on a protected securityOrigin': REFUSED,
 };
 
 const FRAMED_PAGE = {
@@ -507,6 +649,9 @@ const FRAMED_PAGE = {
   'an ordinary https iframe': 'answered',
   'an about:blank child that inherits the document origin': 'answered',
   'an about:srcdoc child that inherits the document origin': 'answered',
+  'a data child with an opaque origin': 'answered',
+  'a nested protected blob child': 'answered',
+  'an ordinary https child on a protected securityOrigin': 'answered',
 };
 
 const EXPECTED = {
@@ -580,6 +725,35 @@ for (const transport of ['seven', 'six-bridge']) {
       framedFrames(ordinaryBlob, FRAMING['a same-process vault iframe'].listed);
     const out = await verdicts(f);
     assert.deepEqual(out, all('answered'));
+  });
+
+  test(`${transport}: mutation without the securityOrigin child check admits an ordinary https child on a protected securityOrigin`, async (t) => {
+    const f = await mutateBlobWalk(transport, ordinaryBlob, t, 'withoutOrigin');
+    f.state.children = cloneTree(
+      FRAMING['an ordinary https child on a protected securityOrigin'].children
+    );
+    f.state.frames = () =>
+      framedFrames(
+        ordinaryBlob,
+        FRAMING['an ordinary https child on a protected securityOrigin'].listed
+      );
+    assert.deepEqual(await verdicts(f), all('answered'));
+  });
+
+  test(`${transport}: mutation without the nested-blob child judgement admits a nested protected blob child`, async (t) => {
+    const f = await mutateBlobWalk(transport, ordinaryBlob, t, 'withoutBlob');
+    f.state.children = cloneTree(FRAMING['a nested protected blob child'].children);
+    f.state.frames = () =>
+      framedFrames(ordinaryBlob, FRAMING['a nested protected blob child'].listed);
+    assert.deepEqual(await verdicts(f), all('answered'));
+  });
+
+  test(`${transport}: mutation refusing non-http(s) and non-about children refuses a data child with an opaque origin`, async (t) => {
+    const f = await mutateBlobWalk(transport, ordinaryBlob, t, 'refuseData');
+    f.state.children = cloneTree(FRAMING['a data child with an opaque origin'].children);
+    f.state.frames = () =>
+      framedFrames(ordinaryBlob, FRAMING['a data child with an opaque origin'].listed);
+    assert.deepEqual(await verdicts(f), all(REFUSED));
   });
 
   test(`${transport}: an identity-provider blob document is judged as its page`, async (t) => {
