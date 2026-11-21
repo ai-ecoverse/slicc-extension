@@ -383,31 +383,30 @@ test('diagnostic: frame owner read without the shared DOM agent', async (t) => {
           const { sessionId, mark, body } = globalThis.__diag;
           await new Promise((resolve) => setTimeout(resolve, 300));
           const between = globalThis.__diag.events.slice(mark).map((entry) => entry.method);
-          const again = await sliccExtension.cdp.send(
-            'DOM.describeNode',
-            { nodeId: body.nodeId },
-            sessionId
-          );
+          const call = (method, params) =>
+            sliccExtension.cdp
+              .send(method, params, sessionId)
+              .catch((error) => ({ error: String(error?.message ?? error) }));
+          const again = await call('DOM.describeNode', { nodeId: body.nodeId });
           const start = globalThis.__diag.events.length;
-          const pushed = await sliccExtension.cdp.send(
-            'DOM.pushNodesByBackendIdsToFrontend',
-            { backendNodeIds: backends },
-            sessionId
-          );
+          const pushed = await call('DOM.pushNodesByBackendIdsToFrontend', {
+            backendNodeIds: backends,
+          });
+          const pushedOne = await call('DOM.pushNodesByBackendIdsToFrontend', {
+            backendNodeIds: backends.slice(0, 1),
+          });
           await new Promise((resolve) => setTimeout(resolve, 300));
           const pushEvents = globalThis.__diag.events.slice(start);
-          const described = await sliccExtension.cdp.send(
-            'DOM.describeNode',
-            { backendNodeId: backends[0] },
-            sessionId
-          );
+          const described = await call('DOM.describeNode', { backendNodeId: backends[0] });
           return {
             between,
             bodyStable:
               again.node?.backendNodeId === body.backendNodeId && again.node?.nodeName === 'BODY',
             pushed,
+            pushedOne,
             pushEvents,
             described,
+            errors: [again.error, pushed.error, pushedOne.error, described.error],
           };
         },
         { backends: [located.remote, located.unslotted].filter(Number.isInteger) }
@@ -420,6 +419,7 @@ test('diagnostic: frame owner read without the shared DOM agent', async (t) => {
       canonical([
         run.fresh.doc,
         run.after.pushed,
+        run.after.pushedOne,
         run.after.pushEvents,
         run.after.described?.node?.nodeId,
       ]);
@@ -427,8 +427,9 @@ test('diagnostic: frame owner read without the shared DOM agent', async (t) => {
       controlBetween: control.after.between,
       probedBetween: probed.after.between,
       bodyStable: [control.after.bodyStable, probed.after.bodyStable],
-      pushEventsControl: control.after.pushEvents.map((entry) => entry.method),
-      pushEventsProbed: probed.after.pushEvents.map((entry) => entry.method),
+      pushEventsControl: control.after.pushEvents?.map((entry) => entry.method),
+      pushEventsProbed: probed.after.pushEvents?.map((entry) => entry.method),
+      callErrors: [control.after.errors, probed.after.errors],
       sameClientShape: shape(control) === shape(probed),
       controlError: control.fresh.error ?? control.after.error,
       probedError: probed.fresh.error ?? probed.after.error,
