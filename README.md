@@ -82,7 +82,7 @@ Protected origins (from slicc-browsers 1.5.0):
 | Branch hosts (*.sliccy.ai) |        ✓        |      ✓      | ✓ (protected targets blocked) |          —           |     —      |    —    |
 | External sites             |        —        |      —      |               —               |          —           |     —      |    —    |
 
-Both six's bridge CDP and seven's content-script CDP refuse to target protected origins. Six's pages cannot get CDP or relay access to seven's or the vault's tabs. Seven's relay keeps refusing protected targets.
+Both six's bridge CDP and seven's content-script CDP refuse to target protected origins. Six's pages cannot get CDP or relay access to seven's or the vault's tabs. Seven's relay keeps refusing protected targets. Both refuse the deprecated `Network.setRequestInterception` and `Network.continueInterceptedRequest` on every session; intercept requests through `Fetch` instead.
 
 ## Development
 
