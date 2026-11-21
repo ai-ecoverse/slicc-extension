@@ -75,6 +75,7 @@ jobs:
         test/integration/rebuild.test.mjs
         test/integration/reobserve-committing-sibling.test.mjs
         test/integration/reobserve-dom-bindings-chrome.test.mjs
+        test/integration/www-frames-refuse-diagnostic.test.mjs
         test/integration/redirect-leak.test.mjs
         test/integration/redirect-modes.test.mjs
         test/integration/route-hint.test.mjs
