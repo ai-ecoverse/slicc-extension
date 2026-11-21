@@ -1,5 +1,7 @@
 import { listen } from '../../../extension/cdp.js';
 
+export const NOT_ALLOWED = '{"code":-32000,"message":"Not allowed"}';
+
 function event() {
   const listeners = new Set();
   return {
@@ -55,6 +57,9 @@ export async function backend() {
       detach: async () => calls.push({ method: 'detach' }),
       sendCommand: async (source, method, params) => {
         calls.push({ source, method, params });
+        if (method === 'Target.getTargetInfo' && !source?.sessionId && params?.targetId) {
+          throw new Error(NOT_ALLOWED);
+        }
         if (method === 'Runtime.enable') {
           await api.debugger.onEvent.emit({ tabId: 11 }, 'Runtime.executionContextCreated', {
             context: {
