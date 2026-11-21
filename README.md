@@ -82,7 +82,7 @@ Protected origins (from slicc-browsers 1.5.0):
 | Branch hosts (*.sliccy.ai) |        ✓        |      ✓      | ✓ (protected targets blocked) |          —           |     —      |    —    |
 | External sites             |        —        |      —      |               —               |          —           |     —      |    —    |
 
-Both six's bridge CDP and seven's content-script CDP refuse to target protected origins. Six's pages cannot get CDP or relay access to seven's or the vault's tabs. Seven's relay keeps refusing protected targets.
+Both six's bridge CDP and seven's content-script CDP refuse to target protected origins. Six's pages cannot get CDP or relay access to seven's or the vault's tabs. Seven's relay keeps refusing protected targets. Both refuse the deprecated `Network.setRequestInterception` and `Network.continueInterceptedRequest` on every session; intercept requests through `Fetch` instead.
 
 ## Development
 
@@ -92,7 +92,7 @@ npm test
 npm run pack
 ```
 
-`npm run build` bundles six's TypeScript source in `six/` into `extension/six-sw.js`, `sidepanel.js`, and `secrets.js` with esbuild. It fetches nothing, and a rebuild is byte-identical (`rebuild.test.mjs` checks it). `npm run typecheck` checks `six/`. `npm test` runs integration tests. `npm run pack [version]` writes `artifacts/slicc-extension.zip`. The manifest carries the production `key`, so the unpacked extension has Chrome Web Store ID `akjjllgokmbgpbdbmafpiefnhidlmbgf`.
+`npm run build` bundles six's TypeScript source in `six/` into `extension/six-sw.js`, `sidepanel.js`, and `secrets.js` with esbuild. It fetches nothing, and a rebuild is byte-identical (`rebuild.test.mjs` checks it). `npm run typecheck` checks `six/`. `npm test` runs integration tests. A fake of a Chrome debugger read answers the forms Chrome refuses with the error text measured in Chrome: `Target.getTargetInfo` with a `targetId` on a tab session answers `{"code":-32000,"message":"Not allowed"}`. `npm run pack [version]` writes `artifacts/slicc-extension.zip`. The manifest carries the production `key`, so the unpacked extension has Chrome Web Store ID `akjjllgokmbgpbdbmafpiefnhidlmbgf`.
 
 ## CI and releases
 

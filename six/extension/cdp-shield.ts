@@ -215,7 +215,19 @@ const FETCH_SETTLES = new Set([
   'Fetch.continueWithAuth',
 ]);
 
+export const LEGACY_INTERCEPTION = new Map<string, string>([
+  [
+    'Network.setRequestInterception',
+    'slicc: refused: Network.setRequestInterception is deprecated: intercept requests through Fetch instead',
+  ],
+  [
+    'Network.continueInterceptedRequest',
+    'slicc: refused: Network.continueInterceptedRequest is deprecated: intercept requests through Fetch instead',
+  ],
+]);
+
 const REFUSED_METHODS = new Map<string, string>([
+  ...LEGACY_INTERCEPTION,
   ['Page.setDocumentContent', 'unbound document replacement is not supported'],
   ['Runtime.runScript', 'script execution without a unique context binding is not supported'],
   [

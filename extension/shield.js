@@ -83,6 +83,14 @@ const OUTRIGHT = new Map([
     'Security.setIgnoreCertificateErrors',
     "Security.setIgnoreCertificateErrors would weaken TLS for seven's tabs",
   ],
+  [
+    'Network.setRequestInterception',
+    'Network.setRequestInterception is deprecated: intercept requests through Fetch instead',
+  ],
+  [
+    'Network.continueInterceptedRequest',
+    'Network.continueInterceptedRequest is deprecated: intercept requests through Fetch instead',
+  ],
 ]);
 
 export const COOKIES = "slicc: refused: cookies on seven's origin";
