@@ -120,6 +120,18 @@ export function invalidates(method: string, params: CDPPayload | undefined): boo
   );
 }
 
+export function blobOrigin(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'blob:' || !/^https?:\/\/./.test(parsed.origin)) return undefined;
+  if (urlProtected(url) || urlProtected(parsed.origin)) return undefined;
+  return parsed.origin;
+}
+
 export function framesKey(frames: unknown[]): string | undefined {
   if (!frames.some((frame) => isObj(frame) && frame['frameId'] === 0)) return undefined;
   const rows: string[] = [];
@@ -2595,6 +2607,7 @@ export class TabShield {
   private async witnessed(frameId: string | undefined): Promise<ContentTree> {
     const epoch = this.epoch;
     const frames = await this.contentFrames();
+    if (frames.length === 0) return this.blobTree();
     const key = framesKey(frames);
     const cached = this.content;
     if (
@@ -2619,7 +2632,7 @@ export class TabShield {
         .then((frames) => ({ frames }))
     ).catch(() => refuse(UNSETTLED_REFUSAL));
     const frames = read['frames'];
-    if (!Array.isArray(frames) || frames.length === 0) refuse(UNSETTLED_REFUSAL);
+    if (!Array.isArray(frames)) refuse(UNSETTLED_REFUSAL);
     if (
       frames.some(
         (frame) =>
@@ -2628,6 +2641,17 @@ export class TabShield {
     )
       refuse(PROTECTED_RULES.refusal);
     return frames;
+  }
+
+  private async blobTree(): Promise<ContentTree> {
+    const tab = await this.readLive();
+    const url = tab.url ?? '';
+    const origin = blobOrigin(url);
+    if (!origin || (tab.pendingUrl && tab.pendingUrl !== url)) refuse(UNSETTLED_REFUSAL);
+    const tree = await this.contentTree();
+    const root = frameIn(tree.frameTree, undefined);
+    if (root?.['url'] !== url || root['securityOrigin'] !== origin) refuse(UNSETTLED_REFUSAL);
+    return tree;
   }
 
   private async contentTree(): Promise<ContentTree> {
