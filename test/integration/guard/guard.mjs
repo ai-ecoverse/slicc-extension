@@ -68,10 +68,11 @@ export function carriers(list) {
 export function capabilities(transport) {
   return {
     autoAttach: false,
-    browserSession: false,
+    browserSession: true,
     browserContexts: false,
     extensionWorld: true,
     discovery: transport === 'seven',
+    explicitAttach: transport === 'seven',
     clientExit: true,
     siteIsolationOff: true,
     inboundDelay: true,

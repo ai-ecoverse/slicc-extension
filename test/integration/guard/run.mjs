@@ -335,6 +335,32 @@ export async function secondClient(transport, leg) {
   }
 }
 
+export async function pageCommands(transport) {
+  await setUp();
+  try {
+    const { client } = await clients(transport, { slot: 0, vector: {} });
+    const { targetId } = await client.send('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await client.send('Target.attachToTarget', { targetId, flatten: true });
+    const answer = (method, params) =>
+      client.send(method, params, sessionId).then(
+        (result) => ({ result }),
+        (error) => ({ error: String(error?.message ?? error) })
+      );
+    return {
+      a: await answer('Target.autoAttachRelated', { targetId, waitForDebuggerOnStart: false }),
+      b: await answer('Target.setAutoAttach', {
+        autoAttach: true,
+        waitForDebuggerOnStart: false,
+        flatten: true,
+      }),
+      c: await answer('Target.setAutoAttach', { autoAttach: false, waitForDebuggerOnStart: false }),
+      d: await answer('Target.attachToTarget', { targetId }),
+    };
+  } finally {
+    await tearDown();
+  }
+}
+
 async function sweep(transport, variant) {
   const started = Date.now();
   let done = 0;
