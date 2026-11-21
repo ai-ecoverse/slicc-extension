@@ -29,6 +29,15 @@ const WRAPS = [
   async __childReobservePass(_tabId, targetInfo, tree, type, target) {`,
   ],
   [
+    '  async stampChildReobserve(tabId, tab, startedRevision, parentTree, generation, read) {',
+    `  async stampChildReobserve(tabId, tab, startedRevision, parentTree, generation, read) {
+    const r = await this.__stampChildReobserve(tabId, tab, startedRevision, parentTree, generation, read);
+    __log('pass.stamp', { targetId: read.info.target, result: r, source: read.targetInfo ? 'targetInfo' : 'tree', host: __h(read.targetInfo?.url ?? read.tree?.frame?.unreachableUrl ?? read.tree?.frame?.url) });
+    return r;
+  }
+  async __stampChildReobserve(tabId, tab, startedRevision, parentTree, generation, read) {`,
+  ],
+  [
     '  async reobserveStaleChildren(tabId, startedRevision) {',
     `  async reobserveStaleChildren(tabId, startedRevision) {
     const before = this.tabState(tabId);
@@ -243,11 +252,16 @@ test('gate: error frame settling on both hosts in every order', async (t) => {
         const polled = await poll(page, targetId);
         await evaluate(`globalThis.__mode = 'natural'; true`);
         const events = await evaluate('globalThis.__diag');
+        const stamps = events.filter((e) => e.method === 'pass.stamp' && e.result === true);
         rows.push({
           host,
           rep,
           mode,
           order: order(events),
+          stamped: stamps.length,
+          stampedTargetInfo: stamps.filter((e) => e.source === 'targetInfo').length,
+          stampedTree: stamps.filter((e) => e.source === 'tree').length,
+          canaryStamped: stamps.some((e) => e.host === '127.0.0.1:1'),
           ...polled,
           timeline: polled.ok ? undefined : events,
         });
@@ -258,11 +272,23 @@ test('gate: error frame settling on both hosts in every order', async (t) => {
   for (const row of rows) report('row', row);
   const groups = new Map();
   for (const row of rows) {
-    const key = `${row.host} ${row.mode} ${row.order}`;
-    const entry = groups.get(key) ?? { total: 0, ok: 0 };
-    entry.total += 1;
-    if (row.ok) entry.ok += 1;
-    groups.set(key, entry);
+    for (const key of [`${row.host} ${row.mode} ${row.order}`, `${row.host} ${row.mode}`]) {
+      const entry = groups.get(key) ?? {
+        total: 0,
+        ok: 0,
+        stamped: 0,
+        stampedTargetInfo: 0,
+        stampedTree: 0,
+        canaryStamped: 0,
+      };
+      entry.total += 1;
+      if (row.ok) entry.ok += 1;
+      entry.stamped += row.stamped;
+      entry.stampedTargetInfo += row.stampedTargetInfo;
+      entry.stampedTree += row.stampedTree;
+      if (row.canaryStamped) entry.canaryStamped += 1;
+      groups.set(key, entry);
+    }
   }
   for (const [key, entry] of groups) report('summary', { key, ...entry });
   for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
