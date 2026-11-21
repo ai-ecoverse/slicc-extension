@@ -90,6 +90,7 @@ jobs:
         test/integration/upgrade.test.mjs
         test/integration/url-forms.test.mjs
         test/integration/worlds.test.mjs
+        test/integration/wrapped-history-gate.test.mjs
       review-prompt: |
         SLICC-EXTENSION
 
