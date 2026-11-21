@@ -11,11 +11,77 @@ before(async () => {
     prepare: async (paths) => {
       const path = join(paths[0], 'background.js');
       const source = await readFile(path, 'utf8');
+      const cdpPath = join(paths[0], 'cdp.js');
+      let cdp = await readFile(cdpPath, 'utf8');
+      const host =
+        'const __h = (u) => { try { const x = new URL(String(u)); return x.protocol === "chrome-error:" ? "chrome-error" : x.host || x.protocol; } catch { return String(u ?? "").slice(0, 12); } }; const __log = (m, o) => globalThis.__diag?.push({ t: Math.round(performance.now() - (globalThis.__t0 ?? 0)), method: m, ...o });';
+      const wraps = [
+        [
+          '  async readChildReobserve(tabId, sessionId, info) {',
+          `  async readChildReobserve(tabId, sessionId, info) {
+    const r = await this.__readChildReobserve(tabId, sessionId, info);
+    const f = r.tree?.frame;
+    __log('pass.read', { tab: tabId, childSession: sessionId, targetId: info.target, treeOk: Boolean(r.tree), treeUrl: __h(f?.url), unreachable: __h(f?.unreachableUrl), parentFrameId: f?.parentId, frameId: f?.id, infoOk: Boolean(r.targetInfo), host: __h(r.targetInfo?.url), targetType: r.targetInfo?.type });
+    return r;
+  }
+  async __readChildReobserve(tabId, sessionId, info) {`,
+        ],
+        [
+          '  childUnderCurrentMain(tab, parentTree, frameId, generation, childTree) {',
+          `  childUnderCurrentMain(tab, parentTree, frameId, generation, childTree) {
+    const listed = Boolean(frameIn(parentTree, frameId));
+    const live = tab.frameParents?.get(frameId);
+    const kept = tab.swappedParents?.get(frameId)?.parentId;
+    const r = this.__childUnderCurrentMain(tab, parentTree, frameId, generation, childTree);
+    __log('pass.member', { tab: tab.id, frameId, result: r, listed, live: live === tab.mainFrameId ? 'main' : live ?? null, kept: kept === tab.mainFrameId ? 'main' : kept ?? null, genOk: tab.documents.frames.get(tab.mainFrameId)?.loaderId === generation });
+    return r;
+  }
+  __childUnderCurrentMain(tab, parentTree, frameId, generation, childTree) {`,
+        ],
+        [
+          '  async childReobservePass(_tabId, targetInfo, tree) {',
+          `  async childReobservePass(_tabId, targetInfo, tree) {
+    const r = await this.__childReobservePass(_tabId, targetInfo, tree);
+    __log('pass.judge', { tab: _tabId, targetId: targetInfo?.targetId, result: r });
+    return r;
+  }
+  async __childReobservePass(_tabId, targetInfo, tree) {`,
+        ],
+        [
+          '  async reobserveStaleChildren(tabId, startedRevision) {',
+          `  async reobserveStaleChildren(tabId, startedRevision) {
+    const tab0 = this.tabState(tabId);
+    __log('pass.start', { tab: tabId, revision: startedRevision, now: tab0?.debuggerRevision, stale: [...(tab0?.debuggerChildInfo?.values() ?? [])].filter((i) => i.revision !== startedRevision).map((i) => i.target) });
+    try {
+      return await this.__reobserveStaleChildren(tabId, startedRevision);
+    } finally {
+      const tab1 = this.tabState(tabId);
+      __log('pass.end', { tab: tabId, revision: startedRevision, now: tab1?.debuggerRevision, children: [...(tab1?.debuggerChildInfo?.values() ?? [])].map((i) => [i.target, i.revision, __h(i.url)]) });
+    }
+  }
+  async __reobserveStaleChildren(tabId, startedRevision) {`,
+        ],
+        [
+          '  scheduleChildReobserve(tabId) {',
+          `  scheduleChildReobserve(tabId) {
+    const tabS = this.tabState(tabId);
+    __log('pass.schedule', { tab: tabId, revision: tabS?.debuggerRevision, running: tabS?.childReobserveRunning ?? null });
+    return this.__scheduleChildReobserve(tabId);
+  }
+  __scheduleChildReobserve(tabId) {`,
+        ],
+      ];
+      for (const [site, next] of wraps) {
+        assert.ok(cdp.includes(site), site);
+        cdp = cdp.replace(site, next);
+      }
+      await writeFile(cdpPath, `${cdp}\n${host}\n`);
       await writeFile(
         path,
         `${source}
 globalThis.__diag = [];
 const __t0 = performance.now();
+globalThis.__t0 = __t0;
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!/^(Page\\.frame|Target\\.)/.test(method)) return;
   const p = params ?? {};
@@ -175,12 +241,13 @@ test('diag: repeated error frame settling on both hosts', async (t) => {
       const swapped = events.findLastIndex(
         (e) => e.method === 'Page.frameDetached' && e.reason === 'swap'
       );
+      const forcing = changed >= 0 && committed >= 0 && changed < committed;
       rows.push({
         swapBeforeCommit: swapped >= 0 && committed >= 0 && swapped < committed,
-        timeline: polled.ok ? undefined : events,
+        timeline: polled.ok && !forcing ? undefined : events,
         host,
         rep,
-        forcing: changed >= 0 && committed >= 0 && changed < committed,
+        forcing,
         ...polled,
       });
       await target.close?.().catch(() => undefined);
