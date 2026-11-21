@@ -56,7 +56,6 @@ const WRAPS = [
 const BACKGROUND = `
 globalThis.__diag = [];
 globalThis.__t0 = performance.now();
-globalThis.__mode = 'natural';
 const __stamp = () => Math.round(performance.now() - globalThis.__t0);
 const __raw = (source, method, params) => {
   if (!/^(Page\\.frame|Target\\.)/.test(method)) return;
@@ -67,38 +66,109 @@ chrome.debugger.onEvent.addListener(__raw);
 chrome.webNavigation.onCommitted.addListener((d) => {
   globalThis.__diag.push({ t: __stamp(), method: 'webNavigation.onCommitted', frameId: d.frameId });
 });
-const __delayOf = {
-  event: (source, method, params) => {
-    if (globalThis.__mode !== 'bumpThenSwap' || source?.sessionId) return 0;
-    return method === 'Page.frameDetached' && params?.reason === 'swap' ? 200 : 0;
-  },
-  commit: (details) => {
-    if (!(details?.frameId > 0)) return 0;
-    if (globalThis.__mode === 'swapThenBump') return 150;
-    if (globalThis.__mode === 'bumpThenSwap') return 40;
-    return 0;
-  },
+const __force = { mode: 'natural', canary: null, changed: false, committed: false, swapped: false, commits: [], swaps: [], state: 'done', timer: null };
+globalThis.__resetForce = (mode) => {
+  clearTimeout(__force.timer);
+  Object.assign(__force, { mode, canary: null, changed: false, committed: false, swapped: false, commits: [], swaps: [], state: mode === 'natural' ? 'done' : 'waiting' });
+  globalThis.__forced = __force.state;
+  if (mode !== 'natural') {
+    __force.timer = setTimeout(() => {
+      __flush('commits');
+      __flush('swaps');
+      __force.state = 'timeout';
+      globalThis.__forced = 'timeout';
+    }, 4000);
+  }
 };
-function __wrap(target, delay, describe) {
+function __flush(queue) {
+  const list = __force[queue];
+  __force[queue] = [];
+  for (const deliver of list) deliver();
+}
+function __finish() {
+  clearTimeout(__force.timer);
+  __force.state = 'done';
+  globalThis.__forced = 'done';
+}
+function __gateEvent(source, method, params, deliver) {
+  const root = !source?.sessionId;
+  if (__force.mode === 'natural' || __force.state !== 'waiting' || !root) return deliver();
+  if (method === 'Target.targetInfoChanged' && __h(params?.targetInfo?.url) === '127.0.0.1:1') {
+    __force.canary = params.targetInfo.targetId;
+    deliver();
+    if (!__force.changed) {
+      __force.changed = true;
+      if (__force.mode === 'bumpThenSwap' && __force.commits.length) {
+        __force.committed = true;
+        __flush('commits');
+        setTimeout(() => {
+          __flush('swaps');
+          __finish();
+        }, 20);
+      }
+    }
+    return;
+  }
+  if (method === 'Page.frameDetached' && params?.reason === 'swap') {
+    if (__force.mode === 'bumpThenSwap' && !__force.committed) {
+      __force.swaps.push(deliver);
+      return;
+    }
+    deliver();
+    if (__force.mode === 'swapThenBump' && params.frameId === __force.canary && !__force.swapped) {
+      __force.swapped = true;
+      setTimeout(() => {
+        if (__force.commits.length) {
+          __flush('commits');
+          __finish();
+        }
+      }, 20);
+    }
+    return;
+  }
+  return deliver();
+}
+function __gateCommit(details, deliver) {
+  if (__force.mode === 'natural' || __force.state !== 'waiting' || !(details?.frameId > 0))
+    return deliver();
+  if (__force.mode === 'swapThenBump') {
+    if (!__force.swapped) {
+      __force.commits.push(deliver);
+      return;
+    }
+    deliver();
+    __finish();
+    return;
+  }
+  if (!__force.changed) {
+    __force.commits.push(deliver);
+    return;
+  }
+  __force.committed = true;
+  deliver();
+  setTimeout(() => {
+    __flush('swaps');
+    __finish();
+  }, 20);
+}
+function __wrap(target, gate, describe) {
   const add = target.addListener.bind(target);
   const remove = target.removeListener.bind(target);
   const wrapped = new Map();
   target.addListener = (fn) => {
     const next = (...args) => {
-      const ms = delay(...args);
       const deliver = () => {
         globalThis.__diag.push({ t: __stamp(), method: 'deliver', ...describe(...args) });
         return fn(...args);
       };
-      if (!ms) return deliver();
-      setTimeout(deliver, ms);
+      return gate(...args, deliver);
     };
     wrapped.set(fn, next);
     return add(next);
   };
   target.removeListener = (fn) => remove(wrapped.get(fn) ?? fn);
 }
-__wrap(chrome.debugger.onEvent, __delayOf.event, (source, method, params) => ({
+__wrap(chrome.debugger.onEvent, __gateEvent, (source, method, params) => ({
   what: method,
   session: source?.sessionId ?? null,
   frameId: params?.frameId,
@@ -106,7 +176,7 @@ __wrap(chrome.debugger.onEvent, __delayOf.event, (source, method, params) => ({
   targetId: params?.targetInfo?.targetId,
   host: __h(params?.targetInfo?.url),
 }));
-__wrap(chrome.webNavigation.onCommitted, __delayOf.commit, (details) => ({
+__wrap(chrome.webNavigation.onCommitted, __gateCommit, (details) => ({
   what: 'webNavigation.onCommitted',
   frameId: details?.frameId,
 }));
@@ -243,14 +313,20 @@ test('gate: error frame settling on both hosts in every order', async (t) => {
     let rep = 0;
     for (const [mode, count] of MODES) {
       for (let i = 0; i < count; i += 1, rep += 1) {
-        await evaluate(`globalThis.__mode = 'natural'; true`);
+        await evaluate(`globalThis.__resetForce('natural'); true`);
         const url = `https://ordinary.test/doc?gate-${host}-${rep}`;
         const target = await chrome.visit(t, url);
         const targetId = await attach(page, url);
-        await evaluate(`globalThis.__diag = []; globalThis.__mode = ${JSON.stringify(mode)}; true`);
+        await evaluate(
+          `globalThis.__diag = []; globalThis.__resetForce(${JSON.stringify(mode)}); true`
+        );
         await frame(target, host, rep);
+        const forced = await evaluate(`(async () => {
+          for (let i = 0; i < 100 && globalThis.__forced === 'waiting'; i += 1) await new Promise((r) => setTimeout(r, 50));
+          return globalThis.__forced;
+        })()`);
         const polled = await poll(page, targetId);
-        await evaluate(`globalThis.__mode = 'natural'; true`);
+        await evaluate(`globalThis.__resetForce('natural'); true`);
         const events = await evaluate('globalThis.__diag');
         const stamps = events.filter((e) => e.method === 'pass.stamp' && e.result === true);
         rows.push({
@@ -258,6 +334,7 @@ test('gate: error frame settling on both hosts in every order', async (t) => {
           rep,
           mode,
           order: order(events),
+          forced,
           stamped: stamps.length,
           stampedTargetInfo: stamps.filter((e) => e.source === 'targetInfo').length,
           stampedTree: stamps.filter((e) => e.source === 'tree').length,
@@ -287,6 +364,7 @@ test('gate: error frame settling on both hosts in every order', async (t) => {
       entry.stampedTargetInfo += row.stampedTargetInfo;
       entry.stampedTree += row.stampedTree;
       if (row.canaryStamped) entry.canaryStamped += 1;
+      if (row.forced === 'timeout') entry.timeouts = (entry.timeouts ?? 0) + 1;
       groups.set(key, entry);
     }
   }
