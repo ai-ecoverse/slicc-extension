@@ -309,6 +309,11 @@ const MODES = [
 
 test('gate: error frame settling on both hosts in every order', async (t) => {
   const evaluate = await worker();
+  const ready = await evaluate(`(async () => {
+    for (let i = 0; i < 200 && typeof globalThis.__resetForce !== 'function'; i += 1) await new Promise((r) => setTimeout(r, 50));
+    return typeof globalThis.__resetForce === 'function';
+  })()`);
+  assert.equal(ready, true);
   const rows = [];
   for (const host of ['seven.sliccy.ai', 'www.sliccy.ai']) {
     const page = await chrome.visit(t, `https://${host}/`);
