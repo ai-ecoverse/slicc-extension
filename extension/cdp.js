@@ -21,6 +21,8 @@ import {
   aboutUrl,
   assignExpression,
   binaryHeadersNameProtected,
+  blobOrigin,
+  blobTreeProtected,
   bodyMethod,
   boundIds,
   COOKIES,
@@ -1617,16 +1619,17 @@ class Connection {
     if (!reads && frameId === undefined) return;
     const tree =
       reads && !method.startsWith('Runtime.')
-        ? await this.witnessed(tabId, frameId)
+        ? await this.witnessed(tabId, frameId, !method.startsWith('Debugger.'))
         : await this.contentTree(tabId);
     if (frameId !== undefined && !frameIn(tree.frameTree, frameId)) refusal();
     if (reads && tree.sealed) refusal();
   }
 
-  async witnessed(tabId, frameId) {
+  async witnessed(tabId, frameId, empty) {
     const tab = this.tabState(tabId);
     const epoch = tab?.epoch;
-    const frames = await this.contentFrames(tabId);
+    const frames = await this.contentFrames(tabId, empty);
+    if (frames.length === 0) return this.blobTree(tabId);
     const key = framesKey(frames);
     const cached = tab?.content;
     if (
@@ -1644,15 +1647,31 @@ class Connection {
     return tree;
   }
 
-  async contentFrames(tabId) {
+  async contentFrames(tabId, empty = false) {
     const frames = await bounded(
       Promise.resolve().then(() => this.api.webNavigation?.getAllFrames?.({ tabId })),
       2000,
       'content frames'
     ).catch(() => unsettled());
-    if (!Array.isArray(frames) || frames.length === 0) unsettled();
+    if (!Array.isArray(frames) || (!empty && frames.length === 0)) unsettled();
     if (frames.some((frame) => frame?.errorOccurred === true && anyProtected(frame.url))) refusal();
     return frames;
+  }
+
+  blobFrameProtected(tree, origin) {
+    return blobTreeProtected(tree, origin, anyProtected);
+  }
+
+  async blobTree(tabId) {
+    const raw = await readTab(this.api, tabId);
+    const url = textOf(raw.url);
+    const origin = blobOrigin(url, anyProtected);
+    if (!origin || (raw.pendingUrl && raw.pendingUrl !== url)) unsettled();
+    const tree = await this.contentTree(tabId);
+    const root = frameIn(tree.frameTree);
+    if (root?.url !== url || root.securityOrigin !== origin) unsettled();
+    if (this.blobFrameProtected(tree.frameTree, origin)) refusal();
+    return tree;
   }
 
   async contentTree(tabId) {

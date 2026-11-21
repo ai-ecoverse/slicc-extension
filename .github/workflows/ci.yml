@@ -38,6 +38,8 @@ jobs:
         test/integration/binary-carriers.test.mjs
         test/integration/binary-stream-splits.test.mjs
         test/integration/blank-origin.test.mjs
+        test/integration/blob-document-chrome.test.mjs
+        test/integration/blob-document.test.mjs
         test/integration/blocked-hop-recovery.test.mjs
         test/integration/body-reads.test.mjs
         test/integration/cached-hop.test.mjs
