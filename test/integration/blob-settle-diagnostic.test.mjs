@@ -294,26 +294,40 @@ const METHODS = [
 ];
 
 async function workerSession() {
-  const { targetInfos } = await chrome.cdp.send('Target.getTargets');
-  const worker = targetInfos.find(
-    (info) =>
-      info.type === 'service_worker' && info.url === `chrome-extension://${extId}/background.js`
-  );
-  const { sessionId } = await chrome.cdp.send('Target.attachToTarget', {
-    targetId: worker.targetId,
-    flatten: true,
-  });
-  return sessionId;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const { targetInfos } = await chrome.cdp.send('Target.getTargets');
+    const worker = targetInfos.find(
+      (info) =>
+        info.type === 'service_worker' && info.url === `chrome-extension://${extId}/background.js`
+    );
+    if (worker) {
+      const attached = await chrome.cdp
+        .send('Target.attachToTarget', { targetId: worker.targetId, flatten: true })
+        .catch(() => undefined);
+      if (attached?.sessionId) return attached.sessionId;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return undefined;
 }
 
-async function sw(session, expression) {
-  const answer = await chrome.cdp.send(
-    'Runtime.evaluate',
-    { expression, awaitPromise: true, returnByValue: true },
-    session
-  );
-  if (answer.exceptionDetails) return { exception: answer.exceptionDetails.exception?.description };
-  return answer.result.value;
+let current;
+async function sw(_session, expression) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    current ??= await workerSession();
+    if (!current) return { exception: 'no worker session' };
+    const answer = await chrome.cdp
+      .send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, current)
+      .catch(() => undefined);
+    if (!answer) {
+      current = undefined;
+      continue;
+    }
+    if (answer.exceptionDetails)
+      return { exception: answer.exceptionDetails.exception?.description };
+    return answer.result.value;
+  }
+  return { exception: 'worker evaluate failed' };
 }
 
 async function extensionView(session, targetId) {
@@ -447,109 +461,112 @@ test('blob settle diagnostic', { timeout: 600000 }, async (t) => {
     version = `${v.product ?? ''} ${v.revision ?? ''}`.trim();
   } catch {}
   const report = { head: head(), chrome: version, rows: [] };
-  const session = await workerSession();
-  for (const transport of transports) {
-    const page = await client(t, transport);
-    const close = (targetId) =>
-      page
-        .evaluate((targetId) => h.attempt('Target.closeTarget', { targetId }), targetId)
-        .catch(() => {});
+  const session = undefined;
+  try {
+    for (const transport of transports) {
+      const page = await client(t, transport);
+      const close = (targetId) =>
+        page
+          .evaluate((targetId) => h.attempt('Target.closeTarget', { targetId }), targetId)
+          .catch(() => {});
 
-    const base = await openPage(page, `https://ordinary.test/doc?n=base-${Date.now()}`);
-    if (!base.error) {
-      await page.evaluate(
-        (s) => h.attempt('Target.detachFromTarget', { sessionId: s }),
-        base.sessionId
-      );
-      report.rows.push({
-        transport,
-        id: 'ordinary-page',
-        raw: await rawView(base.targetId),
-        extension: await extensionView(session, base.targetId),
-        commands: await commands(page, session, base.targetId),
-      });
-      await close(base.targetId);
-    } else report.rows.push({ transport, id: 'ordinary-page', error: base.error });
+      const base = await openPage(page, `https://ordinary.test/doc?n=base-${Date.now()}`);
+      if (!base.error) {
+        await page.evaluate(
+          (s) => h.attempt('Target.detachFromTarget', { sessionId: s }),
+          base.sessionId
+        );
+        report.rows.push({
+          transport,
+          id: 'ordinary-page',
+          raw: await rawView(base.targetId),
+          extension: await extensionView(session, base.targetId),
+          commands: await commands(page, session, base.targetId),
+        });
+        await close(base.targetId);
+      } else report.rows.push({ transport, id: 'ordinary-page', error: base.error });
 
-    for (const [id, origin] of [
-      ['blob-ordinary', `https://ordinary.test/doc?n=blob-${Date.now()}`],
-      ['blob-http', `http://upstream.test/hello?n=blob-${Date.now()}`],
-    ]) {
-      const opened = await openBlob(page, origin);
-      if (opened.error) {
-        report.rows.push({ transport, id, error: opened.error });
-        if (opened.targetId) await close(opened.targetId);
-        continue;
+      for (const [id, origin] of [
+        ['blob-ordinary', `https://ordinary.test/doc?n=blob-${Date.now()}`],
+        ['blob-http', `http://upstream.test/hello?n=blob-${Date.now()}`],
+      ]) {
+        const opened = await openBlob(page, origin);
+        if (opened.error) {
+          report.rows.push({ transport, id, error: opened.error });
+          if (opened.targetId) await close(opened.targetId);
+          continue;
+        }
+        report.rows.push({
+          transport,
+          id,
+          blobUrl: opened.blobUrl,
+          settledUrl: opened.url,
+          raw: await rawView(opened.targetId),
+          extension: await extensionView(session, opened.targetId),
+          commands: await commands(page, session, opened.targetId),
+          rawAfter: await rawView(opened.targetId),
+        });
+        await close(opened.targetId);
       }
-      report.rows.push({
-        transport,
-        id,
-        blobUrl: opened.blobUrl,
-        settledUrl: opened.url,
-        raw: await rawView(opened.targetId),
-        extension: await extensionView(session, opened.targetId),
-        commands: await commands(page, session, opened.targetId),
-        rawAfter: await rawView(opened.targetId),
-      });
-      await close(opened.targetId);
-    }
 
-    const framed = await openPage(page, `https://ordinary.test/doc?n=frame-${Date.now()}`);
-    if (!framed.error) {
-      const made = await page.evaluate(
-        async ({ sessionId, BLOB }) =>
-          h.evaluate(
-            sessionId,
-            `new Promise((r) => { const f = document.createElement('iframe'); f.onload = () => r(f.src); f.src = ${BLOB}; document.body.append(f); })`
-          ),
-        { sessionId: framed.sessionId, BLOB }
-      );
-      await page.evaluate(
-        (s) => h.attempt('Target.detachFromTarget', { sessionId: s }),
-        framed.sessionId
-      );
-      report.rows.push({
-        transport,
-        id: 'ordinary-page-blob-iframe',
-        made,
-        raw: await rawView(framed.targetId),
-        extension: await extensionView(session, framed.targetId),
-        commands: await commands(page, session, framed.targetId),
-      });
-      await close(framed.targetId);
-    }
+      const framed = await openPage(page, `https://ordinary.test/doc?n=frame-${Date.now()}`);
+      if (!framed.error) {
+        const made = await page.evaluate(
+          async ({ sessionId, BLOB }) =>
+            h.evaluate(
+              sessionId,
+              `new Promise((r) => { const f = document.createElement('iframe'); f.onload = () => r(f.src); f.src = ${BLOB}; document.body.append(f); })`
+            ),
+          { sessionId: framed.sessionId, BLOB }
+        );
+        await page.evaluate(
+          (s) => h.attempt('Target.detachFromTarget', { sessionId: s }),
+          framed.sessionId
+        );
+        report.rows.push({
+          transport,
+          id: 'ordinary-page-blob-iframe',
+          made,
+          raw: await rawView(framed.targetId),
+          extension: await extensionView(session, framed.targetId),
+          commands: await commands(page, session, framed.targetId),
+        });
+        await close(framed.targetId);
+      }
 
-    const vaultFramed = await openPage(page, `https://ordinary.test/doc?n=vframe-${Date.now()}`);
-    if (!vaultFramed.error) {
-      await page.evaluate(
-        async ({ sessionId }) =>
-          h.evaluate(
-            sessionId,
-            `new Promise((r) => { const f = document.createElement('iframe'); f.onload = () => r(true); f.src = 'https://vault.sliccy.ai/doc'; document.body.append(f); setTimeout(() => r(false), 5000); })`
-          ),
-        { sessionId: vaultFramed.sessionId }
-      );
-      await page.evaluate(
-        (s) => h.attempt('Target.detachFromTarget', { sessionId: s }),
-        vaultFramed.sessionId
-      );
-      const moved = await rawFrameEval(
-        'https://vault.sliccy.ai/',
-        `(() => { const u = ${BLOB}; setTimeout(() => { location.href = u; }, 0); return u; })()`
-      );
-      await new Promise((r) => setTimeout(r, 1500));
-      report.rows.push({
-        transport,
-        id: 'ordinary-page-vault-blob-iframe',
-        moved,
-        raw: await rawView(vaultFramed.targetId),
-        extension: await extensionView(session, vaultFramed.targetId),
-        commands: await commands(page, session, vaultFramed.targetId),
-      });
-      await close(vaultFramed.targetId);
+      const vaultFramed = await openPage(page, `https://ordinary.test/doc?n=vframe-${Date.now()}`);
+      if (!vaultFramed.error) {
+        await page.evaluate(
+          async ({ sessionId }) =>
+            h.evaluate(
+              sessionId,
+              `new Promise((r) => { const f = document.createElement('iframe'); f.onload = () => r(true); f.src = 'https://vault.sliccy.ai/doc'; document.body.append(f); setTimeout(() => r(false), 5000); })`
+            ),
+          { sessionId: vaultFramed.sessionId }
+        );
+        await page.evaluate(
+          (s) => h.attempt('Target.detachFromTarget', { sessionId: s }),
+          vaultFramed.sessionId
+        );
+        const moved = await rawFrameEval(
+          'https://vault.sliccy.ai/',
+          `(() => { const u = ${BLOB}; setTimeout(() => { location.href = u; }, 0); return u; })()`
+        );
+        await new Promise((r) => setTimeout(r, 1500));
+        report.rows.push({
+          transport,
+          id: 'ordinary-page-vault-blob-iframe',
+          moved,
+          raw: await rawView(vaultFramed.targetId),
+          extension: await extensionView(session, vaultFramed.targetId),
+          commands: await commands(page, session, vaultFramed.targetId),
+        });
+        await close(vaultFramed.targetId);
+      }
     }
+  } catch (error) {
+    report.error = String(error?.stack ?? error);
   }
-  await chrome.cdp.send('Target.detachFromTarget', { sessionId: session }).catch(() => undefined);
   console.log('BLOB_SETTLE_DIAGNOSTIC_BEGIN');
   console.log(JSON.stringify(report, null, 2));
   console.log('BLOB_SETTLE_DIAGNOSTIC_END');
