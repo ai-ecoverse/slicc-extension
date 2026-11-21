@@ -123,6 +123,9 @@ function exactTabId(targetId: string): number {
 const ERROR_PAGE = 'chrome-error://chromewebdata/';
 const DISCOVERY_REFUSAL =
   'slicc: refused: the extension bridge does not report target discovery events';
+const AUTO_ATTACH_RELATED_REFUSAL =
+  'slicc: refused: Target.autoAttachRelated is not supported: attach to each target';
+const FLATTEN_REFUSAL = 'slicc: refused: only flatten: true is supported';
 
 const failedTabs = new Bounded<Bounded<true>>(500);
 
@@ -1026,6 +1029,8 @@ async function dispatchCdpCommand(
   }
   const shield = tabShields.get(tabId);
   if (!shield) throw new Error(`${PROTECTED_REFUSAL} (the tab is not guarded)`);
+  if (method === 'Target.autoAttachRelated') throw new Error(AUTO_ATTACH_RELATED_REFUSAL);
+  if (method === 'Target.setAutoAttach' && params?.['autoAttach'] === false) return {};
   const result = await shield.command(method, params, async (m, p) =>
     deps.sendDebuggerCommand(tabId, m, await deps.maybeUnmaskCdpFrame(tabId, m, p))
   );
@@ -1112,6 +1117,7 @@ async function cdpAttachToTarget(
   state: PortState,
   deps: BridgeSwDeps
 ): Promise<BridgeTargetAttachResult> {
+  if (params['flatten'] !== true) throw new Error(FLATTEN_REFUSAL);
   const targetId = readTargetIdParam(params);
   const tabId = await guardedTab(params, deps);
   let attachedNow = false;
