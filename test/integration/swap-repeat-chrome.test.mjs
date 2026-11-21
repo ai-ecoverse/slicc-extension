@@ -22,6 +22,20 @@ before(async () => {
     const r = await this.__readChildReobserve(tabId, sessionId, info);
     const f = r.tree?.frame;
     __log('pass.read', { tab: tabId, childSession: sessionId, targetId: info.target, treeOk: Boolean(r.tree), treeUrl: __h(f?.url), unreachable: __h(f?.unreachableUrl), parentFrameId: f?.parentId, frameId: f?.id, infoOk: Boolean(r.targetInfo), host: __h(r.targetInfo?.url), targetType: r.targetInfo?.type });
+    const probe = async (source, method, params) => {
+      try {
+        const answer = await this.api.debugger.sendCommand(source, method, params);
+        const ti = answer?.targetInfo;
+        const list = answer?.targetInfos;
+        return { ok: true, targetId: ti?.targetId === info.target ? 'same' : __h(ti?.targetId), type: ti?.type, host: __h(ti?.url), listed: Array.isArray(list) ? list.filter((e) => e.targetId === info.target).map((e) => [e.type, __h(e.url)]) : undefined };
+      } catch (error) {
+        return { ok: false, error: String(error?.message ?? error).slice(0, 160) };
+      }
+    };
+    __log('probe.byTargetId', { childSession: sessionId, ...(await probe({ tabId }, 'Target.getTargetInfo', { targetId: info.target })) });
+    __log('probe.childSession', { childSession: sessionId, ...(await probe({ tabId, sessionId }, 'Target.getTargetInfo', {})) });
+    __log('probe.childSessionById', { childSession: sessionId, ...(await probe({ tabId, sessionId }, 'Target.getTargetInfo', { targetId: info.target })) });
+    __log('probe.getTargets', { childSession: sessionId, ...(await probe({ tabId }, 'Target.getTargets', {})) });
     return r;
   }
   async __readChildReobserve(tabId, sessionId, info) {`,
