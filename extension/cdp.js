@@ -1157,6 +1157,7 @@ class Connection {
         heldDocuments: new Map(),
         unresolved: new Map(),
         frameParents: new Map(),
+        swappedParents: new Map(),
         settled: new Set(),
         hops: new Map(),
         reroutes: new Map(),
@@ -2202,6 +2203,7 @@ class Connection {
   rememberParent(tab, frameId, parentId) {
     if (!frameId) return;
     tab.frameParents ??= new Map();
+    tab.swappedParents?.delete(frameId);
     if (parentId) tab.frameParents.set(frameId, parentId);
     else tab.frameParents.delete(frameId);
   }
@@ -2455,6 +2457,8 @@ class Connection {
       )?.[0] ||
       textOf(p.targetInfo?.targetId);
     if (method === 'Target.detachedFromTarget') {
+      for (const target of [tab?.debuggerChildInfo.get(child)?.target, p.targetId])
+        if (target) tab?.swappedParents?.delete(target);
       tab?.debuggerChildren.delete(child);
       tab?.debuggerChildInfo.delete(child);
     }
@@ -2522,6 +2526,7 @@ class Connection {
     const frameId = textOf(frame.id);
     if (frameId) {
       tab.frameParents ??= new Map();
+      tab.swappedParents?.delete(frameId);
       const parentId = textOf(frame.parentId);
       if (parentId) tab.frameParents.set(frameId, parentId);
       else tab.frameParents.delete(frameId);
@@ -2664,6 +2669,7 @@ class Connection {
         tab.unresolved.delete(id);
         for (const [, params] of pending) this.dropUnresolved(tab, params, tabId);
       }
+      this.keepSwappedParent(tab, id, p.reason);
       tab.frameParents?.delete(id);
     }
   }
@@ -2914,22 +2920,47 @@ class Connection {
     return true;
   }
 
-  childUnderCurrentMain(tab, parentTree, frameId, generation) {
+  keepSwappedParent(tab, frameId, reason) {
+    this.purgeSwappedParents(tab);
+    tab.swappedParents ??= new Map();
+    if (reason !== 'swap') {
+      tab.swappedParents.delete(frameId);
+      return;
+    }
+    const parentId = textOf(tab.frameParents?.get(frameId));
+    const generation = textOf(tab.documents.frames.get(tab.mainFrameId)?.loaderId);
+    if (parentId && generation) tab.swappedParents.set(frameId, { parentId, generation });
+  }
+
+  purgeSwappedParents(tab) {
+    const generation = textOf(tab.documents.frames.get(tab.mainFrameId)?.loaderId);
+    for (const [frameId, kept] of tab.swappedParents ?? []) {
+      if (!generation || kept.generation !== generation) tab.swappedParents.delete(frameId);
+    }
+  }
+
+  recordedParent(tab, frameId) {
+    tab.frameParents ??= new Map();
+    if (tab.frameParents.has(frameId)) return textOf(tab.frameParents.get(frameId));
+    return textOf(tab.swappedParents?.get(frameId)?.parentId);
+  }
+
+  childUnderCurrentMain(tab, parentTree, frameId, generation, childTree) {
     if (!frameId || tab.documents.frames.get(tab.mainFrameId)?.loaderId !== generation)
       return false;
-    if (frameIn(parentTree, frameId)) return true;
-    tab.frameParents ??= new Map();
-    if (!tab.frameParents.has(frameId)) return false;
-    let parentId = textOf(tab.frameParents.get(frameId));
+    this.purgeSwappedParents(tab);
+    const listed = frameIn(parentTree, frameId);
+    let parentId = listed ? textOf(listed.parentId) : this.recordedParent(tab, frameId);
     if (!parentId) return false;
-    if (parentId === tab.mainFrameId) return true;
+    const claimed = textOf(childTree?.frame?.parentId);
+    if (claimed && claimed !== parentId) return false;
+    if (listed || parentId === tab.mainFrameId) return true;
     const seen = new Set([frameId]);
     for (let depth = 0; parentId && depth < 8; depth += 1) {
       if (seen.has(parentId)) return false;
       seen.add(parentId);
       if (parentId === tab.mainFrameId) return true;
-      if (!tab.frameParents.has(parentId)) return false;
-      parentId = textOf(tab.frameParents.get(parentId));
+      parentId = this.recordedParent(tab, parentId);
     }
     return parentId === tab.mainFrameId;
   }
@@ -2973,7 +3004,7 @@ class Connection {
       return false;
     const target = textOf(targetInfo?.targetId) || current.target;
     const type = targetInfo?.type || current.type;
-    if (type === 'iframe' && !this.childUnderCurrentMain(tab, parentTree, target, generation))
+    if (type === 'iframe' && !this.childUnderCurrentMain(tab, parentTree, target, generation, tree))
       return false;
     const ok = await this.childReobservePass(tabId, targetInfo, tree);
     if (this.tabState(tabId) !== tab || tab.debuggerRevision !== startedRevision) return null;
@@ -2995,6 +3026,7 @@ class Connection {
   async reobserveStaleChildren(tabId, startedRevision) {
     const tab = this.tabState(tabId);
     if (!tab || tab.debuggerRevision !== startedRevision) return;
+    this.purgeSwappedParents(tab);
     const stale = [...tab.debuggerChildInfo.entries()].filter(
       ([, info]) => info.revision !== startedRevision
     );
