@@ -120,6 +120,48 @@ export function invalidates(method: string, params: CDPPayload | undefined): boo
   );
 }
 
+export function blobOrigin(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'blob:' || !/^https?:\/\/./.test(parsed.origin)) return undefined;
+  if (urlProtected(url) || urlProtected(parsed.origin)) return undefined;
+  return parsed.origin;
+}
+
+export function inheritsParentDocument(url: unknown): boolean {
+  return typeof url === 'string' && /^about:(?:blank|srcdoc)(?:[?#]|$)/i.test(url);
+}
+
+export function blobChildUrlProtected(url: unknown): boolean {
+  if (typeof url !== 'string' || url === '') return false;
+  if (url.startsWith('blob:')) return blobOrigin(url) === undefined;
+  return urlProtected(url);
+}
+
+export function blobTreeProtected(tree: unknown, parentOrigin: string): boolean {
+  const root = isObj(tree) ? tree : {};
+  const pending: unknown[] = Array.isArray(root['childFrames']) ? [...root['childFrames']] : [];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!isObj(node)) continue;
+    const frame = isObj(node['frame']) ? node['frame'] : {};
+    const url = frame['url'];
+    const origin = frame['securityOrigin'];
+    if (blobChildUrlProtected(url)) return true;
+    if (typeof origin === 'string' && urlProtected(origin)) return true;
+    const badUrl = typeof url !== 'string' || url === '';
+    const badOrigin = typeof origin !== 'string';
+    if ((badUrl || badOrigin) && !(inheritsParentDocument(url) && origin === parentOrigin))
+      return true;
+    if (Array.isArray(node['childFrames'])) pending.push(...node['childFrames']);
+  }
+  return false;
+}
+
 export function framesKey(frames: unknown[]): string | undefined {
   if (!frames.some((frame) => isObj(frame) && frame['frameId'] === 0)) return undefined;
   const rows: string[] = [];
@@ -2586,15 +2628,16 @@ export class TabShield {
     if (!reads && frameId === undefined) return;
     const tree =
       reads && !method.startsWith('Runtime.')
-        ? await this.witnessed(frameId)
+        ? await this.witnessed(frameId, !method.startsWith('Debugger.'))
         : await this.contentTree();
     if (frameId !== undefined && !frameIn(tree.frameTree, frameId)) refuse(PROTECTED_RULES.refusal);
     if (reads && tree.sealed) refuse(PROTECTED_RULES.refusal);
   }
 
-  private async witnessed(frameId: string | undefined): Promise<ContentTree> {
+  private async witnessed(frameId: string | undefined, empty: boolean): Promise<ContentTree> {
     const epoch = this.epoch;
-    const frames = await this.contentFrames();
+    const frames = await this.contentFrames(empty);
+    if (frames.length === 0) return this.blobTree();
     const key = framesKey(frames);
     const cached = this.content;
     if (
@@ -2612,14 +2655,14 @@ export class TabShield {
     return tree;
   }
 
-  private async contentFrames(): Promise<unknown[]> {
+  private async contentFrames(empty = false): Promise<unknown[]> {
     const read = await shieldProbe(
       Promise.resolve()
         .then(() => this.readFrames())
         .then((frames) => ({ frames }))
     ).catch(() => refuse(UNSETTLED_REFUSAL));
     const frames = read['frames'];
-    if (!Array.isArray(frames) || frames.length === 0) refuse(UNSETTLED_REFUSAL);
+    if (!Array.isArray(frames) || (!empty && frames.length === 0)) refuse(UNSETTLED_REFUSAL);
     if (
       frames.some(
         (frame) =>
@@ -2628,6 +2671,22 @@ export class TabShield {
     )
       refuse(PROTECTED_RULES.refusal);
     return frames;
+  }
+
+  blobFrameProtected(tree: unknown, origin: string): boolean {
+    return blobTreeProtected(tree, origin);
+  }
+
+  private async blobTree(): Promise<ContentTree> {
+    const tab = await this.readLive();
+    const url = tab.url ?? '';
+    const origin = blobOrigin(url);
+    if (!origin || (tab.pendingUrl && tab.pendingUrl !== url)) refuse(UNSETTLED_REFUSAL);
+    const tree = await this.contentTree();
+    const root = frameIn(tree.frameTree, undefined);
+    if (root?.['url'] !== url || root['securityOrigin'] !== origin) refuse(UNSETTLED_REFUSAL);
+    if (this.blobFrameProtected(tree.frameTree, origin)) refuse(PROTECTED_RULES.refusal);
+    return tree;
   }
 
   private async contentTree(): Promise<ContentTree> {

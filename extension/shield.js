@@ -1864,6 +1864,46 @@ export function invalidates(method, params) {
   );
 }
 
+export function blobOrigin(url, isProtected) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'blob:' || !/^https?:\/\/./.test(parsed.origin)) return undefined;
+  if (isProtected(url) || isProtected(parsed.origin)) return undefined;
+  return parsed.origin;
+}
+
+export function inheritsParentDocument(url) {
+  return typeof url === 'string' && /^about:(?:blank|srcdoc)(?:[?#]|$)/i.test(url);
+}
+
+export function blobChildUrlProtected(url, isProtected) {
+  if (typeof url !== 'string' || url === '') return false;
+  if (url.startsWith('blob:')) return blobOrigin(url, isProtected) === undefined;
+  return isProtected(url);
+}
+
+export function blobTreeProtected(tree, parentOrigin, isProtected) {
+  const pending = Array.isArray(tree?.childFrames) ? [...tree.childFrames] : [];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    const frame = node?.frame;
+    const url = frame?.url;
+    const origin = frame?.securityOrigin;
+    if (blobChildUrlProtected(url, isProtected)) return true;
+    if (typeof origin === 'string' && isProtected(origin)) return true;
+    const badUrl = typeof url !== 'string' || url === '';
+    const badOrigin = typeof origin !== 'string';
+    if ((badUrl || badOrigin) && !(inheritsParentDocument(url) && origin === parentOrigin))
+      return true;
+    if (Array.isArray(node?.childFrames)) pending.push(...node.childFrames);
+  }
+  return false;
+}
+
 export function framesKey(frames) {
   if (!frames.some((frame) => frame?.frameId === 0)) return undefined;
   const rows = [];
