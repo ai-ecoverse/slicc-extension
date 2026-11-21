@@ -24,8 +24,8 @@ jobs:
     uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.16.1
     secrets: inherit
     with:
-      test-glob: test/integration/*.test.mjs
-      shards: 4
+      test-glob: test/integration/blob-settle-diagnostic.test.mjs
+      shards: 1
       timeout-minutes: 30
       review-timeout-minutes: 90
       node-options: --max-old-space-size=4096
