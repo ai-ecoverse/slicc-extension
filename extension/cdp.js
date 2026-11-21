@@ -2888,35 +2888,36 @@ class Connection {
 
   childReobserveUrl(targetInfo, tree) {
     const root = tree?.frame;
-    if (root && textOf(root.url).startsWith('chrome-error:')) {
-      return textOf(root.unreachableUrl) || textOf(targetInfo?.url);
-    }
-    return textOf(targetInfo?.url) || textOf(root?.url);
+    const liveUrl = textOf(targetInfo?.url);
+    if (textOf(root?.url).startsWith('chrome-error:') || liveUrl.startsWith('chrome-error:'))
+      return textOf(root?.unreachableUrl);
+    return liveUrl || textOf(root?.url);
   }
 
-  async childReobservePass(_tabId, targetInfo, tree) {
-    if (!targetInfo || !tree) return false;
-    const type = targetInfo?.type;
-    if (type && type !== 'iframe' && type !== 'worker') return false;
-    if (type && uiType(type)) return false;
+  async childReobservePass(_tabId, targetInfo, tree, type, target) {
+    const root = tree?.frame;
+    if (!root || !target || textOf(root.id) !== target) return false;
+    if ((type !== 'iframe' && type !== 'worker') || uiType(type)) return false;
+    if (targetInfo && textOf(targetInfo.targetId) !== target) return false;
+    if (targetInfo?.type && targetInfo.type !== type) return false;
     const liveUrl = textOf(targetInfo?.url);
     if (liveUrl && (urlProtected(guard, liveUrl) || this.protectedOrigin(liveUrl))) return false;
-    const root = tree?.frame;
-    if (root && textOf(root.url).startsWith('chrome-error:')) {
+    if (this.protectedOrigin(textOf(root.securityOrigin))) return false;
+    const treeUrl = textOf(root.url);
+    if (treeUrl.startsWith('chrome-error:') || liveUrl.startsWith('chrome-error:')) {
       const unreachable = textOf(root.unreachableUrl);
-      if (
-        !unreachable ||
-        !/^https?:\/\//.test(unreachable) ||
-        !URL.canParse(unreachable) ||
-        this.protectedOrigin(unreachable) ||
-        errorUrlProtected(guard, unreachable)
-      )
-        return false;
-      return true;
+      return Boolean(
+        unreachable &&
+          /^https?:\/\//.test(unreachable) &&
+          URL.canParse(unreachable) &&
+          !this.protectedOrigin(unreachable) &&
+          !errorUrlProtected(guard, unreachable)
+      );
     }
-    const url = liveUrl || textOf(root?.url);
-    if (!url || !/^https?:\/\//.test(url) || !URL.canParse(url)) return false;
-    if (urlProtected(guard, url) || this.protectedOrigin(url)) return false;
+    for (const url of liveUrl ? [liveUrl, treeUrl] : [treeUrl]) {
+      if (!url || !/^https?:\/\//.test(url) || !URL.canParse(url)) return false;
+      if (urlProtected(guard, url) || this.protectedOrigin(url)) return false;
+    }
     return true;
   }
 
@@ -2987,9 +2988,7 @@ class Connection {
     );
     const targetInfo = await this.inflight(
       tabId,
-      this.api.debugger.sendCommand({ tabId }, 'Target.getTargetInfo', {
-        targetId: info.target,
-      })
+      this.api.debugger.sendCommand({ tabId, sessionId }, 'Target.getTargetInfo', {})
     ).then(
       (answer) => answer?.targetInfo,
       () => undefined
@@ -3002,11 +3001,12 @@ class Connection {
     const current = tab.debuggerChildInfo.get(sessionId);
     if (!current || current.revision === startedRevision || current.target !== info.target)
       return false;
-    const target = textOf(targetInfo?.targetId) || current.target;
-    const type = targetInfo?.type || current.type;
+    const target = current.target;
+    const type = current.type;
+    if (!targetInfo && !textOf(tree?.frame?.parentId)) return false;
     if (type === 'iframe' && !this.childUnderCurrentMain(tab, parentTree, target, generation, tree))
       return false;
-    const ok = await this.childReobservePass(tabId, targetInfo, tree);
+    const ok = await this.childReobservePass(tabId, targetInfo, tree, type, target);
     if (this.tabState(tabId) !== tab || tab.debuggerRevision !== startedRevision) return null;
     if (!ok) return false;
     const url = this.childReobserveUrl(targetInfo, tree);
