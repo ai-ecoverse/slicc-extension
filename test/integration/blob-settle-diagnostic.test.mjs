@@ -334,7 +334,7 @@ async function extensionView(session, targetId) {
   return sw(
     session,
     `(async () => {
-      const t = (await chrome.debugger.getTargets()).find((x) => x.id === ${JSON.stringify(targetId)});
+      const t = (await chrome.debugger.getTargets()).find((x) => x.tabId === Number(${JSON.stringify(targetId)}));
       if (!t?.tabId) return { target: t ?? null };
       const tab = await chrome.tabs.get(t.tabId);
       const frames = await chrome.webNavigation.getAllFrames({ tabId: t.tabId });
@@ -347,8 +347,17 @@ async function extensionView(session, targetId) {
   );
 }
 
-async function rawView(targetId) {
-  const { sessionId } = await chrome.cdp.send('Target.attachToTarget', { targetId, flatten: true });
+async function rawView(tabTarget) {
+  const mapped = await sw(
+    undefined,
+    `(async () => (await chrome.debugger.getTargets()).find((x) => x.tabId === Number(${JSON.stringify(tabTarget)}))?.id ?? '')()`
+  );
+  const targetId = typeof mapped === 'string' && mapped ? mapped : tabTarget;
+  const attached = await chrome.cdp
+    .send('Target.attachToTarget', { targetId, flatten: true })
+    .catch((e) => ({ error: String(e?.message ?? e) }));
+  if (!attached.sessionId) return { mapped, attach: attached };
+  const { sessionId } = attached;
   const out = {};
   for (const [m, p] of [
     ['Page.getFrameTree', {}],
