@@ -54,6 +54,7 @@ jobs:
         test/integration/external-ports.test.mjs
         test/integration/fetch-vectors.test.mjs
         test/integration/foreground.test.mjs
+        test/integration/frame-owner-push.test.mjs
         test/integration/guard-renew.test.mjs
         test/integration/guard-report.test.mjs
         test/integration/guard-seven-lagging.test.mjs
