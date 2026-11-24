@@ -302,6 +302,53 @@ test('after the upgrade: the redirected leader is adopted and the panel follows 
   refusedEverywhere(await inTab(leader, probe), 'not-leader-document');
 });
 
+test('Show SLICC tab in a live seven panel activates the existing leader in another window', async (t) => {
+  await cookie('__Host-slicc-six-retired', '1');
+  t.after(closeWww);
+  const side = await panel(t);
+  assert.ok(await side.until(`${shown}.state === 'live'`, 20000));
+  const leader = (await side.evaluate(stored)).slicc_leader_tab_id;
+  const panelWindow = await side.evaluate('chrome.windows.getCurrent().then((w) => w.id)');
+  const leaderWindow = await side.evaluate(
+    `chrome.windows.create({ tabId: ${leader} }).then((w) => w.id)`
+  );
+  assert.notEqual(panelWindow, leaderWindow);
+  const blank = await side.evaluate(
+    `chrome.tabs.create({ windowId: ${leaderWindow}, url: 'about:blank', active: true }).then((tab) => tab.id)`
+  );
+  try {
+    await side.evaluate(
+      `chrome.windows.update(${panelWindow}, { focused: true }).then(() => true)`
+    );
+    assert.equal(
+      await side.evaluate(`chrome.tabs.get(${leader}).then((tab) => tab.active)`),
+      false
+    );
+
+    assert.equal((await side.evaluate(shown)).action, 'Show SLICC tab');
+    assert.ok(
+      await side.evaluate(`(() => {
+    const button = document.getElementById('cherry-status-action');
+    const rect = button.getBoundingClientRect();
+    if (document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) !== button) return false;
+    button.click();
+    return true;
+  })()`)
+    );
+    assert.ok(
+      await side.until(
+        `chrome.tabs.get(${leader}).then((tab) => tab.active && tab.windowId === ${leaderWindow})`
+      )
+    );
+    assert.deepEqual(
+      (await side.evaluate(wwwTabs)).map((tab) => tab.id),
+      [leader]
+    );
+  } finally {
+    await side.evaluate(`chrome.tabs.remove(${blank})`);
+  }
+});
+
 test('after the upgrade, a seven tab the user opened becomes the leader as it is', async (t) => {
   t.after(closeWww);
   const mine = await open(os);

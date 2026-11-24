@@ -35,7 +35,7 @@ export interface SidePanelDeps {
   connect: () => ChromeRuntimePort;
   mountSlicc: typeof mountSlicc;
   iframe: HTMLIFrameElement;
-  setStatus: (s: PanelStatus) => void;
+  setStatus: (s: PanelStatus, layout?: 'toolbar') => void;
   sliccOrigin: string;
 }
 
@@ -104,7 +104,7 @@ export function sevenFrame(deps: SidePanelDeps, live: () => boolean) {
       if (!message || !url) return;
       if (message.role === 'follower') {
         timer.clear();
-        deps.setStatus('live');
+        deps.setStatus('live', 'toolbar');
         return;
       }
       deps.setStatus('starting');
@@ -290,12 +290,13 @@ if (typeof chrome !== 'undefined' && chrome?.runtime?.id) {
   const statusText = document.getElementById('cherry-status-text');
   const actionButton = document.getElementById('cherry-status-action') as HTMLButtonElement | null;
   let current: PanelStatus = 'starting';
-  const setStatus = (s: PanelStatus) => {
+  const setStatus: SidePanelDeps['setStatus'] = (s, layout) => {
     current = s;
     if (!statusEl) return;
+    statusEl.toggleAttribute('data-toolbar', layout === 'toolbar');
     if (statusText) statusText.textContent = PANEL_STATUS_TEXT[s];
     if (actionButton) {
-      const label = PANEL_ACTION_LABEL[s];
+      const label = layout === 'toolbar' ? PANEL_ACTION_LABEL.tab : PANEL_ACTION_LABEL[s];
       actionButton.hidden = !label;
       actionButton.textContent = label ?? '';
     }
