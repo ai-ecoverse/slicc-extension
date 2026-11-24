@@ -349,6 +349,28 @@ test('Show SLICC tab in a live seven panel activates the existing leader in anot
   }
 });
 
+test('Show SLICC tab hides while the leader is the active tab in the panel’s window, and comes back when it isn’t', async (t) => {
+  await cookie('__Host-slicc-six-retired', '1');
+  t.after(closeWww);
+  const side = await panel(t);
+  assert.ok(await side.until(`${shown}.state === 'live'`, 20000));
+  const leader = (await side.evaluate(stored)).slicc_leader_tab_id;
+  const own = await side.evaluate('chrome.tabs.getCurrent().then((tab) => tab.id)');
+  const toolbar = `document.getElementById('cherry-status').hasAttribute('data-toolbar')`;
+  await side.evaluate(
+    `chrome.windows.getCurrent().then((w) => chrome.tabs.move(${leader}, { windowId: w.id, index: -1 })).then(() => true)`
+  );
+  await side.evaluate(`chrome.tabs.update(${own}, { active: true }).then(() => true)`);
+  assert.ok(await side.until(`${shown}.action === 'Show SLICC tab' && ${toolbar}`));
+
+  await side.evaluate(`chrome.tabs.update(${leader}, { active: true }).then(() => true)`);
+  assert.ok(await side.until(`${shown}.action === null && !${toolbar}`));
+  assert.equal((await side.evaluate(shown)).state, 'live');
+
+  await side.evaluate(`chrome.tabs.update(${own}, { active: true }).then(() => true)`);
+  assert.ok(await side.until(`${shown}.action === 'Show SLICC tab' && ${toolbar}`));
+});
+
 test('after the upgrade, a seven tab the user opened becomes the leader as it is', async (t) => {
   t.after(closeWww);
   const mine = await open(os);
