@@ -2,6 +2,7 @@ import { type CherryFeatures, mountSlicc, type SliccHandle } from '@ai-ecoverse/
 import { nextBackoffDelayMs, nudgeIframeRepaint, SLICC_HOSTED_ORIGIN } from '@slicc/shared-ts';
 import {
   CHERRY_PANEL_PORT_NAME,
+  LEADER_TAB_ID_KEY,
   SEVEN_PANEL_MESSAGE,
   type SevenPanelMessage,
   SIDE_PANEL_FEATURES,
@@ -35,7 +36,7 @@ export interface SidePanelDeps {
   connect: () => ChromeRuntimePort;
   mountSlicc: typeof mountSlicc;
   iframe: HTMLIFrameElement;
-  setStatus: (s: PanelStatus) => void;
+  setStatus: (s: PanelStatus, layout?: 'toolbar') => void;
   sliccOrigin: string;
 }
 
@@ -104,7 +105,7 @@ export function sevenFrame(deps: SidePanelDeps, live: () => boolean) {
       if (!message || !url) return;
       if (message.role === 'follower') {
         timer.clear();
-        deps.setStatus('live');
+        deps.setStatus('live', 'toolbar');
         return;
       }
       deps.setStatus('starting');
@@ -284,23 +285,61 @@ export function createSidePanelController(deps: SidePanelDeps): SidePanelControl
   return controller;
 }
 
+export async function leaderInFront(): Promise<boolean> {
+  try {
+    const [panel, stored] = await Promise.all([
+      chrome.windows.getCurrent(),
+      chrome.storage.session.get(LEADER_TAB_ID_KEY),
+    ]);
+    const id = stored[LEADER_TAB_ID_KEY];
+    if (typeof id !== 'number') return false;
+    const tab = await chrome.tabs.get(id);
+    return tab.active === true && tab.windowId === panel.id;
+  } catch {
+    return false;
+  }
+}
+
 if (typeof chrome !== 'undefined' && chrome?.runtime?.id) {
   const iframe = document.getElementById('cherry-follower') as HTMLIFrameElement;
   const statusEl = document.getElementById('cherry-status');
   const statusText = document.getElementById('cherry-status-text');
   const actionButton = document.getElementById('cherry-status-action') as HTMLButtonElement | null;
   let current: PanelStatus = 'starting';
-  const setStatus = (s: PanelStatus) => {
-    current = s;
+  let layout: 'toolbar' | undefined;
+  let inFront = false;
+  const render = () => {
     if (!statusEl) return;
-    if (statusText) statusText.textContent = PANEL_STATUS_TEXT[s];
+    const toolbar = layout === 'toolbar' && !inFront;
+    statusEl.toggleAttribute('data-toolbar', toolbar);
+    if (statusText) statusText.textContent = PANEL_STATUS_TEXT[current];
     if (actionButton) {
-      const label = PANEL_ACTION_LABEL[s];
-      actionButton.hidden = !label;
-      actionButton.textContent = label ?? '';
+      const label = toolbar ? PANEL_ACTION_LABEL.tab : PANEL_ACTION_LABEL[current];
+      const shown = label && !(inFront && label === PANEL_ACTION_LABEL.tab) ? label : '';
+      actionButton.hidden = !shown;
+      actionButton.textContent = shown;
     }
-    statusEl.dataset.state = s;
+    statusEl.dataset.state = current;
   };
+  const setStatus: SidePanelDeps['setStatus'] = (s, l) => {
+    current = s;
+    layout = l;
+    render();
+  };
+  let checks = 0;
+  const checkFront = () => {
+    const check = ++checks;
+    void leaderInFront().then((front) => {
+      if (check !== checks || front === inFront) return;
+      inFront = front;
+      render();
+    });
+  };
+  chrome.tabs.onActivated.addListener(checkFront);
+  chrome.storage.onChanged?.addListener((changes, area) => {
+    if (area === 'session' && LEADER_TAB_ID_KEY in changes) checkFront();
+  });
+  checkFront();
   const controller = createSidePanelController({
     connect: () => chrome.runtime.connect({ name: CHERRY_PANEL_PORT_NAME }),
     mountSlicc,

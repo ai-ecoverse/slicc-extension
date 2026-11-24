@@ -10,10 +10,15 @@
       height: 100%;
       background: #1e1e1e;
     }
+    body {
+      display: flex;
+      flex-direction: column;
+    }
     #cherry-follower {
       border: 0;
       width: 100%;
-      height: 100%;
+      min-height: 0;
+      flex: 1;
       display: block;
     }
     #cherry-status {
@@ -45,6 +50,25 @@
       background: transparent;
       color: #eee;
       cursor: pointer;
+    }
+    #cherry-status[data-toolbar] {
+      position: static;
+      display: flex;
+      align-items: flex-end;
+      padding: 4px 8px;
+      color-scheme: light dark;
+      background: Canvas;
+      border-bottom: 1px solid ButtonBorder;
+    }
+    #cherry-status[data-toolbar] #cherry-status-text {
+      display: none;
+    }
+    #cherry-status[data-toolbar] button {
+      font-size: 12px;
+      padding: 4px 10px;
+      color: ButtonText;
+      border-color: ButtonBorder;
+      background: ButtonFace;
     }
     #cherry-status-action[hidden] {
       display: none;

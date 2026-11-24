@@ -1,4 +1,5 @@
 import { LEADER_EXT_ID_QUERY_NAME, SLICC_HOSTED_ORIGIN } from '@slicc/shared-ts';
+import { LEADER_TAB_ID_KEY } from './cherry-panel-protocol.js';
 import { broadcastLeaderGone, setCherryPanelSeven } from './cherry-panel-sw.js';
 import {
   forgetTopDocument,
@@ -10,8 +11,6 @@ import {
   readSevenUpgraded,
   writeLeaderKind,
 } from './leader-document.js';
-
-const LEADER_TAB_ID_KEY = 'slicc_leader_tab_id';
 
 const PROD_LEADER_TAB_URL = `${SLICC_HOSTED_ORIGIN}/?slicc=leader`;
 const PROD_LEADER_TAB_URL_GLOB = `${SLICC_HOSTED_ORIGIN}/*`;

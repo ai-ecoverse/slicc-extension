@@ -2,6 +2,7 @@ import type { CherryFeatures } from '@ai-ecoverse/cherry';
 
 export const CHERRY_PANEL_PORT_NAME = 'cherry-panel';
 export const SEVEN_PANEL_MESSAGE = 'slicc-seven-panel';
+export const LEADER_TAB_ID_KEY = 'slicc_leader_tab_id';
 
 export interface PanelHelloMessage {
   kind: 'hello';
