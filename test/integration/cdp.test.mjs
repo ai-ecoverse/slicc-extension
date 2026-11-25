@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { listen } from '../../extension/cdp.js';
 import { protectedOrigins } from '../../extension/protected.mjs';
 import { protectedRules } from '../../extension/protected-rules.js';
-import { namesProtectedUrl, redactText, urlProtected } from '../../extension/shield.js';
+import { namesProtectedUrl, redactText, UNANSWERED, urlProtected } from '../../extension/shield.js';
 import { launch } from './chrome.mjs';
 import { openExtensionPage } from './extension-page.mjs';
 
@@ -824,7 +824,7 @@ test('attach fails closed when the frame tree or the main-frame origin cannot be
       true,
     ],
     ['rejects', () => Promise.reject(new Error('Page.getFrameTree failed')), false],
-    ['hangs', () => new Promise(() => undefined), false],
+    ['hangs', () => new Promise(() => undefined), false, UNANSWERED],
     ['empty', () => Promise.resolve({}), false],
     [
       'blank without origin',
@@ -832,7 +832,7 @@ test('attach fails closed when the frame tree or the main-frame origin cannot be
       false,
     ],
   ];
-  for (const [label, tree, attaches] of cases) {
+  for (const [label, tree, attaches, why = refused] of cases) {
     const { connection, api, cdp } = open();
     api.locations = new Map([[8, { url: 'https://other.test/' }]]);
     api.debugger.sendCommand = (target, method, params) => {
@@ -849,7 +849,7 @@ test('attach fails closed when the frame tree or the main-frame origin cannot be
       assert.deepEqual(answer.result, { sessionId: '8' }, label);
       assert.deepEqual(api.detached, [], label);
     } else {
-      assert.equal(answer.error, refused, label);
+      assert.equal(answer.error, why, label);
       assert.deepEqual(api.detached, [8], label);
     }
     assert.equal(
@@ -859,6 +859,85 @@ test('attach fails closed when the frame tree or the main-frame origin cannot be
     );
     cdp.close();
   }
+});
+
+function rootTree(loaderId) {
+  return {
+    frameTree: {
+      frame: {
+        id: 'MAIN',
+        loaderId,
+        url: 'https://other.test/',
+        securityOrigin: 'https://other.test',
+      },
+    },
+  };
+}
+
+function scriptedTrees(api, reads) {
+  let n = 0;
+  api.debugger.sendCommand = (target, method, params) => {
+    api.sent.push({ tabId: target.tabId, method, params });
+    if (method === 'Page.getFrameTree') {
+      const read = reads[Math.min(n, reads.length - 1)];
+      n += 1;
+      return read();
+    }
+    return Promise.resolve({});
+  };
+}
+
+const stalled = () => new Promise(() => undefined);
+
+test('a root that moves and then stops answering while it is stabilized is refused as not answering and detached', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  scriptedTrees(api, [
+    () => Promise.resolve(rootTree('L1')),
+    () => Promise.resolve(rootTree('L2')),
+    stalled,
+  ]);
+  const answer = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.equal(answer.error, UNANSWERED);
+  assert.deepEqual(api.detached, [8]);
+  cdp.close();
+});
+
+test('a second session whose root stops answering while it is stabilized is refused as not answering and keeps the first', async () => {
+  const { connection, api, cdp } = open();
+  api.locations = new Map([[8, { url: 'https://other.test/' }]]);
+  scriptedTrees(api, [() => Promise.resolve(rootTree('L1'))]);
+  const first = await command(cdp, connection, {
+    id: 1,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.deepEqual(first.result, { sessionId: '8' });
+  scriptedTrees(api, [
+    () => Promise.resolve(rootTree('L1')),
+    () => Promise.resolve(rootTree('L2')),
+    stalled,
+  ]);
+  const second = await command(cdp, connection, {
+    id: 2,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.equal(second.error, UNANSWERED);
+  assert.deepEqual(api.detached, []);
+  assert.equal(connection.posted.filter((m) => m.method === 'Target.detachedFromTarget').length, 0);
+  scriptedTrees(api, [() => Promise.resolve(rootTree('L1'))]);
+  const third = await command(cdp, connection, {
+    id: 3,
+    method: 'Target.attachToTarget',
+    params: { targetId: '8', flatten: true },
+  });
+  assert.match(third.result.sessionId, /^8\./);
+  cdp.close();
 });
 
 test('a child about: frame whose origin cannot be read is treated as protected', async () => {

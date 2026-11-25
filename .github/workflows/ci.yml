@@ -91,6 +91,7 @@ jobs:
         test/integration/sign-in.test.mjs
         test/integration/signin-leak.test.mjs
         test/integration/six.test.mjs
+        test/integration/unanswered-attach.test.mjs
         test/integration/upgrade.test.mjs
         test/integration/url-forms.test.mjs
         test/integration/worlds.test.mjs
