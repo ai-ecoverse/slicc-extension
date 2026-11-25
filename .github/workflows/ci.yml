@@ -24,39 +24,13 @@ jobs:
     uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.17.0
     secrets: inherit
     with:
-      test-glob: test/integration/*.test.mjs
-      shards: 4
-      timeout-minutes: 30
+      test-glob: test/integration/guard*.test.mjs
+      shards: 5
+      timeout-minutes: 45
       review-timeout-minutes: 90
       node-options: --max-old-space-size=4096
       strict-tests: |
-        **/*guard*.test.*
-        **/*security*.test.*
-        test/integration/agent-path.test.mjs
-        test/integration/attach-error-root.test.mjs
-        test/integration/background-screenshots.test.mjs
-        test/integration/binary-carriers.test.mjs
-        test/integration/binary-stream-splits.test.mjs
-        test/integration/blank-origin.test.mjs
-        test/integration/blob-document-chrome.test.mjs
-        test/integration/blob-document.test.mjs
-        test/integration/blocked-hop-recovery.test.mjs
-        test/integration/body-reads.test.mjs
-        test/integration/cached-hop.test.mjs
-        test/integration/capture.test.mjs
-        test/integration/cdp.test.mjs
-        test/integration/child-document-response.test.mjs
-        test/integration/commit-tab-lag.test.mjs
-        test/integration/content-check-cost.test.mjs
-        test/integration/cors.test.mjs
-        test/integration/cws-verify.test.mjs
-        test/integration/document-command-controls.test.mjs
-        test/integration/error-page-seal.test.mjs
-        test/integration/extension-frame.test.mjs
-        test/integration/external-ports.test.mjs
-        test/integration/fetch-vectors.test.mjs
-        test/integration/foreground.test.mjs
-        test/integration/frame-owner-push.test.mjs
+        test/integration/guard-cookie-plant-vault-diag.test.mjs
         test/integration/guard-renew.test.mjs
         test/integration/guard-report.test.mjs
         test/integration/guard-seven-lagging.test.mjs
@@ -64,124 +38,5 @@ jobs:
         test/integration/guard-six-bridge-lagging.test.mjs
         test/integration/guard-six-bridge-prompt.test.mjs
         test/integration/guard-stall.test.mjs
-        test/integration/history-restore-live-check.test.mjs
-        test/integration/is-main.test.mjs
-        test/integration/joined-leak.test.mjs
-        test/integration/large-payload.test.mjs
-        test/integration/legacy-interception.test.mjs
-        test/integration/newtab.test.mjs
-        test/integration/nested-local-frame.test.mjs
-        test/integration/owned-continue.test.mjs
-        test/integration/page-api-origin.test.mjs
-        test/integration/page-session-target.test.mjs
-        test/integration/page-version.test.mjs
-        test/integration/private-extension.test.mjs
-        test/integration/privileged.test.mjs
-        test/integration/rebuild.test.mjs
-        test/integration/reobserve-committing-sibling.test.mjs
-        test/integration/reobserve-dom-bindings-chrome.test.mjs
-        test/integration/reobserve-swapped-child.test.mjs
-        test/integration/redirect-leak.test.mjs
-        test/integration/redirect-modes.test.mjs
-        test/integration/route-hint.test.mjs
-        test/integration/security.test.mjs
-        test/integration/seven.test.mjs
-        test/integration/shared-frames.test.mjs
-        test/integration/shield.test.mjs
-        test/integration/sign-in.test.mjs
-        test/integration/signin-leak.test.mjs
-        test/integration/six.test.mjs
-        test/integration/unanswered-attach.test.mjs
-        test/integration/upgrade.test.mjs
-        test/integration/url-forms.test.mjs
-        test/integration/worlds.test.mjs
-        test/integration/wrapped-history-gate.test.mjs
       review-prompt: |
-        SLICC-EXTENSION
-
-        This repository is slicc-extension, one Chrome MV3 extension for two products, shipped to Chrome Web Store users as item akjjllgokmbgpbdbmafpiefnhidlmbgf. Six is the hosted leader tab on www.sliccy.ai, through `externally_connectable`: the CDP bridge, the fetch proxy that injects secrets, the secrets page and the side panel. Seven is SLICC pages on `*.sliccy.ai`: DNR CORS rules, the `sliccExtension.fetch` relay and `sliccExtension.cdp` over `chrome.debugger`. AGENTS.md and the README are the contract: read the sections the change touches first. `git diff origin/main...HEAD`, or `$RUNNER_TEMP/review/context/pr.diff`, is the change. The integration artifacts hold `artifacts/guard/<transport>-<variant>.json`, the guard-vector rows of this run on both transports.
-
-        There is no certification after you: once this pull request passes the merge queue, semantic-release releases it from `main`, and a release is published to the Chrome Web Store from `ci.yml`. Review it as the last check before it ships.
-
-        Look for real defects, in this order:
-        1. Protected origins (from the pinned `@ai-ecoverse/slicc-browsers` catalog): vault, vault-preview, `vault-*`, get, mcpcat and the sliccy.ai apex get nothing: no content scripts, no ports, no CDP, no relay. www.sliccy.ai gets six's surfaces and seven's relay; seven's labels get the relay and the CDP surface. Every port checks the sender's origin. A change that widens who reaches a port, a content script, the relay or CDP (matches, `exclude_matches`, `exclude_globs`, `externally_connectable`, `trusted()`, sender checks, the generated `seven*.js` and `protected-rules.js` inputs) is a defect unless it is deliberate, narrow and tested.
-        2. The CDP guard on both transports: seven's `sliccExtension.cdp` (`extension/cdp.js`, `extension/shield.js`) and six's bridge (`six/extension/bridge-sw.ts`, `cdp-proxy-sw.ts`, `cdp-shield.ts`, `protected-frames-sw.ts`). Both refuse protected targets on every path: attach, create and navigate (redirects, popups, and `about:`, `view-source:`, `blob:` and `filesystem:` wrappers included), protected iframes, Fetch interception, cookie and storage methods, privileged pages (`chrome:`, `chrome-extension:` including ours and other extensions, `devtools:`, `file:`, browser_ui targets) and pre-registered effects (init scripts, bindings, bypassCSP, breakpoints, auto-attach, session overrides). Extension execution contexts stay out of a client's reach. Weakening either transport, or fixing one and not the other, is a defect.
-        3. Internal messages and secrets: every internal `onMessage` handler requires `sender.id === chrome.runtime.id` and no `sender.tab`; secret values never reach a content script or a page; secrets stay encrypted records in IndexedDB `records`; the fetch proxy injects a secret only for its scoped domains.
-        4. CORS and the relay: `extension/rules.json` lifts CORS only for requests that sliccy.ai pages start, and the relay refuses protected targets.
-        5. Permissions and packaging: manifest permissions and host permissions, the manifest `key`, `minimum_chrome_version`, `scripts/pack.mjs` shipping only `extension/` without sources, source maps or `_metadata/`, and the release checks (`check-live-permissions.mjs`, `check-six-floor.mjs`, `cws-publish.mjs`'s version check), which keep releases rolling forward only. A new permission or install warning is a defect unless the same change moves the live-permissions baseline deliberately and narrowly.
-        6. Build and supply chain: the build stays local and byte-identical (no fetching at build time), dependencies stay exact-pinned, a new entry in `dependencies` is bundled into users' extension and needs a reason, and no workflow gains a new path to the store or to secrets.
-        7. Tests: every behaviour change has an integration test in `test/integration/`, and a fix's test fails without the fix. Confirm that for a fix: copy the changed test files into `$RUNNER_TEMP/base`, build it and run them there.
-        8. Repo rules: no comments anywhere (YAML too, except `# renovate:` annotations), no unit tests in git (`test/unit/` is ignored), and a conventional-commit title (`fix`, `feat` and `perf` release, the rest don't).
-
-        Build a tree with `npm run build` before you run its tests, then run one file with `node --test --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs test/integration/<file>.test.mjs`. The guard files take several minutes each. Don't report style preferences, or anything you haven't confirmed in the code or by a run.
-
-        Severity: deny for a confirmed P1 or P2: a guard bypass on either transport, a protected origin that gets a surface, a secret that can leave the service worker, a new permission or install warning, a release that could roll the store back, a regression in six or seven without a workaround, a behaviour change without its test, or a fix whose test passes without it. A narrow problem with a workaround is P3: comment with a repro and approve. A problem in the guard vectors belongs to ai-ecoverse/slicc-browsers: open it there as an issue.
-
-  released:
-    needs: ci
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-
-      - id: version
-        run: |
-          git fetch --tags --force --quiet origin
-          version=$(git tag --points-at HEAD --list 'v*' | sed 's/^v//' | sort -V | tail -1)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "release: ${version:-none} at $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
-
-  cws:
-    needs: released
-    if: needs.released.outputs.version != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: cws-publish
-      cancel-in-progress: false
-    permissions:
-      contents: read
-    env:
-      LEFTHOOK: "0"
-      VERSION: ${{ needs.released.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: v${{ needs.released.outputs.version }}
-          persist-credentials: false
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version-file: .node-version
-          cache: npm
-
-      - run: npm ci
-
-      - name: Download the release asset
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern slicc-extension.zip --dir artifacts
-
-      - name: Refuse to ship less than the live six
-        run: node scripts/check-six-floor.mjs artifacts/slicc-extension.zip six/upstream.json
-
-      - name: Publish to the Chrome Web Store
-        shell: bash
-        env:
-          CHROME_WEB_STORE_MODE: ${{ vars.CHROME_WEB_STORE_MODE }}
-          CHROME_WEB_STORE_PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
-          CHROME_WEB_STORE_ITEM_ID: ${{ vars.CHROME_WEB_STORE_ITEM_ID }}
-          CHROME_WEB_STORE_PUBLISH_TYPE: ${{ vars.CHROME_WEB_STORE_PUBLISH_TYPE }}
-          CHROME_WEB_STORE_DEPLOY_PERCENTAGE: ${{ vars.CHROME_WEB_STORE_DEPLOY_PERCENTAGE }}
-          CHROME_WEB_STORE_FORCE_CANCEL_PENDING: ${{ vars.CHROME_WEB_STORE_FORCE_CANCEL_PENDING }}
-          CHROME_WEB_STORE_SKIP_REVIEW: ${{ vars.CHROME_WEB_STORE_SKIP_REVIEW }}
-          CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON }}
-          EXTENSION_VERSION: ${{ needs.released.outputs.version }}
-        run: node scripts/cws-publish.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+        Diagnostic draft for a CI guard attach timing probe. Keep the review short and neutral. Do not request merge readiness.

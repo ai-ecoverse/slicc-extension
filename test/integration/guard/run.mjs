@@ -15,9 +15,11 @@ import { certificate } from '../servers.mjs';
 import {
   capabilities,
   carrier,
+  diagLine,
   entries,
   report,
   send,
+  shortWho,
   strict,
   targets,
   until,
@@ -33,6 +35,7 @@ const set = JSON.parse(
 const parallel = Number(process.env.GUARD_PARALLEL ?? 4);
 const sha =
   process.env.GUARD_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+const vaultReps = new Map();
 const hosts = [
   'seven.sliccy.ai',
   'www.sliccy.ai',
@@ -197,7 +200,7 @@ async function browser(extra = []) {
     waitEvent: (predicate, ms = 10000) => waitEvent(tapped, predicate, ms),
   };
 
-  async function guarded(transport) {
+  async function guarded(transport, diag = {}) {
     const entry = entries[transport];
     const url = `${entry.origin}${entry.path}`;
     const { targetId } = await send(cdp, 'Target.createTarget', { url: 'about:blank' });
@@ -266,14 +269,41 @@ async function browser(extra = []) {
           );
         if (method.startsWith('Input.') && session !== undefined)
           await call(['Page.bringToFront', {}, session]);
+        const started = Date.now();
         const answer = await call([method, local, ...(session === undefined ? [] : [session])]);
-        if (answer.ok) return asGiven(answer.result);
-        const error = new Error(answer.message);
-        error.cdp = {
-          message: answer.message,
-          ...(answer.code === undefined ? {} : { code: answer.code }),
-        };
-        throw error;
+        const ms = Date.now() - started;
+        const who = shortWho(local, session);
+        if (!answer.ok) {
+          diagLine({
+            transport,
+            variant: diag.variant,
+            rowId: diag.rowId,
+            rep: diag.rep,
+            method,
+            who,
+            ms,
+            outcome: String(answer.message ?? 'error').replace(/\s+/g, ' '),
+          });
+          const error = new Error(answer.message);
+          error.cdp = {
+            message: answer.message,
+            ...(answer.code === undefined ? {} : { code: answer.code }),
+          };
+          throw error;
+        }
+        if (ms > 1500) {
+          diagLine({
+            transport,
+            variant: diag.variant,
+            rowId: diag.rowId,
+            rep: diag.rep,
+            method,
+            who,
+            ms,
+            outcome: 'ok',
+          });
+        }
+        return asGiven(answer.result);
       },
       waitEvent: (predicate, ms = 10000) => waitEvent(events, predicate, ms),
       inboundDelay: inboundDelay({
@@ -318,7 +348,18 @@ async function clients(transport, metadata) {
   const fresh = metadata.leg !== 'guarded' && cachesAuth(metadata.vector);
   const own = await pooled(slot, fresh, shared);
   if (metadata.leg === 'guarded') await live[slot]?.();
-  const made = await own.guarded(transport);
+  const rowId = metadata.vector?.id ?? '?';
+  const variant = metadata.variant ?? '?';
+  const target = metadata.target ?? '?';
+  let rep = '?';
+  if (!metadata.leg && rowId === 'C10.cookie-plant' && target === 'vault') {
+    const key = `${transport}:${variant}`;
+    rep = (vaultReps.get(key) ?? 0) + 1;
+    vaultReps.set(key, rep);
+  } else if (rowId === 'C10.cookie-plant' && target === 'vault') {
+    rep = vaultReps.get(`${transport}:${variant}`) ?? '?';
+  }
+  const made = await own.guarded(transport, { variant, rowId, rep });
   live[slot] = made.close;
   return { client: made.client, unguarded: own.observer, close: made.close };
 }
@@ -335,7 +376,7 @@ export async function secondClient(transport, leg) {
   }
 }
 
-async function sweep(transport, variant) {
+async function sweep(transport, variant, catalog = set) {
   const started = Date.now();
   let done = 0;
   const tally = {};
@@ -359,8 +400,17 @@ async function sweep(transport, variant) {
       );
     },
   };
-  const { results } = await run(set, options);
+  const { results } = await run(catalog, options);
   return { results, tally, seconds: Math.round((Date.now() - started) / 1000) };
+}
+
+function vaultCatalog(reps) {
+  const vector = set.vectors.find((row) => row.id === 'C10.cookie-plant');
+  if (!vector) throw new Error('C10.cookie-plant missing from guard-vectors');
+  return {
+    ...set,
+    vectors: Array.from({ length: reps }, () => ({ ...vector, targets: ['vault'] })),
+  };
 }
 
 export async function runGuard(transport, variant) {
@@ -392,4 +442,49 @@ export async function runGuard(transport, variant) {
   );
   assert.deepEqual(problems, [], summary.line);
   assert.match(summary.line, /^GUARD-PASS slicc-extension@/);
+}
+
+export async function runVaultDiag(transport, variant, reps = 20) {
+  vaultReps.set(`${transport}:${variant}`, 0);
+  await setUp();
+  let swept;
+  try {
+    swept = await sweep(transport, variant, vaultCatalog(reps));
+  } finally {
+    await tearDown();
+  }
+  const { results, tally, seconds } = swept;
+  const summary = report(vaultCatalog(reps), results, sha, transport);
+  const out = new URL('../../../artifacts/guard/', import.meta.url);
+  await mkdir(out, { recursive: true });
+  await writeFile(
+    new URL(`vault-diag-${transport}-${variant}.json`, out),
+    `${JSON.stringify(
+      {
+        transport,
+        variants: [variant],
+        sha,
+        seconds,
+        reps,
+        carriers: tally,
+        incomplete: summary.incomplete,
+        failed: summary.failed,
+        passed: summary.passed,
+        results: results.map((row) => ({
+          id: row.id,
+          target: row.target,
+          variant: row.variant,
+          legs: `${row.control}/${row.guarded}/${row.live}`,
+          why: row.why,
+          notes: row.notes,
+          errors: row.errors,
+        })),
+      },
+      null,
+      2
+    )}\n`
+  );
+  console.log(
+    `vault-diag ${transport} ${variant} reps=${reps} passed=${summary.passed} incomplete=${summary.incomplete.length} failed=${summary.failed.length} seconds=${seconds}`
+  );
 }

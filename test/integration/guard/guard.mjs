@@ -3,6 +3,29 @@ import { summary } from '@ai-ecoverse/slicc-browsers/guard-runner';
 
 export const sendMs = 40000;
 
+export function shortWho(params, session) {
+  const id = params?.targetId ?? session;
+  if (id == null || id === '') return '?';
+  const text = String(id);
+  return text.length <= 12 ? text : text.slice(0, 8);
+}
+
+export function diagLine({ transport, variant, rowId, rep, method, who, ms, outcome }) {
+  console.log(
+    [
+      'diag',
+      transport ?? '?',
+      variant ?? '?',
+      rowId ?? '?',
+      rep ?? '?',
+      method ?? '?',
+      who ?? '?',
+      ms ?? '?',
+      outcome ?? '?',
+    ].join(' ')
+  );
+}
+
 export function settled(promise, ms, what) {
   let done = false;
   const work = Promise.resolve(promise).finally(() => {
