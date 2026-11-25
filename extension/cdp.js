@@ -73,6 +73,7 @@ import {
   strictGuard,
   stripProtectedCookies,
   treeNamesProtected,
+  UNANSWERED,
   UNSEEN,
   UNSEEN_CONTEXT,
   UNSETTLED,
@@ -394,12 +395,21 @@ async function activate(api, tabId) {
   }
 }
 
+class Late extends Error {}
+
 function bounded(promise, ms, label) {
   let timer;
   const late = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label}: no answer in ${ms} ms`)), ms);
+    timer = setTimeout(() => reject(new Late(`${label}: no answer in ${ms} ms`)), ms);
   });
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+function frameTree(send) {
+  return bounded(send('Page.getFrameTree', {}), 5000, 'frames').catch((error) => {
+    if (error instanceof Late) throw new Error(UNANSWERED);
+    return undefined;
+  });
 }
 
 function plainContinue(params) {
@@ -960,12 +970,9 @@ class Connection {
   }
 
   async inventory(tabId, tab) {
-    let tree;
-    try {
-      tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
-    } catch {
-      return undefined;
-    }
+    const read = (method, params) => this.send(tabId, method, params);
+    let tree = await frameTree(read);
+    if (!tree) return undefined;
     let main = tree?.frameTree?.frame;
     tab.documents.remember(tree?.frameTree);
     if (!main || typeof main.id !== 'string' || main.id === '') return undefined;
@@ -977,11 +984,8 @@ class Connection {
       url.startsWith('about:');
     if (unsettled) {
       if (await this.inheritedProtected(tabId, main)) return undefined;
-      try {
-        tree = await bounded(this.send(tabId, 'Page.getFrameTree', {}), 5000, 'frames');
-      } catch {
-        return undefined;
-      }
+      tree = await frameTree(read);
+      if (!tree) return undefined;
       main = tree?.frameTree?.frame;
       tab.documents.remember(tree?.frameTree);
       if (!main || typeof main.id !== 'string' || main.id === '') return undefined;
@@ -1191,7 +1195,13 @@ class Connection {
         () => true,
         () => false
       );
-      const judged = await this.inventory(tabId, tab);
+      let judged;
+      try {
+        judged = await this.inventory(tabId, tab);
+      } catch (error) {
+        await this.abortAttach(tabId);
+        throw error;
+      }
       const unwatched = !judged ? protectedRules.refusal : await this.watchRuntime(tabId);
       if (unwatched) {
         await this.abortAttach(tabId);
@@ -1206,7 +1216,13 @@ class Connection {
 
   async announceAttach(tabId, targetId, created, judged) {
     let tab = this.tabState(tabId);
-    const stable = tab ? await this.stabilizeInventoriedRoot(tabId, tab, judged) : undefined;
+    let stable;
+    try {
+      stable = tab ? await this.stabilizeInventoriedRoot(tabId, tab, judged) : undefined;
+    } catch (error) {
+      if (created) await this.abortAttach(tabId);
+      throw error;
+    }
     if (!tab || !stable) {
       if (created) await this.abortAttach(tabId);
       refusal();

@@ -1754,6 +1754,8 @@ export function scopedBinding(params) {
 
 export const UNWATCHED =
   "slicc: refused: the guard couldn't start watching this tab's execution contexts, so it doesn't attach";
+export const UNANSWERED =
+  "slicc: refused: this tab's page isn't answering, so the guard couldn't check its frames; a dialog may be waiting in the tab";
 
 const SEALED_DOMAINS = [
   'DOM.',
