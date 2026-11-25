@@ -26,7 +26,7 @@
     "test:six": "vitest run"
   },
   "devDependencies": {
-    "@ai-ecoverse/slicc-browsers": "1.37.0",
+    "@ai-ecoverse/slicc-browsers": "1.38.0",
     "@ai-ecoverse/slicc-cdp": "2.1.25",
     "@ai-ecoverse/slicc-shared-web": "2.17.0",
     "@biomejs/biome": "2.6.8",
