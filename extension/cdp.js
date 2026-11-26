@@ -2121,6 +2121,13 @@ class Connection {
     return guard.url(origin);
   }
 
+  contextProtected(ctx, origin) {
+    if (ctx?.auxData?.isDefault !== true || !/^about:/i.test(origin)) {
+      return this.protectedOrigin(origin);
+    }
+    return guard.target({ url: 'about:blank', contextOrigin: origin });
+  }
+
   isMain(tab, frameId) {
     return !tab.mainFrameId || !frameId || frameId === tab.mainFrameId;
   }
@@ -2621,14 +2628,14 @@ class Connection {
   watchContext(tabId, tab, ctx) {
     tab.documents.context(ctx);
     const frameId = textOf(ctx.auxData?.frameId);
-    const isProtected = this.protectedOrigin(textOf(ctx.origin));
+    const isProtected = this.contextProtected(ctx, textOf(ctx.origin));
     if (isProtected && ctx.auxData?.isDefault && frameId && frameId === tab.mainFrameId) {
       this.release(tabId);
       return true;
     }
     const state = this.ancestorState(tab, frameId);
     const kind = tab.worlds.hideable(ctx, tab.mainFrameId, (origin) =>
-      this.protectedOrigin(origin)
+      this.contextProtected(ctx, origin)
     );
     if (
       ctx.auxData?.isDefault !== false &&

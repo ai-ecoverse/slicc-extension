@@ -50,6 +50,7 @@ jobs:
         test/integration/content-check-cost.test.mjs
         test/integration/cors.test.mjs
         test/integration/cws-verify.test.mjs
+        test/integration/default-context-origin.test.mjs
         test/integration/document-command-controls.test.mjs
         test/integration/error-page-seal.test.mjs
         test/integration/extension-frame.test.mjs
