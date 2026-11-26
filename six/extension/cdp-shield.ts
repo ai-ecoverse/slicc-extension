@@ -600,6 +600,38 @@ function refuse(reason: string): never {
   throw new Error(reason.startsWith('slicc: refused: ') ? reason : `slicc: refused: ${reason}`);
 }
 
+function diagClass(url: unknown): string {
+  if (typeof url !== 'string') return 'n';
+  if (url === '') return 'e';
+  if (url === 'about:blank') return 'ab';
+  if (url.startsWith('about:')) return 'a';
+  if (url.startsWith('https:')) return 's';
+  if (url.startsWith('http:')) return 'h';
+  if (url.startsWith('chrome-error:')) return 'ce';
+  return 'o';
+}
+
+function diagError(error: unknown): string {
+  const text = String(error instanceof Error ? error.message : error);
+  if (/not attached/i.test(text)) return 'na';
+  if (/navigated or closed/i.test(text)) return 'nc';
+  if (/no tab/i.test(text)) return 'nt';
+  if (/cannot access/i.test(text)) return 'ca';
+  if (/detached|target closed/i.test(text)) return 'td';
+  if (text.startsWith('slicc: refused: ')) return 'sr';
+  return `x${text.length}`;
+}
+
+function diagWithin<T>(work: Promise<T>, ms = 300): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    work.catch(() => undefined),
+    new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 export function webSocketAsHttp(url: string): string {
   const lower = url.toLowerCase();
   if (lower.startsWith('wss:')) return `https:${url.slice(4)}`;
@@ -1888,6 +1920,9 @@ export class TabShield {
   private epoch = 0;
   private content: ContentTree | undefined;
   private readonly wake: Wake;
+  private readonly diagAt = Date.now();
+  private diagTab: ChromeTab | undefined;
+  private diagLoader = '';
 
   constructor(
     private readonly send: Send,
@@ -1979,6 +2014,7 @@ export class TabShield {
     }
     const loaderId = str(mainFrame['loaderId']);
     if (!loaderId) refuse(PROTECTED_RULES.refusal);
+    this.diagLoader = loaderId;
     if (!(await this.errorRootAllowed(mainFrame))) refuse(PROTECTED_RULES.refusal);
     this.mainFrameId = main;
     this.rootUnreachable = str(mainFrame['unreachableUrl']) ?? '';
@@ -2540,7 +2576,50 @@ export class TabShield {
       refuse(PROTECTED_RULES.refusal);
     }
     if (!tab) refuse(PROTECTED_RULES.refusal);
+    this.diagTab = tab;
     return tab;
+  }
+
+  private async unsettled(site: string, seen: Record<string, string> = {}): Promise<never> {
+    const ms = Date.now() - this.diagAt;
+    const tab = this.diagTab;
+    const parts = [
+      `d:${site}`,
+      `st:${(tab?.status ?? 'u').slice(0, 1)}`,
+      `tab:${diagClass(tab?.url)}`,
+      `pend:${tab?.pendingUrl && tab.pendingUrl !== tab.url ? 1 : 0}`,
+    ];
+    if (tab?.pendingUrl) parts.push(`pc:${diagClass(tab.pendingUrl)}`);
+    for (const [key, value] of Object.entries(seen)) parts.push(`${key}:${value}`);
+    const [now, tree, history] = await Promise.all([
+      diagWithin(this.readTab()),
+      diagWithin(this.send('Page.getFrameTree', {})),
+      diagWithin(this.send('Page.getNavigationHistory', {})),
+    ]);
+    parts.push(
+      `nst:${(now?.status ?? 'u').slice(0, 1)}`,
+      `nt:${diagClass(now?.url)}`,
+      `np:${now?.pendingUrl && now.pendingUrl !== now.url ? 1 : 0}`
+    );
+    const root = tree ? frameIn(tree['frameTree'], undefined) : undefined;
+    parts.push(
+      root ? `tree:${diagClass(root['url'])}-${root['url'] === tab?.url ? 'm' : 'x'}` : 'tree:none',
+      `ld:${!root ? 'n' : root['loaderId'] === this.diagLoader ? 'm' : 'x'}`
+    );
+    const entries = Array.isArray(history?.['entries']) ? history['entries'] : [];
+    const index = history?.['currentIndex'];
+    const entry = typeof index === 'number' ? entries[index] : undefined;
+    parts.push(
+      `nh:${diagClass(isObj(entry) ? entry['url'] : undefined)}`,
+      `ni:${typeof index === 'number' ? index : 'n'}/${entries.length}`,
+      `ep:${this.epoch}`,
+      `ms:${ms}`,
+      `fm:${diagClass(this.frames.get(this.mainFrameId)?.[0])}`,
+      `pf:${this.pendingFrames.size}`,
+      `sf:${this.startedFrames.size}`,
+      `po:${this.pageObserved ? 1 : 0}`
+    );
+    refuse(`${UNSETTLED_REFUSAL} [${parts.join(';')}]`);
   }
 
   private async openerState(
@@ -2603,15 +2682,18 @@ export class TabShield {
     onRefused?: (url: string) => void,
     opts: { rejectAbout?: boolean } = {}
   ): Promise<void> {
-    const history = await this.send('Page.getNavigationHistory', {}).catch(() =>
-      refuse(UNSETTLED_REFUSAL)
+    const history = await this.send('Page.getNavigationHistory', {}).catch((error) =>
+      this.unsettled('h1', { e: diagError(error) })
     );
     const entries = Array.isArray(history['entries']) ? history['entries'] : [];
     const index = history['currentIndex'];
     const entry = typeof index === 'number' ? entries[index] : undefined;
     if (!isObj(entry) || typeof entry['url'] !== 'string' || !entry['url'])
-      refuse(UNSETTLED_REFUSAL);
-    if (opts.rejectAbout && entry['url'].startsWith('about:')) refuse(UNSETTLED_REFUSAL);
+      return this.unsettled('h2', {
+        hu: diagClass(isObj(entry) ? entry['url'] : undefined),
+        hi: `${typeof index === 'number' ? index : 'n'}/${entries.length}`,
+      });
+    if (opts.rejectAbout && entry['url'].startsWith('about:')) return this.unsettled('h3');
     if (urlProtected(entry['url'])) {
       onRefused?.(entry['url']);
       refuse(PROTECTED_RULES.refusal);
@@ -2690,13 +2772,14 @@ export class TabShield {
   }
 
   private async contentTree(): Promise<ContentTree> {
-    const tree = await shieldProbe(this.send('Page.getFrameTree', {})).catch(() =>
-      refuse(UNSETTLED_REFUSAL)
+    const tree = await shieldProbe(this.send('Page.getFrameTree', {})).catch((error) =>
+      this.unsettled('t1', { e: diagError(error) })
     );
     const root = frameIn(tree['frameTree'], undefined);
     const url = str(root?.['url']);
     const origin = str(root?.['securityOrigin']);
-    if (!root || !str(root['id']) || !url || origin === undefined) refuse(UNSETTLED_REFUSAL);
+    if (!root || !str(root['id']) || !url || origin === undefined)
+      return this.unsettled('t2', { ru: diagClass(root?.['url']) });
     return {
       frameTree: tree['frameTree'],
       sealed:

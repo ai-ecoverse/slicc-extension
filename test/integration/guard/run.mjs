@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, createPublicKey } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixtureServer } from '@ai-ecoverse/slicc-browsers/fixture';
@@ -392,4 +392,99 @@ export async function runGuard(transport, variant) {
   );
   assert.deepEqual(problems, [], summary.line);
   assert.match(summary.line, /^GUARD-PASS slicc-extension@/);
+}
+
+export async function repeatRows(transport, variant, name, count, budgetMs) {
+  await setUp();
+  const vector = set.vectors.find((item) => item.id === 'C10.cookie-plant');
+  const out = new URL('../../../artifacts/guard/', import.meta.url);
+  await mkdir(out, { recursive: true });
+  const file = new URL(`reps-${name}.jsonl`, out);
+  const stop = Date.now() + budgetMs;
+  let next = 0;
+  let done = 0;
+  const lane = async (slot) => {
+    for (;;) {
+      const n = next++;
+      if (n >= count || Date.now() > stop) return;
+      const target = vector.targets[n % vector.targets.length];
+      const one = { ...set, vectors: [{ ...vector, targets: [target] }] };
+      const started = Date.now();
+      const seen = { counts: {}, tags: [] };
+      const factory = async (metadata) => {
+        const made = await clients(transport, { ...metadata, slot });
+        const inner = made.client;
+        let attachedAt = 0;
+        let last = '';
+        const send = async (method, params, session) => {
+          const at = Date.now();
+          const prev = last;
+          last = method;
+          try {
+            const result = await inner.send(method, params, session);
+            if (method === 'Target.attachToTarget') attachedAt = Date.now();
+            return result;
+          } catch (error) {
+            const message = String(error?.message ?? error).replace(
+              /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*/gi,
+              '<url>'
+            );
+            if (message.includes('slicc: refused')) {
+              const key = `${metadata.leg} ${method} ${message.replace(/ \[d:[^\]]*\]/, '').slice(0, 100)}`;
+              seen.counts[key] = (seen.counts[key] ?? 0) + 1;
+              if (/not settled|\[d:/.test(message))
+                seen.tags.push({
+                  leg: metadata.leg,
+                  method,
+                  prev,
+                  message,
+                  sinceAttach: attachedAt ? at - attachedAt : null,
+                  ms: Date.now() - at,
+                  t: at - started,
+                });
+            }
+            throw error;
+          }
+        };
+        return { ...made, client: { ...inner, send } };
+      };
+      let row;
+      try {
+        ({
+          results: [row],
+        } = await run(one, {
+          clientFactory: factory,
+          targets: targets(transport),
+          capabilities: capabilities(transport),
+          extensionFrameId: fixtureId,
+          variant: [variant],
+          fixture,
+          rowTimeoutMs: 180000,
+          parallel: 1,
+        }));
+      } catch (error) {
+        row = { error: String(error?.message ?? error) };
+      }
+      const ended = Date.now();
+      done += 1;
+      const notes = (Array.isArray(row?.notes) ? row.notes : row?.notes ? [row.notes] : []).map(
+        (item) => (typeof item === 'string' ? item : JSON.stringify(item))
+      );
+      const marked = notes.filter((item) => /refused|cookie-plant\.attach|\[d:/.test(item));
+      const verdict = `${row?.control}/${row?.guarded}/${row?.live}`;
+      await appendFile(
+        file,
+        `${JSON.stringify({ name, n, slot, target, variant, started, ended, verdict, why: row?.why, errors: row?.errors, error: row?.error, marked, seen })}\n`
+      );
+      console.log(
+        `reps ${name} ${done} n=${n} slot=${slot} ${target} ${variant} ${verdict} ${ended - started}ms ${marked.filter((item) => item.includes('cookie-plant.attach')).join(' | ')} ${seen.tags.map((tag) => `${tag.method}<-${tag.prev} ${tag.message}`).join(' | ')}`
+      );
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: parallel }, (_, slot) => lane(slot)));
+  } finally {
+    await tearDown();
+  }
+  console.log(`reps ${name} total ${done}`);
 }
