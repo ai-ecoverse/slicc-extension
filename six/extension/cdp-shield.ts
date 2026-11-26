@@ -27,6 +27,7 @@ import {
   Worlds,
 } from './cdp-worlds.js';
 import {
+  isProtectedAboutOrigin,
   isProtectedCookieDomain,
   isProtectedStorageKey,
   isProtectedTarget,
@@ -3184,7 +3185,10 @@ export class TabShield {
     kind: WorldKind
   ): { kind: WorldKind; blocked: boolean } {
     if (!(aux['isDefault'] !== false && kind === undefined)) return { kind, blocked: false };
-    if (frame) this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
+    const about = isProtectedAboutOrigin(origin);
+    if (frame && about === undefined) {
+      this.frames.set(frame, [...(this.frames.get(frame) ?? []), origin]);
+    }
     const child = frame !== undefined && frame !== this.mainFrameId;
     if (child && unknownFrame({ securityOrigin: origin, url: origin })) {
       this.uncertainFrames.set(frame, true);
@@ -3194,7 +3198,7 @@ export class TabShield {
       if (frame) this.hiddenFrames.set(frame, true);
       return { kind: 'foreign', blocked: false };
     }
-    if (urlProtected(origin)) {
+    if (about ?? urlProtected(origin)) {
       this.block();
       this.sawProtected = true;
       return { kind, blocked: true };

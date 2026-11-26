@@ -3,7 +3,13 @@ import { protectedOrigins } from '@ai-ecoverse/slicc-browsers/protected.mjs';
 
 type Guard = {
   url: (text: string, options?: { readOnly?: boolean }) => boolean;
-  target: (opts: { url: string; previous?: boolean; opener?: string; type?: string }) => boolean;
+  target: (opts: {
+    url: string;
+    previous?: boolean;
+    opener?: string;
+    type?: string;
+    contextOrigin?: string;
+  }) => boolean;
   cookieDomain: (domain: string) => boolean;
   storageKey: (key: string) => boolean;
   unparseable: (text: string) => boolean;
@@ -81,6 +87,11 @@ export function isProtectedTargetType(type: unknown): boolean {
   return (
     typeof type === 'string' && guard.target({ url: 'about:blank', opener: 'unprotected', type })
   );
+}
+
+export function isProtectedAboutOrigin(origin: string): boolean | undefined {
+  if (!/^about:/i.test(origin)) return undefined;
+  return guard.target({ url: 'about:blank', contextOrigin: origin });
 }
 
 export function isProtectedCookieDomain(domain: string): boolean {
