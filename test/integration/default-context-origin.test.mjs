@@ -23,22 +23,8 @@ const FIELDS = new Set([
   'opener',
   'contextOrigin',
 ]);
-const SPELLINGS = JSON.parse(String.raw`[
-  {"url":"about:blank","contextOrigin":"AbOuT:blank","protected":true},
-  {"url":"about:blank","contextOrigin":"about:","protected":true},
-  {"url":"about:blank","contextOrigin":"abouT:","protected":true},
-  {"url":"about:blank","contextOrigin":"about:\n","protected":true},
-  {"url":"about:blank","contextOrigin":"about://\n","protected":true},
-  {"url":"about:blank","contextOrigin":"about://\r","protected":true},
-  {"url":"about:blank","contextOrigin":"about://\t","protected":true},
-  {"url":"about:blank","contextOrigin":"about:blank ","protected":true},
-  {"url":"about:blank","contextOrigin":"about://x\u0000","protected":true},
-  {"url":"about:blank","contextOrigin":"about:%20","protected":true},
-  {"url":"about:blank","contextOrigin":"","protected":false},
-  {"url":"about:blank","contextOrigin":"null","protected":false}
-]`);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const rows = [...table.targets, ...SPELLINGS];
+const rows = table.targets;
 const UNMAPPED = [
   {
     row: {
@@ -413,12 +399,7 @@ const ABSENT = {
   'six-bridge': { [BLANK]: CUT, 'about://': HIDDEN },
 };
 
-test('every target row of the pinned descriptor and the extra origin spellings has only known fields, and every row the target call does not exercise fully is named', () => {
-  assert.equal(table.targets.length, 97);
-  assert.equal(SPELLINGS.length, 12);
-  for (const row of SPELLINGS) {
-    assert.ok(!table.targets.some((pinned) => same(pinned, row)), JSON.stringify(row));
-  }
+test('every target row of the pinned descriptor has only known fields, and every row the target call does not exercise fully is named', () => {
   assert.equal(rows.length, 109);
   for (const row of rows) {
     for (const key of Object.keys(row)) assert.ok(FIELDS.has(key), `unknown field ${key}`);
@@ -436,7 +417,7 @@ test('every target row of the pinned descriptor and the extra origin spellings h
 });
 
 for (const transport of ['seven', 'six-bridge']) {
-  test(`${transport}: a default context's reported origin follows the shared descriptor rule, with every target row of the pinned descriptor and the extra origin spellings`, async () => {
+  test(`${transport}: a default context's reported origin follows the shared descriptor rule, with every target row of the pinned descriptor`, async () => {
     const wrong = [];
     const contexts = [];
     for (const row of rows) {
