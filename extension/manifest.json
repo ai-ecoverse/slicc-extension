@@ -41,7 +41,8 @@
         "https://vault-preview.sliccy.ai/*",
         "https://get.sliccy.ai/*",
         "https://mcpcat.sliccy.ai/*",
-        "https://echo.sliccy.ai/*"
+        "https://echo.sliccy.ai/*",
+        "https://lease-pilot.sliccy.ai/*"
       ],
       "exclude_globs": ["https://vault-*.sliccy.ai/*"],
       "js": ["seven-gate.js", "relay.js"],
@@ -55,7 +56,8 @@
         "https://vault-preview.sliccy.ai/*",
         "https://get.sliccy.ai/*",
         "https://mcpcat.sliccy.ai/*",
-        "https://echo.sliccy.ai/*"
+        "https://echo.sliccy.ai/*",
+        "https://lease-pilot.sliccy.ai/*"
       ],
       "exclude_globs": ["https://vault-*.sliccy.ai/*"],
       "js": ["seven-gate-main.js", "page.js"],

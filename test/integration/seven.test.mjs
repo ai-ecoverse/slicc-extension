@@ -27,6 +27,10 @@ test('the host pattern, excluded labels and prefixes come from the pinned slicc-
   assert.deepEqual(seven.excludedLabelPrefixes, catalog.seven.excludedLabelPrefixes);
   assert.deepEqual(protectedRules, catalog.protectedOrigins);
   assert.ok(seven.excludedLabels.includes('echo'), 'the pinned catalog excludes echo');
+  assert.ok(
+    seven.excludedLabels.includes('lease-pilot'),
+    'the pinned catalog excludes lease-pilot'
+  );
 });
 
 test('every content script carries the catalog excludes and loads a generated gate first', () => {
@@ -97,6 +101,45 @@ test('echo.sliccy.ai gets no extension content script while an allowed label get
   const echo = await scripts(t, 'echo.sliccy.ai');
   assert.equal(echo.main, false, 'page.js must not run on echo.sliccy.ai');
   assert.equal(echo.isolated, 0, 'relay.js must not run on echo.sliccy.ai');
+});
+
+async function lifted(page, url) {
+  return page.evaluate(async (url) => {
+    try {
+      const response = await fetch(url);
+      return `${response.status} ${await response.text()}`;
+    } catch (error) {
+      return error.name;
+    }
+  }, url);
+}
+
+test('lease-pilot.sliccy.ai gets no page API and no lifted CORS while seven.sliccy.ai gets both', async (t) => {
+  const control = await scripts(t, 'seven.sliccy.ai');
+  assert.equal(control.main, true, 'control: page.js runs on seven.sliccy.ai');
+  assert.equal(control.isolated, 1, 'control: relay.js runs on seven.sliccy.ai');
+  assert.equal(
+    await lifted(control.page, 'https://upstream.test/hello?from=seven'),
+    '200 hello from upstream',
+    'control: CORS is lifted for seven.sliccy.ai'
+  );
+  const pilot = await scripts(t, 'lease-pilot.sliccy.ai');
+  assert.equal(pilot.main, false, 'page.js must not run on lease-pilot.sliccy.ai');
+  assert.equal(pilot.isolated, 0, 'relay.js must not run on lease-pilot.sliccy.ai');
+  assert.equal(
+    await pilot.page.evaluate(() => new URL(location.href).origin),
+    'https://lease-pilot.sliccy.ai'
+  );
+  assert.equal(await lifted(pilot.page, 'https://upstream.test/hello?from=pilot'), 'TypeError');
+  const origins = Object.fromEntries(
+    chrome.upstream.seen
+      .filter((s) => s.path === '/hello' && s.search.startsWith('?from='))
+      .map((s) => [s.search, s.headers.origin])
+  );
+  assert.deepEqual(origins, {
+    '?from=seven': 'https://seven.sliccy.ai',
+    '?from=pilot': 'https://lease-pilot.sliccy.ai',
+  });
 });
 
 test('a seven page cannot open, attach to, or navigate to echo.sliccy.ai', async (t) => {
