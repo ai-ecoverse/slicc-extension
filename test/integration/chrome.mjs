@@ -70,9 +70,7 @@ export async function launch({ pinned = false, prepare, args = [] } = {}) {
   const allowedHosts = new Set(['www.sliccy.ai', 'seven.sliccy.ai']);
   function expectsExtension(hostname) {
     if (allowedHosts.has(hostname)) return true;
-    const domain = `.${seven.domain}`;
-    if (!hostname.endsWith(domain)) return false;
-    const label = hostname.slice(0, -domain.length);
+    const label = new RegExp(seven.originHostPattern).exec(hostname)?.[1];
     if (!label) return false;
     const { excludedLabels, excludedLabelPrefixes } = seven;
     if (excludedLabels.includes(label) || excludedLabelPrefixes.some((p) => label.startsWith(p))) {

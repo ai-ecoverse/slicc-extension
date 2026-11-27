@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
+import { seven as generated } from '../../extension/seven.js';
 import { backend } from './fixtures/cdp-675-extension-backend.mjs';
 
 test('a private frame reply arriving after relay disconnect never reaches CDP listeners', async () => {
@@ -10,6 +11,7 @@ test('a private frame reply arriving after relay disconnect never reaches CDP li
   const page = vm.createContext({
     __sliccSeven: {
       domain: 'sliccy.ai',
+      originHostPattern: generated.originHostPattern,
       excludedLabels: [],
       excludedLabelPrefixes: [],
       version: '7.10.1',

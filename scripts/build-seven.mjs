@@ -12,14 +12,26 @@ const require = createRequire(join(root, 'package.json'));
 const catalog = require('@ai-ecoverse/slicc-browsers/catalog.json');
 const version = require('@ai-ecoverse/slicc-browsers/package.json').version;
 
+function groupsOf(pattern) {
+  if (typeof pattern !== 'string') return -1;
+  try {
+    return new RegExp(`${pattern}|`).exec('').length - 1;
+  } catch {
+    return -1;
+  }
+}
+
 export function sevenOf(catalog) {
-  const { sitePattern, excludedLabels, excludedLabelPrefixes } = catalog.seven;
+  const { sitePattern, originHostPattern, excludedLabels, excludedLabelPrefixes } = catalog.seven;
   const site = /^\[\*\.\]([a-z0-9.-]+)$/.exec(sitePattern);
   if (!site) throw new Error(`build-seven: unexpected seven.sitePattern ${sitePattern}`);
   const words = [...excludedLabels, ...excludedLabelPrefixes];
   const bad = words.find((w) => typeof w !== 'string' || !/^[a-z0-9-]+$/.test(w));
   if (bad !== undefined) throw new Error(`build-seven: unexpected label ${JSON.stringify(bad)}`);
-  return { domain: site[1], excludedLabels, excludedLabelPrefixes };
+  if (groupsOf(originHostPattern) !== 1) {
+    throw new Error(`build-seven: unexpected seven.originHostPattern ${originHostPattern}`);
+  }
+  return { domain: site[1], originHostPattern, excludedLabels, excludedLabelPrefixes };
 }
 
 export function excludesOf(seven, sixHosts) {
