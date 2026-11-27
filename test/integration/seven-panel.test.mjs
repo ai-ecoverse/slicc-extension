@@ -78,11 +78,13 @@ function cookie(name, value, expires) {
 
 async function targetOf(url) {
   const deadline = Date.now() + 15000;
+  const loaded = `location.href.startsWith(${JSON.stringify(url)}) && document.readyState === 'complete'`;
   for (;;) {
     const { targetInfos } = await chrome.cdp.send('Target.getTargets');
     const found = targetInfos.find((t) => t.type === 'page' && t.url.startsWith(url));
-    if (found) return found.targetId;
-    if (Date.now() > deadline) throw new Error(`no tab on ${url}`);
+    if (found && (await inTab(found.targetId, loaded).catch(() => false))) return found.targetId;
+    if (Date.now() > deadline)
+      throw new Error(found ? `the tab never loaded ${url}` : `no tab on ${url}`);
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
