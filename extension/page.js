@@ -4,10 +4,8 @@
   delete globalThis.__sliccSeven;
   const _exL = _seven.excludedLabels;
   const _exP = _seven.excludedLabelPrefixes;
-  const _d = `.${_seven.domain}`;
   const h = location.hostname;
-  if (!h.endsWith(_d)) return;
-  const l = h.slice(0, -_d.length);
+  const l = new RegExp(_seven.originHostPattern).exec(h)?.[1];
   if (!l || (!_six.includes(h) && (_exL.includes(l) || _exP.some((p) => l.startsWith(p))))) return;
   const expected = `https://${h}`;
   if (location.origin !== expected || globalThis.origin !== expected) return;

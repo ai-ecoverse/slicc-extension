@@ -326,6 +326,9 @@ test('trusted requires a matching https origin', () => {
   assert.equal(trusted({ id, url, origin: 'null' }, id), false);
   assert.equal(trusted({ id, url }, id), false);
   assert.equal(trusted({ id, url, origin: 'https://other.sliccy.ai' }, id), false);
+  for (const host of ['x.vault.sliccy.ai', 'a.lease-pilot.sliccy.ai', 'a.b.c.sliccy.ai']) {
+    assert.equal(trusted({ id, url: `https://${host}/`, origin: `https://${host}` }, id), false);
+  }
   assert.equal(
     trusted({ id, url: 'http://seven.sliccy.ai/', origin: 'http://seven.sliccy.ai' }, id),
     false

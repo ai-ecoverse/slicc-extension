@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import { seven as generated } from '../../../extension/seven.js';
 import { backend } from './cdp-675-extension-backend.mjs';
 
 function event() {
@@ -28,6 +29,7 @@ export async function frameRelay(host = 'seven.sliccy.ai') {
   const origin = `https://${host}`;
   const seven = {
     domain: 'sliccy.ai',
+    originHostPattern: generated.originHostPattern,
     excludedLabels: ['vault'],
     excludedLabelPrefixes: [],
     version: '7.12.0',

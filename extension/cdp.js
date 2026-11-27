@@ -320,11 +320,10 @@ async function tabBlocked(api, tab) {
 const _sixHosts = ['www.sliccy.ai'];
 const _exL = seven.excludedLabels;
 const _exP = seven.excludedLabelPrefixes;
-const _d = `.${seven.domain}`;
+const _host = new RegExp(seven.originHostPattern);
 
 function allowedHost(hostname) {
-  if (!hostname.endsWith(_d)) return false;
-  const label = hostname.slice(0, -_d.length);
+  const label = _host.exec(hostname)?.[1];
   if (!label) return false;
   if (_sixHosts.includes(hostname)) return true;
   if (_exL.includes(label) || _exP.some((p) => label.startsWith(p))) return false;

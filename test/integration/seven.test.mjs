@@ -20,8 +20,9 @@ before(async () => {
 });
 after(() => chrome?.close());
 
-test('the excluded labels and prefixes come from the pinned slicc-browsers catalog', () => {
+test('the host pattern, excluded labels and prefixes come from the pinned slicc-browsers catalog', () => {
   assert.deepEqual(seven, sevenOf(catalog));
+  assert.equal(seven.originHostPattern, catalog.seven.originHostPattern);
   assert.deepEqual(seven.excludedLabels, catalog.seven.excludedLabels);
   assert.deepEqual(seven.excludedLabelPrefixes, catalog.seven.excludedLabelPrefixes);
   assert.deepEqual(protectedRules, catalog.protectedOrigins);
