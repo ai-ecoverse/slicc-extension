@@ -4,6 +4,7 @@
     "priority": 1,
     "condition": {
       "initiatorDomains": ["sliccy.ai"],
+      "excludedInitiatorDomains": ["lease-pilot.sliccy.ai"],
       "resourceTypes": ["xmlhttprequest"]
     },
     "action": {

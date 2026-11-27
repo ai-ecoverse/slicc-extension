@@ -68,7 +68,7 @@ The secrets options page (`secrets.html`) manages named secrets with per-domain 
 
 At `document_start` on `https://*.sliccy.ai/*` the extension defines a frozen `globalThis.sliccExtension` in the page's own world.
 
-Only a host that matches the catalog's `seven.originHostPattern`, one label under `sliccy.ai`, gets the page API and the CDP port. Hosts whose label is in `seven.excludedLabels` or starts with one of `seven.excludedLabelPrefixes` in the pinned `@ai-ecoverse/slicc-browsers` catalog get no content scripts and no CDP port, except `www.sliccy.ai` for six. `scripts/build-seven.mjs` writes the pattern and those lists into the generated `seven.js`, `seven-gate.js` and `seven-gate-main.js`, the lists into the manifest's `exclude_matches` and `exclude_globs`, and `protected-rules.js`. In CI the build fails if the committed manifest is out of date.
+Only a host that matches the catalog's `seven.originHostPattern`, one label under `sliccy.ai`, gets the page API and the CDP port. Hosts whose label is in `seven.excludedLabels` or starts with one of `seven.excludedLabelPrefixes` in the pinned `@ai-ecoverse/slicc-browsers` catalog get no content scripts and no CDP port, except `www.sliccy.ai` for six. `scripts/build-seven.mjs` writes the pattern and those lists into the generated `seven.js`, `seven-gate.js` and `seven-gate-main.js`, the lists into the manifest's `exclude_matches` and `exclude_globs`, and `protected-rules.js`. For the labels in its `initiatorLabels` allowlist, it also writes them as the rule's `excludedInitiatorDomains` in `extension/rules.json`, so requests those hosts start are not lifted. In CI the build fails if the committed manifest or rules are out of date.
 
 ## PRE-1 origin protection
 

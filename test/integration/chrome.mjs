@@ -28,6 +28,7 @@ export async function launch({ pinned = false, prepare, args = [] } = {}) {
     `MAP vault-feature-x.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP get.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP echo.sliccy.ai 127.0.0.1:${site.port}`,
+    `MAP lease-pilot.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP www.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP other.test 127.0.0.1:${site.port}`,
     `MAP discover.test 127.0.0.1:${site.port}`,

@@ -48,6 +48,50 @@ export function excludesOf(seven, sixHosts) {
   };
 }
 
+export const initiatorLabels = ['lease-pilot'];
+
+export function initiatorExcludesOf(seven, allowed = initiatorLabels) {
+  return seven.excludedLabels
+    .filter((label) => allowed.includes(label))
+    .map((label) => `${label}.${seven.domain}`);
+}
+
+export function rulesOf(rules, seven) {
+  const excluded = initiatorExcludesOf(seven);
+  return rules.map((rule) => {
+    if (!rule.condition.initiatorDomains?.includes(seven.domain)) return rule;
+    const condition = {};
+    for (const [key, value] of Object.entries(rule.condition)) {
+      if (key === 'excludedInitiatorDomains') continue;
+      condition[key] = value;
+      if (key === 'initiatorDomains' && excluded.length > 0) {
+        condition.excludedInitiatorDomains = excluded;
+      }
+    }
+    return { ...rule, condition };
+  });
+}
+
+export function syncRules(path, seven, ci = process.env.CI) {
+  const before = readFileSync(path, 'utf8');
+  const after = execFileSync(
+    join(root, 'node_modules/.bin/biome'),
+    ['format', '--stdin-file-path=extension/rules.json'],
+    {
+      cwd: root,
+      input: JSON.stringify(rulesOf(JSON.parse(before), seven), null, 2),
+      encoding: 'utf8',
+    }
+  );
+  if (after === before) return;
+  if (ci) {
+    throw new Error(
+      `build-seven: extension/rules.json initiator excludes differ from @ai-ecoverse/slicc-browsers@${version}; run npm run build and commit the rules`
+    );
+  }
+  writeFileSync(path, after);
+}
+
 export function sixHostsOf(manifest) {
   return manifest.externally_connectable.matches
     .filter((m) => m.startsWith('https://'))
@@ -80,6 +124,7 @@ function main() {
       `build-seven: extension/manifest.json content_scripts excludes differ from @ai-ecoverse/slicc-browsers@${version}; run npm run build and commit the manifest`
     );
   }
+  syncRules(join(ext, 'rules.json'), seven);
   const data = JSON.stringify(seven);
   writeFileSync(join(ext, 'seven.js'), `export const seven = ${data};\n`);
   for (const gate of ['seven-gate.js', 'seven-gate-main.js']) {
