@@ -13,13 +13,24 @@ function spki(cert) {
     .digest('base64');
 }
 
-export async function launch({ pinned = false, prepare, args = [] } = {}) {
+export async function launch({
+  pinned = false,
+  prepare,
+  args = [],
+  plain = [],
+  plainPorts = [80],
+  hosts = [],
+} = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'slicc-extension-'));
   const tls = await certificate(dir);
   const site = await pages(tls);
   const remote = await upstream(tls);
   const adobe = await ims(tls);
   const rules = [
+    ...plain.flatMap((host) =>
+      plainPorts.map((port) => `MAP ${host}:${port} 127.0.0.1:${site.plainPort}`)
+    ),
+    ...hosts.map((host) => `MAP ${host} 127.0.0.1:${site.port}`),
     `MAP seven.sliccy.ai 127.0.0.1:${site.port}`,
     `MAP sliccy.ai 127.0.0.1:${site.port}`,
     `MAP vault.sliccy.ai 127.0.0.1:${site.port}`,

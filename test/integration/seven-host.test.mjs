@@ -324,7 +324,19 @@ function withLabels(excludedLabels) {
 test('the static rule excludes the allowlisted labels the catalog excludes as initiators', () => {
   assert.deepEqual(initiatorLabels, ['lease-pilot']);
   assert.ok(catalog.seven.excludedLabels.includes('lease-pilot'), 'the pinned catalog');
-  assert.equal(rules.length, 1);
+  assert.equal(rules.length, 3);
+  assert.deepEqual(Object.keys(rules[1].condition), ['urlFilter', 'resourceTypes']);
+  assert.deepEqual(rules[2], {
+    id: 3,
+    priority: 3,
+    condition: {
+      urlFilter: '|http://',
+      requestDomains: ['sliccy.ai'],
+      resourceTypes: ['main_frame', 'sub_frame', 'object'],
+    },
+    action: { type: 'upgradeScheme' },
+  });
+  assert.equal(rulesOf(rules, sevenOf(catalog))[2], rules[2]);
   assert.deepEqual(Object.keys(rules[0].condition), [
     'initiatorDomains',
     'excludedInitiatorDomains',

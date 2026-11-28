@@ -133,6 +133,18 @@ function seven(request, response, pathname, searchParams) {
   return false;
 }
 
+function probes(response, pathname, searchParams) {
+  const to = JSON.stringify(searchParams.get('url') ?? 'https://upstream.test/hello');
+  if (pathname === '/early') {
+    const script = `globalThis.__early = fetch(${to}).then(async (r) => ({ ok: true, status: r.status, text: await r.text() }), (e) => ({ ok: false, name: e.name }));`;
+    return html(
+      response,
+      `<!doctype html><html><head><script>${script}</script><title>early</title></head><body>early</body></html>`
+    );
+  }
+  return false;
+}
+
 const onePixel = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==',
   'base64'
@@ -145,13 +157,14 @@ export async function pages(tls) {
   const frames = await readFile(new URL('page/frames.html', import.meta.url));
   const seen = [];
   const refusedLoads = new Map();
-  const server = await listen(tls, (request, response) => {
+  const handle = (request, response) => {
     const { pathname, searchParams } = new URL(request.url, 'https://vault.sliccy.ai');
     seen.push({
       host: (request.headers.host ?? '').split(':')[0],
       path: pathname,
       search: searchParams.toString(),
     });
+    if (probes(response, pathname, searchParams)) return;
     if (seven(request, response, pathname, searchParams)) return;
     if (pathname === '/page-version')
       return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(version);
@@ -315,7 +328,12 @@ export async function pages(tls) {
         .end();
     }
     if (pathname === '/redirect') {
-      return response.writeHead(302, { location: searchParams.get('to') ?? '/' }).end();
+      return response
+        .writeHead(302, {
+          location: searchParams.get('to') ?? '/',
+          'cache-control': 'no-store',
+        })
+        .end();
     }
     if (pathname === '/marker') {
       const page =
@@ -348,6 +366,17 @@ export async function pages(tls) {
           .end(body);
       setTimeout(send, Math.min(Number(searchParams.get('delay') ?? 0), 10000));
       return;
+    }
+    if (pathname === '/document-frameset') {
+      const src = JSON.stringify(searchParams.get('src') ?? '/');
+      return response
+        .writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        .end(
+          `<!doctype html><html><head><title>frame</title></head><frameset cols="*"><frame src=${src}></frameset></html>`
+        );
     }
     if (pathname === '/frame') {
       const src = JSON.stringify(searchParams.get('src') ?? '/');
@@ -416,9 +445,17 @@ export async function pages(tls) {
     const page = pathname === '/' && searchParams.has('frames') ? '/frames' : pathname;
     const body = named[page] ?? html;
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
-  });
+  };
+  const server = await listen(tls, handle);
+  const plain = await listen(undefined, handle);
   server.upgrade(binaryEcho);
-  return { ...server, seen, refusedLoads };
+  return {
+    ...server,
+    plainPort: plain.port,
+    close: () => Promise.all([server.close(), plain.close()]),
+    seen,
+    refusedLoads,
+  };
 }
 
 function binaryMarker(params) {
@@ -493,7 +530,11 @@ export async function upstream(tls) {
   const routes = {
     '/hello': (response) =>
       response
-        .writeHead(200, { 'content-type': 'text/plain', 'x-upstream': 'exposed' })
+        .writeHead(200, {
+          'content-type': 'text/plain',
+          'x-upstream': 'exposed',
+          'cache-control': 'no-store',
+        })
         .end('hello from upstream'),
     '/vault-popup': (response) =>
       response
