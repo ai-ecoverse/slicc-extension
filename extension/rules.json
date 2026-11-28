@@ -32,5 +32,28 @@
         }
       ]
     }
+  },
+  {
+    "id": 2,
+    "priority": 2,
+    "condition": {
+      "urlFilter": "|http://",
+      "resourceTypes": ["main_frame", "sub_frame"]
+    },
+    "action": {
+      "type": "allowAllRequests"
+    }
+  },
+  {
+    "id": 3,
+    "priority": 3,
+    "condition": {
+      "urlFilter": "|http://",
+      "requestDomains": ["sliccy.ai"],
+      "resourceTypes": ["main_frame", "sub_frame", "object"]
+    },
+    "action": {
+      "type": "upgradeScheme"
+    }
   }
 ]

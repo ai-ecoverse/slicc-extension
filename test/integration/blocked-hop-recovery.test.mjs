@@ -61,7 +61,7 @@ async function fixture() {
   const hits = [];
   const server = createServer((request, response) => {
     hits.push(request.headers.host);
-    const protectedUrl = `http://vault.sliccy.ai:${server.address().port}/blocked-${marker}?q=${marker}#${marker}`;
+    const protectedUrl = `https://vault.sliccy.ai:${server.address().port}/blocked-${marker}?q=${marker}#${marker}`;
     if (request.url === '/redirect')
       return response.writeHead(302, { location: protectedUrl }).end();
     const body =
@@ -74,7 +74,7 @@ async function fixture() {
   const port = server.address().port;
   return {
     url: `http://localhost:${port}`,
-    protectedUrl: `http://vault.sliccy.ai:${port}/blocked-${marker}?q=${marker}#${marker}`,
+    protectedUrl: `https://vault.sliccy.ai:${port}/blocked-${marker}?q=${marker}#${marker}`,
     hits,
     close: () => {
       server.closeAllConnections();
