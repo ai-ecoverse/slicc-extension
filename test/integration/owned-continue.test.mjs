@@ -70,7 +70,7 @@ async function fixture() {
     if (request.url === '/hop')
       return response
         .writeHead(302, {
-          location: `http://vault.sliccy.ai:${server.address().port}/blocked-private-marker?q=private-marker#private-marker`,
+          location: `https://vault.sliccy.ai:${server.address().port}/blocked-private-marker?q=private-marker#private-marker`,
         })
         .end();
     if (request.url === '/auth')
@@ -83,7 +83,7 @@ async function fixture() {
   const port = server.address().port;
   return {
     url: `http://localhost:${port}`,
-    protectedUrl: `http://vault.sliccy.ai:${port}/blocked-private-marker?q=private-marker#private-marker`,
+    protectedUrl: `https://vault.sliccy.ai:${port}/blocked-private-marker?q=private-marker#private-marker`,
     hits,
     close: () => {
       server.closeAllConnections();
